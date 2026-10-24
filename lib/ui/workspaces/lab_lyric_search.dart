@@ -74,6 +74,37 @@ String labNotFoundMessage(String artist, String title) {
       'Corrige Artista o Título y pulsa «Buscar de nuevo».';
 }
 
+/// Líneas de una letra plana para la vista previa, sin marcas `[gmx_...]`.
+List<String> labPlainPreviewLines(String fileText) {
+  return fileText
+      .split('\n')
+      .map((String l) => l.trimRight())
+      .where(
+        (String l) => !RegExp(r'^\[gmx_[a-z]+:\s*\d+\]$').hasMatch(l.trim()),
+      )
+      .toList();
+}
+
+/// `mm:ss.cc` para mostrar los tiempos de una letra sincronizada.
+String labStamp(int ms) {
+  final int m = ms ~/ 60000;
+  final int s = (ms % 60000) ~/ 1000;
+  final int cs = (ms % 1000) ~/ 10;
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '[${two(m)}:${two(s)}.${two(cs)}]';
+}
+
+/// Encabezado de la vista previa del resultado elegido.
+String labPreviewHeader(LyricCandidate hit, String fileText) {
+  final int n = hit.synced
+      ? parseLyricStampLines(fileText).length
+      : labPlainPreviewLines(
+          fileText,
+        ).where((String l) => l.trim().isNotEmpty).length;
+  return 'Vista previa · ${hit.artist} — ${hit.title} · '
+      '${hit.synced ? 'SINCRONIZADA' : 'PLANA'} · $n líneas';
+}
+
 /// Lo que el Laboratorio escribe al cerrar la búsqueda.
 class LyricSearchResult {
   final String text;
@@ -120,7 +151,9 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
   List<LyricCandidate> _rows = const [];
   bool _loading = true;
   bool _unavailable = false;
-  int _selected = 0;
+
+  /// -1 = ningún resultado elegido: Aplicar queda apagado.
+  int _selected = -1;
   String _preview = '';
   int _posMs = 0;
   bool _playing = false;
@@ -170,8 +203,8 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
       _rows = got.rows;
       _unavailable = got.unavailable;
       _loading = false;
-      _selected = 0;
-      _preview = got.rows.isEmpty ? '' : got.rows.first.fileText;
+      _selected = -1;
+      _preview = '';
     });
   }
 
@@ -221,9 +254,9 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
   @override
   Widget build(BuildContext context) {
     final bool mobile = MediaQuery.sizeOf(context).width < 700;
-    final LyricCandidate? hit = _rows.isEmpty
-        ? null
-        : _rows[_selected.clamp(0, _rows.length - 1)];
+    final LyricCandidate? hit = (_selected >= 0 && _selected < _rows.length)
+        ? _rows[_selected]
+        : null;
     return AlertDialog(
       backgroundColor: const Color(0xFF121212),
       shape: RoundedRectangleBorder(
@@ -317,15 +350,35 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
             ),
             if (hit != null && !_loading) ...[
               const SizedBox(height: 6),
-              SizedBox(height: 88, child: _karaoke()),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  labPreviewHeader(hit, _preview),
+                  style: const TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Container(
+                height: mobile ? 220 : 240,
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                color: Colors.black,
+                child: _karaoke(),
+              ),
               Wrap(
                 spacing: 6,
                 children: [
-                  _chip('−1 s', () => _shift(-1000)),
-                  _chip('−100 ms', () => _shift(-100)),
-                  _chip('+100 ms', () => _shift(100)),
-                  _chip('+1 s', () => _shift(1000)),
-                  _chip('auto-alinear primera línea', _align),
+                  if (hit.synced) ...[
+                    _chip('−1 s', () => _shift(-1000)),
+                    _chip('−100 ms', () => _shift(-100)),
+                    _chip('+100 ms', () => _shift(100)),
+                    _chip('+1 s', () => _shift(1000)),
+                    _chip('auto-alinear primera línea', _align),
+                  ],
                   _chip(_playing ? 'Pausa' : 'Oír', _toggle),
                 ],
               ),
@@ -349,17 +402,20 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
               style: TextStyle(color: Colors.orangeAccent),
             ),
           ),
-        if (hit != null)
+        if (_rows.isNotEmpty)
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.orangeAccent,
               foregroundColor: Colors.black,
             ),
-            onPressed: () => Navigator.pop(
-              context,
-              LyricSearchResult(text: _preview, lrclibId: hit.lrclibId),
-            ),
-            child: const Text('Aplicar'),
+            // Solo con un resultado elegido; aplica ESE (con sus ajustes).
+            onPressed: (hit == null || _loading || _preview.trim().isEmpty)
+                ? null
+                : () => Navigator.pop(
+                    context,
+                    LyricSearchResult(text: _preview, lrclibId: hit.lrclibId),
+                  ),
+            child: Text(hit == null ? 'Elige un resultado' : 'Aplicar'),
           ),
       ],
     );
@@ -400,11 +456,21 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
     final List<LyricLine> lines = _lines;
     final int active = _active;
     if (lines.isEmpty) {
-      return const Align(
-        alignment: Alignment.centerLeft,
-        child: Text(
-          'Plana, sin tiempos.',
+      // Plana: se ve la letra completa (sin la marca interna) para revisarla.
+      final List<String> plain = labPlainPreviewLines(_preview);
+      if (plain.isEmpty) {
+        return const Text(
+          'Este resultado no trae texto.',
           style: TextStyle(color: Colors.white38),
+        );
+      }
+      return Scrollbar(
+        child: ListView.builder(
+          itemCount: plain.length,
+          itemBuilder: (BuildContext ctx, int i) => Text(
+            plain[i],
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
         ),
       );
     }
@@ -413,7 +479,7 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
       itemBuilder: (BuildContext ctx, int i) {
         final bool on = i == active;
         return Text(
-          lines[i].text,
+          '${labStamp(lines[i].timestamp.inMilliseconds)}  ${lines[i].text}',
           style: TextStyle(
             color: on ? const Color(0xFF00FFFF) : Colors.white54,
             fontSize: on ? 16 : 13,

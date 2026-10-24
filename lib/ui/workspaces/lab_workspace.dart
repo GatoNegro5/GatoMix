@@ -31,6 +31,9 @@ class LabWorkspace extends ConsumerStatefulWidget {
 }
 
 /// Valor interno del selector de carpetas que significa "Todas".
+/// Alto mínimo del panel derecho del LAB (arsenal + editor de .lrc).
+const double kLabRightPanelMinHeight = 600;
+
 const String kLabAllFolders = '\u0000todas';
 
 /// Carpeta de origen (la que contenía el archivo) según el registro del LAB.
@@ -386,7 +389,16 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       result: result,
     );
     notifyLrcChanged(audio);
-    setState(() => _lrcController.text = result.text);
+    // El editor muestra lo que quedó escrito en disco, completo.
+    String written = result.text;
+    try {
+      written = await File(lrcPath).readAsString();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _lrcController.text = written;
+      _lrcController.selection = const TextSelection.collapsed(offset: 0);
+    });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1270,6 +1282,30 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
     final registryValue = _registry[_selectedFileForEdit];
     final bool hasTelemetry = registryValue is Map;
 
+    // En pantallas bajas (celular horizontal) el editor quedaba de 1 línea
+    // y solo se veía `[gmx_plain:1]`: el panel pasa a scroll con alto mínimo.
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints box) {
+        final Widget panel = _buildRightPanelBody(
+          isMobile,
+          hasTelemetry,
+          registryValue,
+        );
+        if (!box.hasBoundedHeight || box.maxHeight >= kLabRightPanelMinHeight) {
+          return panel;
+        }
+        return SingleChildScrollView(
+          child: SizedBox(height: kLabRightPanelMinHeight, child: panel),
+        );
+      },
+    );
+  }
+
+  Widget _buildRightPanelBody(
+    bool isMobile,
+    bool hasTelemetry,
+    dynamic registryValue,
+  ) {
     return Column(
       children: [
         // 🛠️ INYECCIÓN: Tarjeta de Diagnóstico Activa si hay Telemetría DLQ
