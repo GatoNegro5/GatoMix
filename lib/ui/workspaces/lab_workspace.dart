@@ -151,6 +151,8 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   }
 
   void _loadLrcForEdit(String fileName) {
+    // Al cambiar de canción, la búsqueda escrita para la anterior no sirve.
+    if (fileName != _selectedFileForEdit) _searchQueryController.clear();
     try {
       final lrcFileName = fileName.replaceAll(
         RegExp(r'\.(mp3|m4a|webm|wav|flac)$', caseSensitive: false),
@@ -357,13 +359,20 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       durationSec: sec,
     );
     final LyricIdentity id = ids.first;
+    // Artista y título del diálogo: siempre de la canción seleccionada.
+    final LabDialogNames names = labDialogNames(
+      fileName: _selectedFileForEdit!,
+      id3Artist: id3.artist,
+      id3Title: id3.title,
+    );
     if (!mounted) return;
     final LyricSearchResult? result = await showDialog<LyricSearchResult>(
       context: context,
       builder: (BuildContext ctx) => LabLyricSearch(
         audioPath: audio,
-        artist: id.artist,
-        title: id.title,
+        key: ValueKey<String>(audio),
+        artist: names.artist,
+        title: names.title,
         durationSec: sec,
         medley: id.medley,
         fileQuery: cleanTrackFileName(_selectedFileForEdit!).stem,

@@ -7,8 +7,72 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:gatomix/core/lyric_files.dart';
 import 'package:gatomix/core/lyric_match.dart';
+import 'package:gatomix/core/track_name_clean.dart';
 import 'package:gatomix/providers/automix_provider.dart';
 import 'package:gatomix/providers/nlp_provider.dart';
+
+/// Artista y título con los que abre "Buscar letra" en el Laboratorio.
+class LabDialogNames {
+  final String artist;
+  final String title;
+  const LabDialogNames(this.artist, this.title);
+}
+
+/// Separa `Artista - Título` del nombre de archivo, con o sin espacios
+/// alrededor del guion (`Medardo -Casarme No`, `Medardo-La Revancha`).
+LabDialogNames labNamesFromFile(String fileName) {
+  final CleanTrackName clean = cleanTrackFileName(fileName);
+  if (clean.artist.trim().isNotEmpty && clean.title.trim().isNotEmpty) {
+    return LabDialogNames(clean.artist.trim(), clean.title.trim());
+  }
+  var stem = fileName.trim().replaceAll('\\', '/');
+  final int slash = stem.lastIndexOf('/');
+  if (slash >= 0) stem = stem.substring(slash + 1);
+  stem = stem.replaceFirst(
+    RegExp(r'\.(mp3|m4a|webm|wav|flac)$', caseSensitive: false),
+    '',
+  );
+  final int dash = stem.indexOf('-');
+  if (dash > 0 && dash < stem.length - 1) {
+    final String a = stem.substring(0, dash).trim();
+    final String t = stem.substring(dash + 1).trim();
+    if (a.isNotEmpty && t.isNotEmpty) return LabDialogNames(a, t);
+  }
+  final String t = clean.title.trim().isNotEmpty ? clean.title.trim() : stem;
+  return LabDialogNames('', t.trim());
+}
+
+/// ID3 primero (Unknown/Desconocido cuentan como vacío) y el nombre de
+/// archivo rellena lo que falte. Si el título ID3 es de otra canción (no se
+/// parece al nombre del archivo), manda el archivo: es lo que el usuario ve
+/// seleccionado en el Laboratorio.
+LabDialogNames labDialogNames({
+  required String fileName,
+  String id3Artist = '',
+  String id3Title = '',
+}) {
+  final LabDialogNames file = labNamesFromFile(fileName);
+  final String tagArtist = lyricFieldBlank(id3Artist) ? '' : id3Artist.trim();
+  final String tagTitle = lyricFieldBlank(id3Title) ? '' : id3Title.trim();
+  final bool tagIsOtherSong =
+      tagTitle.isNotEmpty &&
+      file.title.isNotEmpty &&
+      lyricTitleScore(tagTitle, file.title) < kLyricTitleMin;
+  if (tagIsOtherSong) return file;
+  return LabDialogNames(
+    tagArtist.isNotEmpty ? tagArtist : file.artist,
+    tagTitle.isNotEmpty ? tagTitle : file.title,
+  );
+}
+
+/// Mensaje cuando LRCLIB no trae nada para lo escrito.
+String labNotFoundMessage(String artist, String title) {
+  final String a = artist.trim();
+  final String t = title.trim();
+  final String who = [a, t].where((String x) => x.isNotEmpty).join(' – ');
+  return 'No se encontró letra${who.isEmpty ? '' : ' para «$who»'}.\n'
+      'Corrige Artista o Título y pulsa «Buscar de nuevo».';
+}
 
 /// Lo que el Laboratorio escribe al cerrar la búsqueda.
 class LyricSearchResult {
@@ -91,14 +155,16 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
       _loading = true;
       _unavailable = false;
     });
-    final got = await ref.read(nlpWorkerProvider).searchManualLyrics(
-      artist: _artist.text.trim(),
-      title: _title.text.trim(),
-      durationSec: widget.durationSec,
-      query: widget.fileQuery,
-      medley: widget.medley,
-      audioPath: widget.audioPath,
-    );
+    final got = await ref
+        .read(nlpWorkerProvider)
+        .searchManualLyrics(
+          artist: _artist.text.trim(),
+          title: _title.text.trim(),
+          durationSec: widget.durationSec,
+          query: widget.fileQuery,
+          medley: widget.medley,
+          audioPath: widget.audioPath,
+        );
     if (!mounted) return;
     setState(() {
       _rows = got.rows;
@@ -168,101 +234,104 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
         '🔎 Buscar letra',
         style: TextStyle(color: Colors.orangeAccent, fontSize: 16),
       ),
+      // Contenido con scroll: con el teclado abierto (celular en horizontal)
+      // los campos siguen visibles y editables, y la lista no queda en 0 px.
+      scrollable: true,
       content: SizedBox(
         width: mobile ? MediaQuery.sizeOf(context).width * 0.92 : 640,
-        height: mobile ? MediaQuery.sizeOf(context).height * 0.72 : 520,
-        child: _loading
-            ? const Center(
-                child: CircularProgressIndicator(color: Colors.orangeAccent),
-              )
-            : Column(
-                children: [
-                  if (_unavailable)
-                    const Padding(
-                      padding: EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        'LRCLIB no disponible',
-                        style: TextStyle(
-                          color: Colors.redAccent,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  Row(
-                    children: [
-                      Expanded(child: _field(_artist, 'Artista')),
-                      const SizedBox(width: 8),
-                      Expanded(child: _field(_title, 'Título')),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: _run,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00FFFF),
-                          foregroundColor: Colors.black,
-                        ),
-                        child: const Text('Buscar de nuevo'),
-                      ),
-                    ],
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_unavailable)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'LRCLIB no disponible',
+                  style: TextStyle(
+                    color: Colors.redAccent,
+                    fontWeight: FontWeight.bold,
                   ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: _rows.isEmpty
-                        ? _empty()
-                        : ListView.builder(
-                            itemCount: _rows.length,
-                            itemBuilder: (BuildContext ctx, int i) {
-                              final LyricCandidate row = _rows[i];
-                              final bool on = i == _selected;
-                              final String band = lyricDeltaBand(row.deltaSec);
-                              final Color durColor = band == 'green'
-                                  ? const Color(0xFF39FF14)
-                                  : band == 'amber'
-                                  ? Colors.orangeAccent
-                                  : Colors.white54;
-                              return ListTile(
-                                selected: on,
-                                selectedTileColor: Colors.white10,
-                                dense: true,
-                                title: Text(
-                                  '${i == 0 ? '★ Recomendada · ' : ''}${row.artist} — ${row.title}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                subtitle: Text(
-                                  '${row.synced ? 'SYNC' : 'PLANA'} · ${row.durationSec}s · ${row.deltaSec}s'
-                                  '${row.doubtful ? ' · ${row.warning}' : ''}',
-                                  style: TextStyle(color: durColor, fontSize: 11),
-                                ),
-                                onTap: () => setState(() {
-                                  _selected = i;
-                                  _preview = row.fileText;
-                                }),
-                              );
-                            },
+                ),
+              ),
+            Row(
+              children: [
+                Expanded(child: _field(_artist, 'Artista')),
+                const SizedBox(width: 8),
+                Expanded(child: _field(_title, 'Título')),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _loading ? null : _run,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00FFFF),
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text('Buscar de nuevo'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: mobile ? 150 : 260,
+              child: _loading
+                  ? const Center(
+                      child: CircularProgressIndicator(
+                        color: Colors.orangeAccent,
+                      ),
+                    )
+                  : _rows.isEmpty
+                  ? _empty()
+                  : ListView.builder(
+                      itemCount: _rows.length,
+                      itemBuilder: (BuildContext ctx, int i) {
+                        final LyricCandidate row = _rows[i];
+                        final bool on = i == _selected;
+                        final String band = lyricDeltaBand(row.deltaSec);
+                        final Color durColor = band == 'green'
+                            ? const Color(0xFF39FF14)
+                            : band == 'amber'
+                            ? Colors.orangeAccent
+                            : Colors.white54;
+                        return ListTile(
+                          selected: on,
+                          selectedTileColor: Colors.white10,
+                          dense: true,
+                          title: Text(
+                            '${i == 0 ? '★ Recomendada · ' : ''}${row.artist} — ${row.title}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                            ),
                           ),
-                  ),
-                  if (hit != null) ...[
-                    const SizedBox(height: 6),
-                    SizedBox(
-                      height: 88,
-                      child: _karaoke(),
+                          subtitle: Text(
+                            '${row.synced ? 'SYNC' : 'PLANA'} · ${row.durationSec}s · ${row.deltaSec}s'
+                            '${row.doubtful ? ' · ${row.warning}' : ''}',
+                            style: TextStyle(color: durColor, fontSize: 11),
+                          ),
+                          onTap: () => setState(() {
+                            _selected = i;
+                            _preview = row.fileText;
+                          }),
+                        );
+                      },
                     ),
-                    Wrap(
-                      spacing: 6,
-                      children: [
-                        _chip('−1 s', () => _shift(-1000)),
-                        _chip('−100 ms', () => _shift(-100)),
-                        _chip('+100 ms', () => _shift(100)),
-                        _chip('+1 s', () => _shift(1000)),
-                        _chip('auto-alinear primera línea', _align),
-                        _chip(_playing ? 'Pausa' : 'Oír', _toggle),
-                      ],
-                    ),
-                  ],
+            ),
+            if (hit != null && !_loading) ...[
+              const SizedBox(height: 6),
+              SizedBox(height: 88, child: _karaoke()),
+              Wrap(
+                spacing: 6,
+                children: [
+                  _chip('−1 s', () => _shift(-1000)),
+                  _chip('−100 ms', () => _shift(-100)),
+                  _chip('+100 ms', () => _shift(100)),
+                  _chip('+1 s', () => _shift(1000)),
+                  _chip('auto-alinear primera línea', _align),
+                  _chip(_playing ? 'Pausa' : 'Oír', _toggle),
                 ],
               ),
+            ],
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -298,7 +367,14 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
 
   Widget _field(TextEditingController c, String hint) {
     return TextField(
+      key: ValueKey<String>('lab-lyric-$hint'),
       controller: c,
+      enabled: true,
+      readOnly: false,
+      textInputAction: TextInputAction.search,
+      onSubmitted: (_) {
+        if (!_loading) _run();
+      },
       style: const TextStyle(color: Colors.white, fontSize: 13),
       decoration: InputDecoration(
         isDense: true,
@@ -355,9 +431,10 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        const Text(
-          'Sin letra',
-          style: TextStyle(color: Colors.white, fontSize: 16),
+        Text(
+          labNotFoundMessage(_artist.text, _title.text),
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          textAlign: TextAlign.center,
         ),
         const SizedBox(height: 12),
         Wrap(
@@ -384,9 +461,8 @@ Future<bool> commitLyricSearch({
   required LyricSearchResult result,
 }) async {
   await writeLrcKeepingBak(lrcPath, result.text);
-  await ref.read(nlpWorkerProvider).rememberManualLyric(
-    lrcPath,
-    lrclibId: result.lrclibId,
-  );
+  await ref
+      .read(nlpWorkerProvider)
+      .rememberManualLyric(lrcPath, lrclibId: result.lrclibId);
   return lrcBakExists(lrcPath);
 }
