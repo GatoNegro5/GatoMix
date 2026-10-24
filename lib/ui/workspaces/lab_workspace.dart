@@ -30,6 +30,53 @@ class LabWorkspace extends ConsumerStatefulWidget {
   ConsumerState<LabWorkspace> createState() => _LabWorkspaceState();
 }
 
+/// Valor interno del selector de carpetas que significa "Todas".
+const String kLabAllFolders = '\u0000todas';
+
+/// Carpeta de origen (la que contenía el archivo) según el registro del LAB.
+String labOriginFolderOf(dynamic registryValue) {
+  final originalPath = registryValue is Map
+      ? (registryValue['originalPath']?.toString() ?? '')
+      : registryValue.toString();
+  if (originalPath.isEmpty || originalPath == 'Origen desconocido') {
+    return 'Cuarentena';
+  }
+  final parts = originalPath
+      .replaceAll('\\', '/')
+      .split('/')
+      .where((p) => p.isNotEmpty)
+      .toList();
+  if (parts.length >= 2) return parts[parts.length - 2];
+  return 'Cuarentena';
+}
+
+/// Encabezado de grupo en la lista "Todas" del LAB.
+class LabFolderHeader {
+  final String name;
+  final int count;
+  const LabFolderHeader(this.name, this.count);
+}
+
+/// Todas las canciones agrupadas por carpeta de origen: cada grupo empieza
+/// con un [LabFolderHeader] (con su contador) seguido de sus entradas.
+/// Carpetas y canciones van en orden alfabético.
+List<Object> labGroupedRows(List<MapEntry<String, dynamic>> entries) {
+  final groups = <String, List<MapEntry<String, dynamic>>>{};
+  for (final e in entries) {
+    groups.putIfAbsent(labOriginFolderOf(e.value), () => []).add(e);
+  }
+  final names = groups.keys.toList()
+    ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  final rows = <Object>[];
+  for (final n in names) {
+    final list = groups[n]!
+      ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()));
+    rows.add(LabFolderHeader(n, list.length));
+    rows.addAll(list);
+  }
+  return rows;
+}
+
 class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   String _labPath = '';
   Map<String, dynamic> _registry = {};
@@ -165,9 +212,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       lrcFile.copySync('${lrcFile.path}.bak');
     }
     lrcFile.writeAsStringSync(_lrcController.text);
-    notifyLrcChanged(
-      '$_labPath${Platform.pathSeparator}$_selectedFileForEdit',
-    );
+    notifyLrcChanged('$_labPath${Platform.pathSeparator}$_selectedFileForEdit');
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -986,9 +1031,16 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                     ),
                   )
                 : ListView.builder(
-                    itemCount: folders.length,
+                    itemCount: folders.length + 1,
                     itemBuilder: (context, index) {
-                      final name = folders[index];
+                      final name = index == 0
+                          ? kLabAllFolders
+                          : folders[index - 1];
+                      final isAll = name == kLabAllFolders;
+                      final label = isAll ? 'Todas' : name;
+                      final count = isAll
+                          ? counts.values.fold<int>(0, (a, b) => a + b)
+                          : (counts[name] ?? 0);
                       final active = name == selectedFolder;
                       return ListTile(
                         dense: true,
@@ -998,14 +1050,12 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                           alpha: 0.12,
                         ),
                         leading: Icon(
-                          Icons.folder,
+                          isAll ? Icons.library_music : Icons.folder,
                           size: 18,
-                          color: active
-                              ? Colors.orangeAccent
-                              : Colors.white38,
+                          color: active ? Colors.orangeAccent : Colors.white38,
                         ),
                         title: Text(
-                          name,
+                          label,
                           style: TextStyle(
                             color: active
                                 ? Colors.orangeAccent
@@ -1019,7 +1069,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         trailing: Text(
-                          '${counts[name] ?? 0}',
+                          '$count',
                           style: const TextStyle(
                             color: Colors.white38,
                             fontFamily: 'Consolas',
@@ -1041,26 +1091,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
     );
   }
 
-  String _originFolderOf(dynamic registryValue) {
-    final originalPath = registryValue is Map
-        ? (registryValue['originalPath']?.toString() ?? '')
-        : registryValue.toString();
-    if (originalPath.isEmpty || originalPath == 'Origen desconocido') {
-      return 'Cuarentena';
-    }
-    final parts = originalPath
-        .replaceAll('\\', '/')
-        .split('/')
-        .where((p) => p.isNotEmpty)
-        .toList();
-    if (parts.length >= 2) return parts[parts.length - 2];
-    return 'Cuarentena';
-  }
+  String _originFolderOf(dynamic registryValue) =>
+      labOriginFolderOf(registryValue);
 
-  Widget _buildLeftPanel(
-    List<MapEntry<String, dynamic>> entries,
-    bool isMobile,
-  ) {
+  Widget _buildLeftPanel(List<Object> entries, bool isMobile) {
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF121212),
@@ -1070,8 +1104,49 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       child: ListView.builder(
         itemCount: entries.length,
         itemBuilder: (context, index) {
-          final fileName = entries[index].key;
-          final registryValue = entries[index].value;
+          final row = entries[index];
+          if (row is LabFolderHeader) {
+            return Container(
+              color: GatoMixTheme.bgPanel,
+              padding: EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: isMobile ? 4 : 6,
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.folder,
+                    size: 16,
+                    color: Colors.orangeAccent,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      row.name,
+                      style: TextStyle(
+                        color: Colors.orangeAccent,
+                        fontWeight: FontWeight.bold,
+                        fontSize: isMobile ? 11 : 12,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    '${row.count}',
+                    style: const TextStyle(
+                      color: Colors.white38,
+                      fontFamily: 'Consolas',
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+          final entry = row as MapEntry<String, dynamic>;
+          final fileName = entry.key;
+          final registryValue = entry.value;
           final isSelected = _selectedFileForEdit == fileName;
 
           // 🛠️ FIX: Extracción tolerante de la ruta original
@@ -1425,7 +1500,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                         foregroundColor: Colors.black,
                         visualDensity: VisualDensity.compact,
                         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        minimumSize: Size(isMobile ? 0 : 64, isMobile ? 28 : 36),
+                        minimumSize: Size(
+                          isMobile ? 0 : 64,
+                          isMobile ? 28 : 36,
+                        ),
                         padding: EdgeInsets.symmetric(
                           horizontal: isMobile ? 8 : 16,
                         ),
@@ -1468,10 +1546,8 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   @override
   Widget build(BuildContext context) {
     final entries = _registry.entries.toList();
-    final currentDir = ref.watch(directoryProvider).currentPath;
-    final currentName = currentDir.isEmpty
-        ? ''
-        : currentDir.replaceAll('\\', '/').split('/').last;
+    // Se sigue escuchando la carpeta actual para refrescar el LAB al cambiarla.
+    ref.watch(directoryProvider);
 
     final counts = <String, int>{};
     for (final e in entries) {
@@ -1479,15 +1555,18 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       counts[folder] = (counts[folder] ?? 0) + 1;
     }
     final folders = counts.keys.toList()..sort();
-    final selectedFolder = _selectedOriginFolder ??
-        (folders.contains(currentName)
-            ? currentName
-            : (folders.isNotEmpty ? folders.first : null));
-    final filtered = selectedFolder == null
-        ? entries
+    // Por defecto "Todas": el LAB muestra cada canción, agrupada por carpeta.
+    final selectedFolder =
+        (_selectedOriginFolder != null &&
+            (_selectedOriginFolder == kLabAllFolders ||
+                folders.contains(_selectedOriginFolder)))
+        ? _selectedOriginFolder!
+        : kLabAllFolders;
+    final List<Object> filtered = selectedFolder == kLabAllFolders
+        ? labGroupedRows(entries)
         : entries
-            .where((e) => _originFolderOf(e.value) == selectedFolder)
-            .toList();
+              .where((e) => _originFolderOf(e.value) == selectedFolder)
+              .toList();
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1572,10 +1651,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                             : _buildLeftPanel(filtered, isMobile),
                       ),
                       SizedBox(width: isMobile ? 6 : 12),
-                      Expanded(
-                        flex: 5,
-                        child: _buildRightPanel(isMobile),
-                      ),
+                      Expanded(flex: 5, child: _buildRightPanel(isMobile)),
                     ],
                   ),
                 ),
@@ -1605,7 +1681,9 @@ class KaraokeAIEngine {
     }
 
     debugPrint("🤖 [AI ENGINE] Karaoke IA (Rust/ONNX) en: $path");
-    KaraokeEngine.run(path, onStatus: (s) => debugPrint("🔵 [KARAOKE]: $s"))
-        .whenComplete(() => debugPrint("✅ [AI ENGINE] Extracción IA terminada"));
+    KaraokeEngine.run(
+      path,
+      onStatus: (s) => debugPrint("🔵 [KARAOKE]: $s"),
+    ).whenComplete(() => debugPrint("✅ [AI ENGINE] Extracción IA terminada"));
   }
 }

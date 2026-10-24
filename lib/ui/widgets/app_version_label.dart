@@ -8,6 +8,25 @@ class AppVersionLabel extends StatelessWidget {
 
   static final Future<PackageInfo> _info = PackageInfo.fromPlatform();
 
+  /// Commit corto inyectado al compilar: `--dart-define=GIT_SHA=abc1234`.
+  static const String gitSha = String.fromEnvironment(
+    'GIT_SHA',
+    defaultValue: 'dev',
+  );
+
+  /// `1.0.1 (build 15 · abc1234)`. Sin número de build, solo el commit.
+  static String format(
+    String version,
+    String buildNumber, [
+    String sha = gitSha,
+  ]) {
+    final shortSha = sha.length > 7 ? sha.substring(0, 7) : sha;
+    final build = buildNumber.trim();
+    return build.isEmpty
+        ? '$version ($shortSha)'
+        : '$version (build $build · $shortSha)';
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<PackageInfo>(
@@ -18,7 +37,7 @@ class AppVersionLabel extends StatelessWidget {
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
           child: Text(
-            'v${info.version}',
+            'v${format(info.version, info.buildNumber)}',
             style: const TextStyle(
               fontSize: 11,
               color: Colors.white38,
