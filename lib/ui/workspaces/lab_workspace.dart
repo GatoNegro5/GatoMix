@@ -22,6 +22,7 @@ import '../../providers/nlp_provider.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/theme_provider.dart';
 import 'lab_lyric_search.dart';
+import 'lab_preview_player.dart';
 
 class LabWorkspace extends ConsumerStatefulWidget {
   const LabWorkspace({super.key});
@@ -100,6 +101,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   @override
   void dispose() {
     _lrcController.dispose();
+    _editorLyricScroll.dispose();
     _searchQueryController.dispose();
     _ytUrlController.dispose();
     super.dispose();
@@ -346,6 +348,54 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
     } else if (Platform.isLinux) {
       await Process.run('xdg-open', [url]);
     }
+  }
+
+  final ScrollController _editorLyricScroll = ScrollController();
+  int _editorPosMs = 0;
+  int _editorActive = -1;
+
+  /// Si el .lrc del editor es sincronizado: líneas con la activa resaltada y
+  /// auto-scroll según la vista previa. Si es plano, nada (solo suena).
+  Widget _editorKaraokeStrip() {
+    final lines = parseLyricStampLines(_lrcController.text);
+    if (lines.isEmpty) return const SizedBox.shrink();
+    final int active = labActiveLine(_lrcController.text, _editorPosMs);
+    if (active != _editorActive) {
+      _editorActive = active;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_editorLyricScroll.hasClients || active < 0) return;
+        _editorLyricScroll.animateTo(
+          ((active - 1) * 20.0).clamp(
+            0,
+            _editorLyricScroll.position.maxScrollExtent,
+          ),
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      });
+    }
+    return Container(
+      height: 64,
+      color: Colors.black,
+      child: ListView.builder(
+        controller: _editorLyricScroll,
+        itemExtent: 20,
+        itemCount: lines.length,
+        itemBuilder: (BuildContext ctx, int i) {
+          final bool on = i == active;
+          return Text(
+            '${labStamp(lines[i].ms)}  ${lines[i].text}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: on ? const Color(0xFF00FFFF) : Colors.white38,
+              fontSize: 12,
+              fontWeight: on ? FontWeight.bold : FontWeight.normal,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _openLyricSearch() async {
@@ -1556,7 +1606,19 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
                     ),
                   ],
                 ),
-                SizedBox(height: isMobile ? 4 : 15),
+                LabPreviewPlayer(
+                  key: ValueKey<String>('lab-prev-$_selectedFileForEdit'),
+                  audioPath:
+                      '$_labPath${Platform.pathSeparator}$_selectedFileForEdit',
+                  compact: isMobile,
+                  onPosition: (int ms) {
+                    if (_editorPosMs ~/ 200 != ms ~/ 200) {
+                      setState(() => _editorPosMs = ms);
+                    }
+                  },
+                ),
+                _editorKaraokeStrip(),
+                SizedBox(height: isMobile ? 4 : 8),
                 Expanded(
                   child: TextField(
                     controller: _lrcController,

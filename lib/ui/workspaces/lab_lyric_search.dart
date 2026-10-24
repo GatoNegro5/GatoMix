@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:media_kit/media_kit.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:gatomix/core/lyric_files.dart';
@@ -10,6 +9,7 @@ import 'package:gatomix/core/lyric_match.dart';
 import 'package:gatomix/core/track_name_clean.dart';
 import 'package:gatomix/providers/automix_provider.dart';
 import 'package:gatomix/providers/nlp_provider.dart';
+import 'lab_preview_player.dart';
 
 /// Artista y título con los que abre "Buscar letra" en el Laboratorio.
 class LabDialogNames {
@@ -144,9 +144,9 @@ class LabLyricSearch extends ConsumerStatefulWidget {
 class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
   late final TextEditingController _artist;
   late final TextEditingController _title;
-  final Player _player = Player();
-  StreamSubscription<Duration>? _posSub;
-  StreamSubscription<bool>? _playSub;
+  final ScrollController _lyricScroll = ScrollController();
+  int _lastActive = -1;
+  static const double _lineH = 22;
 
   List<LyricCandidate> _rows = const [];
   bool _loading = true;
@@ -156,28 +156,18 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
   int _selected = -1;
   String _preview = '';
   int _posMs = 0;
-  bool _playing = false;
 
   @override
   void initState() {
     super.initState();
     _artist = TextEditingController(text: widget.artist);
     _title = TextEditingController(text: widget.title);
-    _posSub = _player.stream.position.listen((Duration p) {
-      if (!mounted) return;
-      setState(() => _posMs = p.inMilliseconds);
-    });
-    _playSub = _player.stream.playing.listen((bool v) {
-      if (mounted) setState(() => _playing = v);
-    });
     _run();
   }
 
   @override
   void dispose() {
-    _posSub?.cancel();
-    _playSub?.cancel();
-    _player.dispose();
+    _lyricScroll.dispose();
     _artist.dispose();
     _title.dispose();
     super.dispose();
@@ -228,13 +218,21 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
     return idx;
   }
 
-  Future<void> _toggle() async {
-    if (_playing) {
-      await _player.pause();
-      return;
+  void _onPos(int ms) {
+    setState(() => _posMs = ms);
+    final int a = labActiveLine(_preview, ms);
+    if (a != _lastActive && a >= 0 && _lyricScroll.hasClients) {
+      final double target = ((a - 2) * _lineH).clamp(
+        0,
+        _lyricScroll.position.maxScrollExtent,
+      );
+      _lyricScroll.animateTo(
+        target,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
     }
-    await _player.open(Media(widget.audioPath));
-    await _player.play();
+    _lastActive = a;
   }
 
   void _shift(int deltaMs) {
@@ -361,7 +359,11 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
                   ),
                 ),
               ),
-              const SizedBox(height: 4),
+              LabPreviewPlayer(
+                audioPath: widget.audioPath,
+                compact: mobile,
+                onPosition: _onPos,
+              ),
               Container(
                 height: mobile ? 220 : 240,
                 width: double.infinity,
@@ -379,7 +381,6 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
                     _chip('+1 s', () => _shift(1000)),
                     _chip('auto-alinear primera línea', _align),
                   ],
-                  _chip(_playing ? 'Pausa' : 'Oír', _toggle),
                 ],
               ),
             ],
@@ -475,14 +476,18 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
       );
     }
     return ListView.builder(
+      controller: _lyricScroll,
+      itemExtent: _lineH,
       itemCount: lines.length,
       itemBuilder: (BuildContext ctx, int i) {
         final bool on = i == active;
         return Text(
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           '${labStamp(lines[i].timestamp.inMilliseconds)}  ${lines[i].text}',
           style: TextStyle(
             color: on ? const Color(0xFF00FFFF) : Colors.white54,
-            fontSize: on ? 16 : 13,
+            fontSize: on ? 15 : 13,
             fontWeight: on ? FontWeight.bold : FontWeight.normal,
           ),
         );
