@@ -36,6 +36,25 @@ final RegExp _ytJunk = RegExp(
 
 /// Sello o canal entre paréntesis o corchetes, sin importar mayúsculas.
 /// (Infopesa), (infopesa), (Discos Fuentes), (Vevo). No toca (En Vivo) ni (Live).
+/// Colas de YouTube SOLO al final del título (`... letra`, `- lyrics`,
+/// `con letra`, `lyric video`, `video oficial`). `letra` en medio no se toca.
+final RegExp _tailJunk = RegExp(
+  r'(?:\s*[-–—|:]\s*|\s+)(?:con\s+letras?|letras?|lyrics?|lyric\s+video|video\s+lyrics?|video\s+oficial|official\s+(?:music\s+)?video|audio\s+oficial|official\s+audio)\s*$',
+  caseSensitive: false,
+);
+
+/// Quita colas conservadoras al final; nunca deja el título vacío.
+String stripTrailingYtJunk(String name) {
+  var out = name.trim();
+  while (true) {
+    final Match? m = _tailJunk.firstMatch(out);
+    if (m == null || m.start == 0) return out;
+    final String next = out.substring(0, m.start).trim();
+    if (next.isEmpty) return out;
+    out = next;
+  }
+}
+
 final RegExp _labelTag = RegExp(
   r'\s*[\[\(][^\]\)]*\b(?:infopesa|discos|codiscos|peerless|musart|fania|orfe[oó]n|sono\s*radio|ieesa|vevo|records?|recording|sello|canal|channel|productions?|entertainment)\b[^\]\)]*[\]\)]',
   caseSensitive: false,
@@ -126,6 +145,7 @@ CleanTrackName cleanTrackFileName(
   }
 
   name = name.replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+  name = stripTrailingYtJunk(name);
   name = name.replaceAll(RegExp(r'^[-\s]+|[-\s]+$'), '').trim();
 
   final List<String> parts = name

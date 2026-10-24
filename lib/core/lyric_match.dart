@@ -527,6 +527,31 @@ Uri lrclibQueryUri(String query) {
   return Uri.https('lrclib.net', '/api/search', {'q': query.trim()});
 }
 
+/// Sin artista (nombre sin ` - `): búsqueda libre `q=` con el título
+/// completo. Null si hay artista o no hay título.
+Uri? lrclibTitleOnlyUri(LyricIdentity id) {
+  if (id.artist.trim().isNotEmpty || id.title.trim().isEmpty) return null;
+  return lrclibQueryUri(id.title);
+}
+
+/// Identidad sin artista: el título completo debe contener al artista de
+/// LRCLIB y el resto coincidir fuerte con su título. 0 si no encaja.
+double lyricTitleOnlyScore(
+  String fullTitle,
+  String apiArtist,
+  String apiTitle,
+) {
+  final String full = lyricNormLoose(fullTitle);
+  final String art = lyricNormLoose(apiArtist);
+  if (full.isEmpty || art.isEmpty) return 0;
+  final String padded = ' $full ';
+  if (!padded.contains(' $art ')) return 0;
+  final String rest = padded.replaceFirst(' $art ', ' ').trim();
+  if (rest.isEmpty) return 0;
+  final double ts = lyricTitleScore(rest, apiTitle);
+  return ts >= kLyricTitleStrong ? ts : 0;
+}
+
 /// Las tres lecturas del botón Buscar letra, en paralelo.
 List<Uri> lrclibManualUris({
   required String artist,
@@ -689,6 +714,14 @@ LyricChoice chooseLrclibLyric(
     LyricIdentity? fit;
     var titleScore = 0.0;
     for (final LyricIdentity ident in ids) {
+      if (ident.artist.trim().isEmpty) {
+        final double t0 = lyricTitleOnlyScore(ident.title, apiArtist, apiTitle);
+        if (t0 > 0 && (fit == null || t0 > titleScore)) {
+          fit = ident;
+          titleScore = t0;
+        }
+        continue;
+      }
       if (!lyricArtistsMatch(ident.artist, apiArtist)) continue;
       final double ts = lyricTitleScore(ident.title, apiTitle);
       if (ts < kLyricTitleMin) continue;
@@ -702,13 +735,13 @@ LyricChoice chooseLrclibLyric(
     final int delta = apiDur <= 0 ? 999 : (apiDur - id.durationSec).abs();
     final bool strong = titleScore >= kLyricTitleStrong;
     final bool directDur = apiDur > 0 && delta <= kLyricDurationTolSec;
-    final bool wideDur =
-        apiDur > 0 && strong && delta <= kLyricDurationWideSec;
+    final bool wideDur = apiDur > 0 && strong && delta <= kLyricDurationWideSec;
     final bool durOk = directDur || wideDur;
     final String syncedText = raw['syncedLyrics']?.toString() ?? '';
     final String plainText = raw['plainLyrics']?.toString() ?? '';
     final double boost = (preferFile && fit.fromFile) ? 0.05 : 0;
-    final double base = (20 - (delta > 20 ? 20 : delta)) + titleScore * 10 + boost;
+    final double base =
+        (20 - (delta > 20 ? 20 : delta)) + titleScore * 10 + boost;
 
     void offer(double rank, LyricKind kind, String body) {
       if (best == null || rank > best!.rank) {
@@ -804,18 +837,14 @@ String lyricDeltaBand(int deltaSec) {
 }
 
 bool _closeContender(LyricCandidate c) =>
-    c.synced &&
-    c.firstStampMs != null &&
-    c.deltaSec <= 3 &&
-    !c.doubtful;
+    c.synced && c.firstStampMs != null && c.deltaSec <= 3 && !c.doubtful;
 
 /// Empate: menor diferencia de duración, luego la primera línea contra el
 /// inicio de la voz. Si no se midió, manda /api/get.
 /// Varias candidatas en ±3 s y onset medido: manda la primera línea, así
 /// una duración exacta no gana si arranca lejos de la voz.
 int _candidateOrder(LyricCandidate a, LyricCandidate b, int? onset) {
-  final bool band =
-      onset != null && _closeContender(a) && _closeContender(b);
+  final bool band = onset != null && _closeContender(a) && _closeContender(b);
   if (band) {
     final int ae = (a.firstStampMs! - onset).abs();
     final int be = (b.firstStampMs! - onset).abs();
@@ -857,7 +886,8 @@ List<LyricCandidate> rankLyricCandidates({
     final String syncedText = raw['syncedLyrics']?.toString() ?? '';
     final String plainText = raw['plainLyrics']?.toString() ?? '';
     final bool hasSynced = syncedText.trim().isNotEmpty && !id.medley;
-    final bool hasPlain = plainText.trim().isNotEmpty ||
+    final bool hasPlain =
+        plainText.trim().isNotEmpty ||
         (id.medley && syncedText.trim().isNotEmpty);
     if (!hasSynced && !hasPlain) continue;
     final bool inside = hasSynced && lrcInsideAudio(syncedText, id.durationSec);
@@ -893,7 +923,9 @@ List<LyricCandidate> rankLyricCandidates({
     }
     if (hasSynced && inside && (delta <= 2 || strong)) score += 5;
     score -= edition;
-    final String body = hasSynced ? syncedText : (plainText.isNotEmpty ? plainText : syncedText);
+    final String body = hasSynced
+        ? syncedText
+        : (plainText.isNotEmpty ? plainText : syncedText);
     final int? lid = (raw['id'] as num?)?.toInt();
     final bool fromGet = raw[kLyricFromGetKey] == true;
     final LyricCandidate hit = LyricCandidate(
@@ -924,13 +956,21 @@ List<LyricCandidate> rankLyricCandidates({
   }
   final List<LyricCandidate> all = <LyricCandidate>[...unique.values, ...rest];
   all.sort(
-    (LyricCandidate a, LyricCandidate b) =>
-        _candidateOrder(a, b, voiceOnsetMs),
+    (LyricCandidate a, LyricCandidate b) => _candidateOrder(a, b, voiceOnsetMs),
   );
   return all;
 }
 
-enum LyricGap { none, duplicate, pastEnd, short, artist, title, duration, unsigned }
+enum LyricGap {
+  none,
+  duplicate,
+  pastEnd,
+  short,
+  artist,
+  title,
+  duration,
+  unsigned,
+}
 
 class LyricFileVerdict {
   final bool fits;
@@ -1003,9 +1043,7 @@ LyricFileVerdict assessLabLyric({
   }
   final String? ar = lrcMeta(lrc, 'ar');
   final String? ti = lrcMeta(lrc, 'ti');
-  if (ar != null &&
-      artist.isNotEmpty &&
-      !lyricArtistsMatch(artist, ar)) {
+  if (ar != null && artist.isNotEmpty && !lyricArtistsMatch(artist, ar)) {
     return const LyricFileVerdict.bad(LyricGap.artist);
   }
   if (ti != null &&
@@ -1014,7 +1052,9 @@ LyricFileVerdict assessLabLyric({
     return const LyricFileVerdict.bad(LyricGap.title);
   }
   final int? len = lrcLengthSec(lrc);
-  if (len != null && durationSec > 0 && (len - durationSec).abs() > kLyricDurationWideSec) {
+  if (len != null &&
+      durationSec > 0 &&
+      (len - durationSec).abs() > kLyricDurationWideSec) {
     return const LyricFileVerdict.bad(LyricGap.duration);
   }
   if (ar == null && ti == null) {

@@ -209,15 +209,13 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   }
 
   String _lrcPathOf(String fileName) {
-    return '$_labPath${Platform.pathSeparator}${fileName.replaceAll(RegExp(r'\.(mp3|m4a|webm|wav|flac)$', caseSensitive: false), '.lrc')}';
+    return lrcPathForAudio('$_labPath${Platform.pathSeparator}$fileName');
   }
 
   void _saveLrc() {
     if (_selectedFileForEdit == null) return;
     final lrcFile = File(_lrcPathOf(_selectedFileForEdit!));
-    if (lrcFile.existsSync()) {
-      lrcFile.copySync('${lrcFile.path}.bak');
-    }
+    keepOriginalLrcBakSync(lrcFile.path);
     lrcFile.writeAsStringSync(_lrcController.text);
     notifyLrcChanged('$_labPath${Platform.pathSeparator}$_selectedFileForEdit');
 
@@ -256,14 +254,28 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
         final targetDir = Directory(File(originalPath).parent.path);
         if (!targetDir.existsSync()) targetDir.createSync(recursive: true);
 
-        file.renameSync(originalPath);
+        final LabMove audioMove = await moveFileNoOverwrite(
+          file.path,
+          originalPath,
+        );
+        if (audioMove == LabMove.destExists) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  "⚠️ En el origen ya existe un archivo con ese nombre: no se sobrescribe. $fileName sigue en el LAB.",
+                ),
+                duration: const Duration(seconds: 10),
+                backgroundColor: Colors.orangeAccent,
+              ),
+            );
+          }
+          return;
+        }
 
         final LabLrcRestore lrcMove = await moveLabLrcToOrigin(
           labLrcPath: _lrcPathOf(fileName),
-          originLrcPath: originalPath.replaceAll(
-            RegExp(r'\.(mp3|m4a|webm|wav|flac)$', caseSensitive: false),
-            '.lrc',
-          ),
+          originLrcPath: lrcPathForAudio(originalPath),
         );
         notifyLrcChanged(originalPath);
 
@@ -299,6 +311,16 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       }
     } catch (e) {
       debugPrint("🔴 Error de I/O restaurando: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              "🔴 No se pudo restaurar $fileName; queda en el LAB. $e",
+            ),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -307,10 +329,8 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       final file = File('$_labPath${Platform.pathSeparator}$fileName');
       if (file.existsSync()) file.deleteSync();
 
-      final lrcFile = File(
-        '$_labPath${Platform.pathSeparator}${fileName.replaceAll(RegExp(r'\.mp3$|\.webm$', caseSensitive: false), '.lrc')}',
-      );
-      if (lrcFile.existsSync()) lrcFile.deleteSync();
+      // .lrc y .lrc.bak, para cualquier extensión de audio.
+      deleteLrcSidecarsSync('$_labPath${Platform.pathSeparator}$fileName');
 
       _registry.remove(fileName);
       final registryFile = File(
@@ -456,7 +476,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           result.noLyric
               ? 'Marcada sin letra. El proceso automático no la reintenta.'
               : hadBak
-              ? 'Letra aplicada. La anterior quedó en .lrc.bak.'
+              ? 'Letra aplicada. La original (previa al LAB) sigue en .lrc.bak.'
               : 'Letra aplicada.',
         ),
         backgroundColor: Colors.orangeAccent,

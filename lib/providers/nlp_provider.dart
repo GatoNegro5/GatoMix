@@ -341,7 +341,9 @@ class NlpWorker {
   // del archivo. LRCLIB /api/get con la duración medida y, si no hay, /api/search
   // filtrado por artista, título y ±2 s. La misma función la usa Automix.
 
-  Future<({List<dynamic> items, bool serverDown})> _lrclibSearch(String url) async {
+  Future<({List<dynamic> items, bool serverDown})> _lrclibSearch(
+    String url,
+  ) async {
     try {
       final response = await _resilientGet(url);
       if (response.statusCode == 200) {
@@ -373,8 +375,7 @@ class NlpWorker {
       id3Album: id3.album,
       durationSec: localSec,
     );
-    if (ids.every((LyricIdentity e) => e.artist.isEmpty || e.title.isEmpty) ||
-        localSec <= 0) {
+    if (ids.every((LyricIdentity e) => e.title.isEmpty) || localSec <= 0) {
       lastDetail = 'Sin coincidencia segura';
       return const LyricChoice.none();
     }
@@ -382,6 +383,16 @@ class NlpWorker {
     final List<Map<String, dynamic>> pool = <Map<String, dynamic>>[];
     var serverDown = false;
     for (final LyricIdentity id in ids) {
+      final Uri? qUri = lrclibTitleOnlyUri(id);
+      if (qUri != null) {
+        // Sin artista: solo búsqueda libre por título completo (q=).
+        final found = await _lrclibSearch(qUri.toString());
+        if (found.serverDown) serverDown = true;
+        for (final dynamic raw in found.items) {
+          if (raw is Map) pool.add(Map<String, dynamic>.from(raw));
+        }
+        continue;
+      }
       try {
         final response = await _resilientGet(lrclibGetUri(id).toString());
         if (response.statusCode == 200) {
@@ -438,20 +449,21 @@ class NlpWorker {
       durationSec: durationSec,
       query: query,
     );
-    final List<({String? body, int status, bool down})> got =
-        await Future.wait(uris.map((Uri uri) async {
-      try {
-        final response = await _resilientGet(uri.toString());
-        return (
-          body: response.body,
-          status: response.statusCode,
-          down: lyricHttpTransient(response.statusCode),
-        );
-      } catch (e) {
-        lastDetail = 'LRCLIB no responde: $e';
-        return (body: null, status: 0, down: true);
-      }
-    }));
+    final List<({String? body, int status, bool down})> got = await Future.wait(
+      uris.map((Uri uri) async {
+        try {
+          final response = await _resilientGet(uri.toString());
+          return (
+            body: response.body,
+            status: response.statusCode,
+            down: lyricHttpTransient(response.statusCode),
+          );
+        } catch (e) {
+          lastDetail = 'LRCLIB no responde: $e';
+          return (body: null, status: 0, down: true);
+        }
+      }),
+    );
     final List<Map<String, dynamic>> pool = <Map<String, dynamic>>[];
     var hits = 0;
     var transient = 0;
@@ -466,6 +478,7 @@ class NlpWorker {
           if (fromGet) row[kLyricFromGetKey] = true;
           pool.add(row);
         }
+
         if (parsed is Map) {
           addRow(parsed);
         } else if (parsed is List) {
@@ -806,15 +819,11 @@ class NlpWorker {
     final counts = <LyricStatus, int>{for (final s in LyricStatus.values) s: 0};
     final dir = Directory(directoryPath);
     if (!dir.existsSync()) return counts;
-    final files = dir
-        .listSync(recursive: true)
-        .whereType<File>()
-        .where((f) {
-          if (_enCarpetaOriginal(f.path)) return false;
-          final p = f.path.toLowerCase();
-          return p.endsWith('.mp3') && !p.endsWith('_k.mp3');
-        })
-        .toList();
+    final files = dir.listSync(recursive: true).whereType<File>().where((f) {
+      if (_enCarpetaOriginal(f.path)) return false;
+      final p = f.path.toLowerCase();
+      return p.endsWith('.mp3') && !p.endsWith('_k.mp3');
+    }).toList();
     final pipe = ref.read(pipelineProvider.notifier);
     final total = files.length;
     for (int i = 0; i < total; i++) {
@@ -840,7 +849,8 @@ enum LyricStatus { ok, kept, noMatch, failed, retry, plain, doubt }
 
 int? _autoBytes(dynamic size) {
   if (size is num) return size.toInt();
-  if (size is Map && size['bytes'] is num) return (size['bytes'] as num).toInt();
+  if (size is Map && size['bytes'] is num)
+    return (size['bytes'] as num).toInt();
   return null;
 }
 

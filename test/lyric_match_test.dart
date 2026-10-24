@@ -752,7 +752,7 @@ void main() {
     final Directory dir = await Directory.systemTemp.createTemp('gmx_lrc_nuevo');
     final File lrc = File('${dir.path}${Platform.pathSeparator}nuevo.lrc');
     await writeLrcKeepingBak(lrc.path, 'nueva');
-    expect(File('${lrc.path}.bak').existsSync(), isFalse);
+    expect(File('${lrc.path}.bak').readAsStringSync().trim(), kLrcNoOriginalMark);
     expect(lrc.readAsStringSync(), 'nueva');
     expect(await undoAppliedLrc(lrc.path), isTrue);
     expect(lrc.existsSync(), isFalse);
