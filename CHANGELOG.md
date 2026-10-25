@@ -2,6 +2,21 @@
 
 ![GatoMix](assets/branding/gatomix_logo.png)
 
+## 1.0.13+27 — LOG CAMBIO (Masterizar: letras con transcriptor y Laboratorio automático)
+
+- **Letras corregidas con palabras con tiempo** (`lib/core/lyric_ai_align.dart`). Usa el archivo opcional `<canción>.gmx_words.json`, que genera `tool/gmx_whisper_words.py` (faster-whisper, offline, solo en escritorio). Sin ese archivo, todo sigue igual que antes.
+  - **Desfase constante confirmado:** la letra se mueve entera. Marca `GMX_RESCUE_LYR=LYRIC_FIXED:ai_constantShift`.
+  - **Desfase por bloques** (puentes o intros alargadas): cada bloque se mueve con su propio desfase. Marca `LYRIC_FIXED:ai_segments`. Se rechaza si el orden se rompe o si el resultado no pasa el chequeo.
+  - **Letra de otra canción:** queda la marca `FAIL:lyric_wrong_song,cov=X`, incluso cuando los tiempos parecen correctos.
+  - **Casos dudosos:** quedan como `FAIL:lyric_ai_unsure,<motivo>`. Nunca se inventan tiempos.
+  - **Medido en las 26 letras en REVISAR de GMX_TEST:** antes 0/26 corregidas. Ahora 7 corregidas: 4 por desfase constante y 3 por bloques, y al revisarlas de nuevo el desfase da 0 en las 7. Otras 6 quedan como letra de otra canción y 13 como dudosas con motivo.
+- **Laboratorio automático:**
+  - Con `--master-folder <carpeta> --auto-lab`, las letras en FAIL pasan a GatoMix_LAB junto con sus archivos compañeros (.lrc, .lrc.bak, _K, .gmx_words.json). El origen queda anotado en `quarantine_registry.json`, así que se puede revertir. Nunca se sobrescribe ningún archivo.
+  - Con `--lab-rescue <LAB>`, se masteriza el Laboratorio y las pistas que quedan bien vuelven a su carpeta original.
+  - El diario de fallos se guarda en `<carpeta>/.gatomix_lyric_fail.json`.
+- **Rust:** nuevo test de la regla de bordes en silencio. El test `un_paquete_roto_no_recodifica_y_deja_el_motivo` ahora se llama `un_paquete_roto_se_repara_sin_perdida_y_masteriza`.
+- Funciona igual en Windows, Android, macOS e iPhone (Dart puro). El transcriptor es opcional y solo para escritorio.
+
 ## 1.0.12+26 — LOG CAMBIO (Masterizar, Etapa 2 de rescate)
 
 - **Audio dañado ya no se salta de oficio.** Los errores de "main_data offset" (reservorio de bits) que caen en silencio digital al inicio o al final (< −60 dBFS, con 250 ms de guarda) ya no bloquean el −14 LUFS. Errores con audio fuerte siguen bloqueando.
