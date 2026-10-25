@@ -2,7 +2,13 @@
 // Lógica pura: sin I/O, igual en Windows, Android, macOS e iPhone.
 import 'lrc_timeline.dart';
 
-enum LyricTimingIssue { none, endsEarly, pastEnd, startsLate, startsBeforeVoice }
+enum LyricTimingIssue {
+  none,
+  endsEarly,
+  pastEnd,
+  startsLate,
+  startsBeforeVoice,
+}
 
 class LyricTimingVerdict {
   final LyricTimingIssue issue;
@@ -16,10 +22,12 @@ class LyricTimingVerdict {
 /// Umbrales (ms). Pensados para outros largos (bachata, salsa) sin falsos
 /// avisos: "termina antes" exige las DOS condiciones.
 class LyricTimingRules {
-  static const double endsEarlyRatio = 0.70; // último verso < 70 % de la canción
+  static const double endsEarlyRatio =
+      0.70; // último verso < 70 % de la canción
   static const int endsEarlyGapMs = 45000; // y faltan > 45 s
   static const int pastEndMs = 2000; // último verso > duración + 2 s
-  static const double startsLateRatio = 0.40; // primer verso > 40 % de la canción
+  static const double startsLateRatio =
+      0.40; // primer verso > 40 % de la canción
   static const int startsLateMinMs = 45000; // y > 45 s
   static const int earlyFirstMs = 3000; // letra arranca en < 3 s
   static const int voiceIntroMs = 8000; // pero la voz aparece > 8 s
@@ -32,7 +40,9 @@ int? lastVerseMs(String content) {
   for (final String line in content.split('\n')) {
     if (line.contains('[gmx_')) continue;
     for (final Match m in lineRe.allMatches(line)) {
-      final String text = (m.group(4) ?? '').replaceAll(RegExp(r'\[[^\]]*\]'), '').trim();
+      final String text = (m.group(4) ?? '')
+          .replaceAll(RegExp(r'\[[^\]]*\]'), '')
+          .trim();
       if (text.length < 2) continue;
       final int min = int.parse(m.group(1)!);
       final int sec = int.parse(m.group(2)!);
@@ -52,37 +62,63 @@ LyricTimingVerdict checkLyricTiming({
   int? voiceOnsetMs,
 }) {
   if (lrcIsPlain(lrc) || durationMs <= 0) {
-    return const LyricTimingVerdict(LyricTimingIssue.none, null, null, 'sin sellos');
+    return const LyricTimingVerdict(
+      LyricTimingIssue.none,
+      null,
+      null,
+      'sin sellos',
+    );
   }
   final int? first = firstVerseMs(lrc);
   final int? last = lastVerseMs(lrc);
   if (first == null || last == null) {
-    return const LyricTimingVerdict(LyricTimingIssue.none, null, null, 'sin sellos');
+    return const LyricTimingVerdict(
+      LyricTimingIssue.none,
+      null,
+      null,
+      'sin sellos',
+    );
   }
-  String s(int ms) => '${ms ~/ 60000}:${((ms % 60000) ~/ 1000).toString().padLeft(2, '0')}';
+  String s(int ms) =>
+      '${ms ~/ 60000}:${((ms % 60000) ~/ 1000).toString().padLeft(2, '0')}';
   if (last > durationMs + LyricTimingRules.pastEndMs) {
-    return LyricTimingVerdict(LyricTimingIssue.pastEnd, first, last,
-        'la letra sigue en ${s(last)} y la canción dura ${s(durationMs)}');
+    return LyricTimingVerdict(
+      LyricTimingIssue.pastEnd,
+      first,
+      last,
+      'la letra sigue en ${s(last)} y la canción dura ${s(durationMs)}',
+    );
   }
   if (last < durationMs * LyricTimingRules.endsEarlyRatio &&
       durationMs - last > LyricTimingRules.endsEarlyGapMs) {
-    return LyricTimingVerdict(LyricTimingIssue.endsEarly, first, last,
-        'la letra termina en ${s(last)} de ${s(durationMs)}');
+    return LyricTimingVerdict(
+      LyricTimingIssue.endsEarly,
+      first,
+      last,
+      'la letra termina en ${s(last)} de ${s(durationMs)}',
+    );
   }
   if (first > durationMs * LyricTimingRules.startsLateRatio &&
       first > LyricTimingRules.startsLateMinMs) {
-    return LyricTimingVerdict(LyricTimingIssue.startsLate, first, last,
-        'la letra empieza recién en ${s(first)}');
+    return LyricTimingVerdict(
+      LyricTimingIssue.startsLate,
+      first,
+      last,
+      'la letra empieza recién en ${s(first)}',
+    );
   }
   if (voiceOnsetMs != null &&
       first < LyricTimingRules.earlyFirstMs &&
       voiceOnsetMs > LyricTimingRules.voiceIntroMs) {
-    return LyricTimingVerdict(LyricTimingIssue.startsBeforeVoice, first, last,
-        'la letra arranca en ${s(first)} pero la voz entra en ${s(voiceOnsetMs)}');
+    return LyricTimingVerdict(
+      LyricTimingIssue.startsBeforeVoice,
+      first,
+      last,
+      'la letra arranca en ${s(first)} pero la voz entra en ${s(voiceOnsetMs)}',
+    );
   }
   return LyricTimingVerdict(LyricTimingIssue.none, first, last, 'ok');
 }
-
 
 /// Mínimo desfase (ms) que vale la pena corregir moviendo toda la letra.
 const int kLyricRealignMinMs = 1000;
@@ -106,8 +142,10 @@ String? realignLrcToVoice({
   final String moved = lrc.replaceAllMapped(stamp, (Match m) {
     final String f = m.group(3)!;
     final int frac = f.length == 2 ? int.parse(f) * 10 : int.parse(f);
-    int ms = (int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!)) * 1000 +
-        frac + delta;
+    int ms =
+        (int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!)) * 1000 +
+        frac +
+        delta;
     if (ms < 0) ms = 0;
     final int cs = (ms % 1000) ~/ 10;
     return '[${(ms ~/ 60000).toString().padLeft(2, '0')}:'
@@ -142,5 +180,18 @@ String? firstPassingLyric({
     );
     if (v.ok) return fresh;
   }
+  return null;
+}
+
+/// Motivo de GMX_LYR_CHECK=SKIP, o null si el chequeo debe correr.
+/// Megamix (GMX_LYR=NA), sin `.lrc` (NONE / RETRY sin archivo) o letra plana.
+String? lyricCheckSkipReason({
+  required bool mega,
+  required bool lrcExists,
+  required bool plain,
+}) {
+  if (mega) return 'megamix';
+  if (!lrcExists) return 'sin_lrc';
+  if (plain) return 'plain';
   return null;
 }

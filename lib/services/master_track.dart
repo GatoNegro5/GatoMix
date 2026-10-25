@@ -22,7 +22,8 @@ class MasterOutcome {
   final String detail;
   final bool stopped;
 
-  /// GMX_LYR_CHECK: 'OK', 'FIXED', 'REVIEW' o null (sin letra / megamix).
+  /// GMX_LYR_CHECK: 'OK', 'FIXED', 'REVIEW', 'SKIP' (sin .lrc / plana /
+  /// megamix) o null (sin revisión de letras pedida).
   final String? lyricCheck;
   final String lyricCheckReason;
 
@@ -59,7 +60,9 @@ class MasterTrack {
 
     onStage?.call('METADATA_CLEANUP');
     final String oldPath = path;
-    var current = await ref.read(metadataWorkerProvider).processSingleFile(path);
+    var current = await ref
+        .read(metadataWorkerProvider)
+        .processSingleFile(path);
     if (current != oldPath) {
       await ref.read(dbServiceProvider).retargetTrackMetadata(oldPath, current);
       await _retargetBpmCache(oldPath, current);
@@ -97,7 +100,8 @@ class MasterTrack {
         final marks = await rust_dsp.readGmxMarks(inputPath: current);
         if (marks.lyr.isEmpty) {
           final String lrcPath = _lrcPath(current);
-          final bool manual = File(lrcPath).existsSync() && !_lrcIsAuto(lrcPath);
+          final bool manual =
+              File(lrcPath).existsSync() && !_lrcIsAuto(lrcPath);
           await _mark(current, 'GMX_LYR', manual ? 'MANUAL' : 'SYNC');
         }
       }
@@ -156,7 +160,10 @@ class MasterTrack {
     // Chequeo de tiempo de la letra contra el audio ya final. Corre también
     // en canciones ya masterizadas (el audio no se vuelve a procesar).
     ({String? mark, String reason}) check = (mark: null, reason: '');
-    if (!mega && withLyrics) {
+    if (mega && withLyrics) {
+      await _mark(current, 'GMX_LYR_CHECK', 'SKIP');
+      check = (mark: 'SKIP', reason: 'megamix');
+    } else if (withLyrics) {
       onStage?.call('LYRIC_CHECK');
       try {
         check = await _checkLyricTiming(ref, current);
@@ -179,7 +186,8 @@ class MasterTrack {
     if (after.reason.isNotEmpty) {
       detail = detail.isEmpty ? after.reason : '$detail · ${after.reason}';
     }
-    final bool lyricsOk = mega ||
+    final bool lyricsOk =
+        mega ||
         after.lyr == 'SYNC' ||
         after.lyr == 'PLAIN' ||
         after.lyr == 'MANUAL' ||
@@ -212,11 +220,21 @@ class MasterTrack {
     String path,
   ) async {
     final File lrc = File(_lrcPath(path));
-    if (!lrc.existsSync()) return (mark: null, reason: '');
-    final String text = await lrc.readAsString();
-    if (lrcIsPlain(text)) return (mark: null, reason: '');
-    final int durationMs =
-        (await rust_dsp.getAudioDurationMs(inputPath: path)).toInt();
+    final bool exists = lrc.existsSync();
+    final String text = exists ? await lrc.readAsString() : '';
+    final String? skip = lyricCheckSkipReason(
+      mega: false,
+      lrcExists: exists,
+      plain: exists && lrcIsPlain(text),
+    );
+    if (skip != null) {
+      // Auditable: sin .lrc (NONE / RETRY) o letra plana no se revisan.
+      await _mark(path, 'GMX_LYR_CHECK', 'SKIP');
+      return (mark: 'SKIP', reason: skip);
+    }
+    final int durationMs = (await rust_dsp.getAudioDurationMs(
+      inputPath: path,
+    )).toInt();
     final worker = ref.read(nlpWorkerProvider);
     final int? voice = await worker.probeVoiceOnsetMs(path);
     final LyricTimingVerdict v = checkLyricTiming(
@@ -434,7 +452,11 @@ class MasterTrack {
     );
   }
 
-  static Future<void> _trimKaraokeTwin(String path, int headMs, int tailMs) async {
+  static Future<void> _trimKaraokeTwin(
+    String path,
+    int headMs,
+    int tailMs,
+  ) async {
     final String k = path.replaceAll(
       RegExp(r'\.mp3$', caseSensitive: false),
       '_K.mp3',
@@ -509,7 +531,9 @@ class MasterTrack {
     final db = ref.read(dbServiceProvider);
     final existing = await db.getTrackMetadata(path);
     final bool isManual = existing?.isManualCue ?? false;
-    final int physical = (await rust_dsp.getAudioDurationMs(inputPath: path)).toInt();
+    final int physical = (await rust_dsp.getAudioDurationMs(
+      inputPath: path,
+    )).toInt();
     int leadMs = 0;
     int tailMs = 0;
     try {
@@ -527,11 +551,13 @@ class MasterTrack {
         ? usableMs - assignedDuration
         : usableMs - 2000;
     if (calculatedMixOut < 0) calculatedMixOut = 0;
-    final int finalCueIn = existing != null &&
+    final int finalCueIn =
+        existing != null &&
             (isManual || (existing.cueInMs != null && existing.cueInMs! > 0))
         ? existing.cueInMs!
         : calculatedCueIn;
-    final int finalMixOut = existing != null &&
+    final int finalMixOut =
+        existing != null &&
             (isManual || (existing.mixOutMs != null && existing.mixOutMs! > 0))
         ? existing.mixOutMs!
         : calculatedMixOut;
