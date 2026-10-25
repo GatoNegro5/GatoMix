@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/theme_provider.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/livedj_provider.dart';
+import 'livedj_sort_button.dart';
 import '../../providers/mix_formula.dart';
 import 'automix_workspace.dart';
 import 'livedj_bpm_badge.dart';
@@ -672,6 +673,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   ),
                 ),
               ),
+              LiveDjSortButton(size: 16),
               const SizedBox(width: 12),
               IconButton(
                 padding: EdgeInsets.zero,
@@ -832,6 +834,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   ),
                 ),
               ),
+              LiveDjSortButton(size: 24),
               const SizedBox(width: 12),
               IconButton(
                 padding: EdgeInsets.zero,

@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/hal/platform_strategy.dart';
+import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
 import '../djiphone/iphone_library.dart';
@@ -312,27 +313,45 @@ class AutomixNotifier extends Notifier<AutomixState> {
         'autoMixArmed': state.autoMixArmed,
         'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
       };
-      await file.writeAsString(jsonEncode(data));
+      // Atómico y en fila (ver SessionStore): sobrevive cierres y updates.
+      await SessionStore.writeJson(file.path, data);
     } catch (_) {}
   }
 
   Future<void> _initPersistence() async {
     try {
-      final file = File(_getSessionFilePath());
-      if (!file.existsSync()) return;
+      final data = SessionStore.readJson(_getSessionFilePath());
+      if (data is! Map) return;
 
-      final content = await file.readAsString();
-      final data = jsonDecode(content);
-
-      final playlist = (data['playlist'] as List?)?.cast<String>();
-      final index = data['currentIndex'] as int?;
-      final positionMs = data['positionMs'] as int?;
-      final mixStrategyIdx = data['mixStrategy'] as int? ?? 0;
+      final rawList = ((data['playlist'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList();
+      final rawIndex = data['currentIndex'] as int?;
+      // Pistas renombradas por Masterizar se reencuentran; el índice sigue a
+      // la pista actual aunque cambie la lista.
+      final playlist = <String>[];
+      int? index;
+      for (var i = 0; i < rawList.length; i++) {
+        final hit = resolveSessionPaths([rawList[i]]);
+        if (hit.isEmpty || playlist.contains(hit.first)) continue;
+        if (i == rawIndex) index = playlist.length;
+        playlist.add(hit.first);
+      }
+      final bool sameTrack = index != null;
+      if (index == null && playlist.isNotEmpty && rawIndex != null) {
+        index = rawIndex.clamp(0, playlist.length - 1);
+      }
+      final positionMs = sameTrack ? data['positionMs'] as int? : null;
+      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
+        0,
+        MixStrategy.values.length - 1,
+      );
+      // El modo (Shuffle/Secuencial) se respeta aunque no haya pista actual.
+      state = state.copyWith(mixStrategy: MixStrategy.values[mixStrategyIdx]);
       final autoMixArmed = data['autoMixArmed'] as bool? ?? true;
       final wasPlaying = data['wasPlaying'] as bool? ?? false;
 
-      if (playlist != null &&
-          playlist.isNotEmpty &&
+      if (playlist.isNotEmpty &&
           index != null &&
           index >= 0) {
         state = state.copyWith(
@@ -2254,19 +2273,19 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
 
   Future<void> _loadSession() async {
     try {
-      final file = File(_getSessionFilePath());
-      if (file.existsSync()) {
-        final content = await file.readAsString();
-        final data = jsonDecode(content) as List<dynamic>;
-        state = data.map((e) => e.toString()).toSet();
+      final data = SessionStore.readJson(_getSessionFilePath());
+      if (data is List) {
+        state = {...data.map((e) => e.toString()), ...state};
       }
     } catch (_) {}
   }
 
   Future<void> _saveSession(Set<String> currentPlayed) async {
     try {
-      final file = File(_getSessionFilePath());
-      await file.writeAsString(jsonEncode(currentPlayed.toList()));
+      await SessionStore.writeJson(
+        _getSessionFilePath(),
+        currentPlayed.toList(),
+      );
     } catch (_) {}
   }
 
@@ -2320,24 +2339,20 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
 
   Future<void> _loadSession() async {
     try {
-      final file = File(_getSessionFilePath());
-      if (file.existsSync()) {
-        final content = await file.readAsString();
-        final data = jsonDecode(content) as List<dynamic>;
-        List<File> files = [];
-        for (String p in data) {
-          if (File(p).existsSync()) files.add(File(p));
-        }
-        state = files;
+      final data = SessionStore.readJson(_getSessionFilePath());
+      if (data is List && state.isEmpty) {
+        // Pistas renombradas por Masterizar se reencuentran en su carpeta.
+        state = resolveSessionPaths(
+          data.map((e) => e.toString()).toList(),
+        ).map((p) => File(p)).toList();
       }
     } catch (_) {}
   }
 
   Future<void> _saveSession(List<File> currentQueue) async {
     try {
-      final file = File(_getSessionFilePath());
       final paths = currentQueue.map((f) => f.path).toList();
-      await file.writeAsString(jsonEncode(paths));
+      await SessionStore.writeJson(_getSessionFilePath(), paths);
     } catch (_) {}
   }
 
@@ -2383,8 +2398,31 @@ enum TrackSortMode { alphabetical, bpmDesc, bpmAsc }
 
 class TrackSortNotifier extends Notifier<TrackSortMode> {
   @override
-  TrackSortMode build() => TrackSortMode.alphabetical;
-  void updateMode(TrackSortMode mode) => state = mode;
+  TrackSortMode build() {
+    // El orden elegido se guarda junto a la sesión y sobrevive updates.
+    try {
+      final data = SessionStore.readJson(_path());
+      if (data is Map) {
+        return TrackSortMode.values.firstWhere(
+          (m) => m.name == data['sortMode'],
+          orElse: () => TrackSortMode.alphabetical,
+        );
+      }
+    } catch (_) {}
+    return TrackSortMode.alphabetical;
+  }
+
+  String _path() {
+    final session = MixStrategyFactory.getStrategy().getSessionPath();
+    return '${File(session).parent.path}${Platform.pathSeparator}_automix_sort.json';
+  }
+
+  void updateMode(TrackSortMode mode) {
+    state = mode;
+    try {
+      SessionStore.writeJson(_path(), {'sortMode': mode.name});
+    } catch (_) {}
+  }
 }
 
 class BpmCacheNotifier extends Notifier<Map<String, double>> {

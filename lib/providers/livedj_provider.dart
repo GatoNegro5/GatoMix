@@ -9,6 +9,8 @@ import 'package:file_selector/file_selector.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import '../core/hal/platform_strategy.dart';
+import '../core/livedj_order.dart';
+import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
 import '../services/track_tags.dart';
@@ -58,6 +60,8 @@ class LiveDjState {
   final int customCueInMs;
   final int customMixOutMs;
   final LiveDjMixStrategy mixStrategy;
+  // Orden de la cola en Secuencial (A-Z, BPM ↑, BPM ↓ o como se cargó).
+  final LiveDjSortMode sortMode;
   // ON AIR Radio: con la radio encendida la cola queda congelada y el motor
   // toma pistas del universo de Música filtrado por géneros.
   final bool radioOn;
@@ -77,6 +81,7 @@ class LiveDjState {
     this.customCueInMs = -1,
     this.customMixOutMs = -1,
     this.mixStrategy = LiveDjMixStrategy.sequential,
+    this.sortMode = LiveDjSortMode.manual,
     this.radioOn = false,
     this.radioGenres = const <String>{},
     this.radioNextPath,
@@ -94,6 +99,7 @@ class LiveDjState {
     int? customCueInMs,
     int? customMixOutMs,
     LiveDjMixStrategy? mixStrategy,
+    LiveDjSortMode? sortMode,
     bool? radioOn,
     Set<String>? radioGenres,
     String? radioNextPath,
@@ -113,6 +119,7 @@ class LiveDjState {
       customCueInMs: customCueInMs ?? this.customCueInMs,
       customMixOutMs: customMixOutMs ?? this.customMixOutMs,
       mixStrategy: mixStrategy ?? this.mixStrategy,
+      sortMode: sortMode ?? this.sortMode,
       radioOn: radioOn ?? this.radioOn,
       radioGenres: radioGenres ?? this.radioGenres,
       radioNextPath: clearRadioNextPath
@@ -391,11 +398,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   Future<void> _saveSnapshot() async {
     try {
-      final file = File(_sessionFilePath());
+      final path = _sessionFilePath();
       final pos = _freezePersist
           ? _sessionPositionMs
           : state.position.inMilliseconds;
       final data = {
+        'schema': 2,
         'queue': state.queue.map((f) => f.path).toList(),
         'currentTrackPath': state.currentTrackPath,
         'positionMs': pos,
@@ -405,8 +413,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
         'radioOn': state.radioOn,
         'radioGenres': state.radioGenres.toList(),
+        'sortMode': state.sortMode.name,
       };
-      await file.writeAsString(jsonEncode(data));
+      // Atómico y en fila: un cierre o una actualización a mitad de guardado
+      // ya no deja la sesión dañada (antes: cola vacía y modo Secuencial).
+      await SessionStore.writeJson(path, data);
       debugPrint("✅ [TRACKER] Snapshot guardado en disco correctamente.");
     } catch (e, stack) {
       debugPrint(
@@ -431,16 +442,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return '${session.parent.path}${Platform.pathSeparator}_livedj_shuffle_banks.json';
   }
 
-  String _liveShuffleListKey(List<String> paths) {
-    final sorted = List<String>.from(paths)..sort();
-    return jsonEncode(sorted);
-  }
-
   Map<String, dynamic> _readLiveShuffleBankFile() {
     try {
-      final file = File(_liveShuffleBanksPath());
-      if (!file.existsSync()) return <String, dynamic>{};
-      final data = jsonDecode(file.readAsStringSync());
+      final data = SessionStore.readJson(_liveShuffleBanksPath());
       if (data is Map<String, dynamic>) return data;
       if (data is Map) return Map<String, dynamic>.from(data);
     } catch (_) {}
@@ -449,111 +453,23 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _writeLiveShuffleBankFile(Map<String, dynamic> data) {
     try {
-      File(_liveShuffleBanksPath()).writeAsStringSync(jsonEncode(data));
+      SessionStore.writeJsonSync(_liveShuffleBanksPath(), data);
     } catch (_) {}
   }
 
-  // Cada canción entra en un solo grupo. El grupo aguanta hasta 20 pistas y
-  // no abre más de 10 BPM entre la más baja y la más alta. El primero sube,
-  // el siguiente baja desde su BPM más alto. Sin BPM van al final, una vez.
+  // Grupos de 20 vecinos en BPM: el 1º sube, el 2º baja, el 3º sube…
+  // Sin BPM van al final, una vez. Ver lib/core/livedj_order.dart.
   List<String> _bpmGroupOrder(List<String> paths, int salt) {
-    final rng = Random(salt * 9973 + paths.length * 13);
-    final seen = <String>{};
-    final known = <String>[];
-    final unknown = <String>[];
-    for (final path in paths) {
-      if (!seen.add(path)) continue;
-      final double bpm = _extractBpm(path);
-      if (bpm >= 60) {
-        known.add(path);
-      } else {
-        unknown.add(path);
-      }
-    }
-    known.sort((a, b) {
-      final int cmp = _extractBpm(a).compareTo(_extractBpm(b));
-      if (cmp != 0) return cmp;
-      return a.compareTo(b);
-    });
-    // Bandas de a lo más 10 BPM. Si una banda trae más de 20, se rota con la
-    // semilla y se parte de 20 en 20: cada trozo sigue dentro de esos 10.
-    const int maxSize = 20;
-    const double maxSpan = 10;
-    final bands = <List<String>>[];
-    var band = <String>[];
-    double bandMin = 0;
-    for (final path in known) {
-      final double bpm = _extractBpm(path);
-      final bool fits = band.isNotEmpty && (bpm - bandMin) <= maxSpan;
-      if (band.isEmpty) {
-        band = <String>[path];
-        bandMin = bpm;
-      } else if (fits) {
-        band.add(path);
-      } else {
-        bands.add(band);
-        band = <String>[path];
-        bandMin = bpm;
-      }
-    }
-    if (band.isNotEmpty) bands.add(band);
-
-    final groups = <List<String>>[];
-    for (final raw in bands) {
-      final List<String> turned = List<String>.from(raw);
-      if (turned.length > maxSize) {
-        final int shift = rng.nextInt(turned.length);
-        final List<String> rot = <String>[
-          ...turned.sublist(shift),
-          ...turned.sublist(0, shift),
-        ];
-        for (var i = 0; i < rot.length; i += maxSize) {
-          final int end = min(i + maxSize, rot.length);
-          groups.add(rot.sublist(i, end));
-        }
-      } else {
-        groups.add(turned);
-      }
-    }
-
-    final bool startUp = salt.isOdd;
-    final out = <String>[];
-    for (var g = 0; g < groups.length; g++) {
-      final group = List<String>.from(groups[g]);
-      final bool up = startUp ? g.isEven : g.isOdd;
-      group.sort((a, b) {
-        final int cmp = up
-            ? _extractBpm(a).compareTo(_extractBpm(b))
-            : _extractBpm(b).compareTo(_extractBpm(a));
-        if (cmp != 0) return cmp;
-        return a.compareTo(b);
-      });
-      out.addAll(group);
-    }
-    unknown.shuffle(rng);
-    out.addAll(unknown);
-    return out;
+    return buildShuffleGroups(
+      paths,
+      _extractBpm,
+      salt,
+    ).expand((g) => g).toList();
   }
 
-  List<List<String>> _buildTenLiveShuffleBanks(List<String> paths) {
-    final banks = <List<String>>[];
-    final seen = <String>{};
-    var salt = 1;
-    while (banks.length < 10 && salt < 400) {
-      final order = _bpmGroupOrder(paths, salt);
-      final sig = order.join('\n');
-      if (seen.add(sig)) banks.add(order);
-      salt++;
-    }
-    if (banks.isEmpty) {
-      banks.add(List<String>.from(paths));
-    }
-    final int got = banks.length;
-    while (banks.length < 10) {
-      banks.add(List<String>.from(banks[banks.length % got]));
-    }
-    return banks;
-  }
+  // Firmas de grupos ya usados (persisten en _livedj_shuffle_banks.json):
+  // cada Shuffle arma grupos con composición nueva.
+  static const int _shuffleHistoryCap = 3000;
 
   void _applyLiveShuffleBank({required bool advance}) {
     if (state.queue.length <= 1) {
@@ -564,64 +480,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
 
     final paths = state.queue.map((f) => f.path).toList();
-    final key = _liveShuffleListKey(paths);
     final all = _readLiveShuffleBankFile();
-    final int spin = (all['spin'] as int?) ?? 0;
-    final lists = Map<String, dynamic>.from(
-      (all['lists'] as Map?) ?? <String, dynamic>{},
+    final List<String> hist = ((all['history'] as List?) ?? const [])
+        .map((e) => e.toString())
+        .toList();
+    final picked = pickFreshShuffle(
+      paths,
+      _extractBpm,
+      hist.toSet(),
+      Random(),
     );
-    Map<String, dynamic> entry = <String, dynamic>{};
-    final raw = lists[key];
-    if (raw is Map) entry = Map<String, dynamic>.from(raw);
-
-    List<List<String>> banks = <List<String>>[];
-    final rawBanks = entry['banks'];
-    if (rawBanks is List) {
-      for (final row in rawBanks) {
-        if (row is List) {
-          banks.add(row.map((e) => e.toString()).toList());
-        }
-      }
-    }
-    final bool sameSet =
-        banks.length == 10 &&
-        banks.every((row) {
-          if (row.length != paths.length) return false;
-          final a = List<String>.from(row)..sort();
-          final b = List<String>.from(paths)..sort();
-          return listEquals(a, b);
-        });
-    // 3 = grupos de a lo más 20, separados como máximo 10 BPM, sin repetir.
-    const int shuffleAlgo = 3;
-    final int algo = (entry['algo'] as int?) ?? 0;
-    if (!sameSet || algo != shuffleAlgo) {
-      banks = _buildTenLiveShuffleBanks(paths);
-      final int previous = (entry['cursor'] as int?) ?? -1;
-      final int carried = previous >= 0 ? previous : (spin % 10) - 1;
-      if (previous < 0) all['spin'] = (spin + 1) % 10;
-      entry = <String, dynamic>{
-        'cursor': carried,
-        'banks': banks,
-        'algo': shuffleAlgo,
-      };
-    }
-
-    final int last = (entry['cursor'] as int?) ?? -1;
-    final int use = advance ? (last + 1) % 10 : (last < 0 ? 0 : last % 10);
-    final List<String> order = List<String>.from(banks[use]);
-    final known = paths.toSet();
     final queued = <File>[
-      for (final path in order)
-        if (known.contains(path)) File(path),
+      for (final g in picked.groups)
+        for (final p in g) File(p),
     ];
-    for (final path in paths) {
-      if (!queued.any((f) => f.path == path)) queued.add(File(path));
+    for (final g in picked.groups) {
+      if (g.length > 1) hist.add(groupSignature(g));
     }
-
-    entry['cursor'] = use;
-    entry['banks'] = banks;
-    lists[key] = entry;
-    all['lists'] = lists;
+    final int over = hist.length - _shuffleHistoryCap;
+    all['history'] = over > 0 ? hist.sublist(over) : hist;
+    all['algo'] = 4;
+    all['lastSeed'] = picked.seed;
+    all.remove('lists'); // bancos fijos de la versión anterior (se repetían cada 10)
     _writeLiveShuffleBankFile(all);
 
     state = state.copyWith(
@@ -630,8 +510,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
     _saveSnapshot();
     debugPrint(
-      "🔀 [TRACKER] Shuffle banco ${use + 1}/10. ${queued.length} pistas.",
+      "🔀 [TRACKER] Shuffle: ${picked.groups.length} grupos, ${queued.length} pistas.",
     );
+  }
+
+  /// Orden de la cola en Secuencial. Se guarda y se vuelve a aplicar a lo
+  /// que se cargue después. No cambia la mezcla.
+  void setSortMode(LiveDjSortMode mode) {
+    state = state.copyWith(sortMode: mode);
+    if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
+    _saveSnapshot();
+  }
+
+  void _applySort() {
+    if (state.sortMode == LiveDjSortMode.manual || state.queue.length < 2) {
+      return;
+    }
+    final ordered = sortLiveDjPaths(
+      state.queue.map((f) => f.path).toList(),
+      state.sortMode,
+      _extractBpm,
+    );
+    state = state.copyWith(queue: ordered.map((p) => File(p)).toList());
   }
 
   void toggleMixStrategy() {
@@ -643,6 +543,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         shuffleQueue();
       } else {
         state = state.copyWith(mixStrategy: LiveDjMixStrategy.sequential);
+        _applySort();
         debugPrint(
           "➡️ [TRACKER] Estado Mutado a SECUENCIAL. Mandando señal a la UI...",
         );
@@ -655,30 +556,47 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   Future<void> _initPersistence() async {
     try {
-      final file = _resolveSessionFile();
-      if (!file.existsSync()) return;
+      final data = SessionStore.readJson(_resolveSessionFile().path);
+      if (data is! Map) return;
 
-      final content = await file.readAsString();
-      final data = jsonDecode(content);
-
-      final queuePaths = (data['queue'] as List?)?.cast<String>() ?? [];
-      final queueFiles = queuePaths
+      final queuePaths =
+          ((data['queue'] as List?) ?? const []).map((e) => e.toString()).toList();
+      // Pistas renombradas por Masterizar se reencuentran en su carpeta.
+      final queueFiles = resolveSessionPaths(queuePaths)
           .map((p) => File(p))
-          .where((f) => f.existsSync())
           .toList();
       String? currentTrackPath = data['currentTrackPath'] as String?;
-      if (currentTrackPath != null && !File(currentTrackPath).existsSync()) {
-        currentTrackPath = null;
+      if (currentTrackPath != null) {
+        final hit = resolveSessionPaths([currentTrackPath]);
+        currentTrackPath = hit.isEmpty ? null : hit.first;
       }
+      if (currentTrackPath != null) {
+        queueFiles.removeWhere((f) => f.path == currentTrackPath);
+      }
+      final LiveDjSortMode savedSort = LiveDjSortMode.values.firstWhere(
+        (m) => m.name == data['sortMode'],
+        orElse: () => LiveDjSortMode.manual,
+      );
+      bool currentFromQueue = false;
       if (currentTrackPath == null && queueFiles.isNotEmpty) {
         // La pista que pasa a "actual" sale de la cola (cartridge destructiva);
         // si no, volvería a sonar al terminar.
         currentTrackPath = queueFiles.removeAt(0).path;
+        currentFromQueue = true;
       }
-      final positionMs = data['positionMs'] as int?;
+      // La posición guardada era de otra pista: no se aplica a la nueva.
+      final int? positionMs = currentFromQueue
+          ? null
+          : data['positionMs'] as int?;
 
-      final mixModeIdx = data['mixMode'] as int? ?? 0;
-      final mixStrategyIdx = data['mixStrategy'] as int? ?? 0;
+      final mixModeIdx = (data['mixMode'] as int? ?? 0).clamp(
+        0,
+        LiveDjMixMode.values.length - 1,
+      );
+      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
+        0,
+        LiveDjMixStrategy.values.length - 1,
+      );
       final mixFormulaIdx = data['mixFormula'] as int? ?? 0;
       if (mixFormulaIdx >= 0 && mixFormulaIdx < MixFormula.values.length) {
         ref.read(mixFormulaProvider.notifier).state =
@@ -704,6 +622,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         currentTrackPath: currentTrackPath,
         currentMixMode: LiveDjMixMode.values[mixModeIdx],
         mixStrategy: LiveDjMixStrategy.values[mixStrategyIdx],
+        sortMode: savedSort,
       );
       if (savedRadioOn) unawaited(_radioEnsureIndex());
 
@@ -743,6 +662,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       // Cola estable: la pista nueva va al final; lo ya cargado no se mueve
       // ni cambia de modo (secuencial/shuffle solo lo cambia el botón).
       state = state.copyWith(queue: [...state.queue, file]);
+      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
       _saveSnapshot();
     }
   }
@@ -767,6 +687,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
       final bool wasEmpty = state.queue.isEmpty;
       state = state.copyWith(queue: [...state.queue, ...newFiles]);
+      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
       _saveSnapshot();
       // Cola vacía (p. ej. fin de cola) + shuffle activo: la carga nueva usa
       // el mismo banco de shuffle del botón, así no arranca secuencial.
@@ -842,6 +763,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           if (fresh.isNotEmpty) {
             final bool wasEmpty = state.queue.isEmpty;
             state = state.copyWith(queue: [...state.queue, ...fresh]);
+            if (state.mixStrategy == LiveDjMixStrategy.sequential) {
+              _applySort();
+            }
             _saveSnapshot();
             if (wasEmpty &&
                 state.mixStrategy == LiveDjMixStrategy.random &&

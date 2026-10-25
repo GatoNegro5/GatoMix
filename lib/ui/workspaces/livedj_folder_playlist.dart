@@ -8,6 +8,7 @@ import '../../core/id3_names.dart';
 import '../../core/net/artist_info.dart';
 import '../../core/track_file_name.dart';
 import '../../providers/livedj_provider.dart';
+import 'livedj_sort_button.dart';
 import '../../providers/mix_formula.dart';
 import '../../providers/theme_provider.dart';
 import '../../services/id3_title_artist.dart';
@@ -271,6 +272,7 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
                   size: wide ? 26 : 22,
                 ),
               ),
+              LiveDjSortButton(size: wide ? 24 : 20),
               IconButton(
                 onPressed: canToggle
                     ? () => ref.read(liveDjProvider.notifier).togglePlayPause()
