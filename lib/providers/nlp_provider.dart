@@ -444,6 +444,42 @@ class NlpWorker {
     return const LyricChoice.none();
   }
 
+  /// Masterizar: todas las letras sincronizadas candidatas (misma búsqueda
+  /// que el botón del Laboratorio, con respaldos), mejor puntuadas primero.
+  /// Descarta las dudosas. No escribe nada.
+  Future<List<String>> syncedLyricCandidates(String audioPath) async {
+    try {
+      final id3 = await loadId3TitleArtist(audioPath);
+      final int localSec = await _getLocalDurationSec(audioPath);
+      final List<LyricIdentity> ids = lyricIdentities(
+        path: audioPath,
+        id3Artist: id3.artist,
+        id3Title: id3.title,
+        id3Album: id3.album,
+        durationSec: localSec,
+      );
+      final List<String> out = <String>[];
+      for (final LyricIdentity id in ids) {
+        if (id.title.isEmpty || localSec <= 0) continue;
+        final r = await searchManualLyrics(
+          artist: id.artist,
+          title: id.title,
+          durationSec: localSec,
+          medley: id.medley,
+          audioPath: audioPath,
+        );
+        for (final LyricCandidate c in r.rows) {
+          if (!c.synced || c.doubtful || c.body.trim().isEmpty) continue;
+          if (!out.contains(c.body)) out.add(c.body);
+        }
+      }
+      return out;
+    } catch (e) {
+      debugPrint('🟡 [NLP] candidatos de letra: $e');
+      return const <String>[];
+    }
+  }
+
   /// Búsqueda manual del Laboratorio: /api/get, /api/search y /api/search?q=.
   /// Si las tres siguen en 503 o 429, [unavailable] queda en true.
   Future<

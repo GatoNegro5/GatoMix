@@ -229,29 +229,37 @@ class MasterTrack {
       return (mark: 'OK', reason: '');
     }
     if (!lrcIsManual(text)) {
+      final marks = await rust_dsp.readGmxMarks(inputPath: path);
+      // 1) La búsqueda de Automix y luego TODOS los candidatos (con respaldos
+      //    sin año / intercambiado). LRCLIB trae tiempos del audio original:
+      //    se aplica el mismo recorte que ya tiene el archivo.
+      final List<String> candidates = <String>[];
       final choice = await worker.lookupSafeLyric(path);
       if (choice.hasText && choice.kind != LyricKind.plain) {
-        String fresh = choice.fileText;
-        // LRCLIB viene con los tiempos del audio original: aplica el mismo
-        // recorte que ya tiene el archivo.
-        final marks = await rust_dsp.readGmxMarks(inputPath: path);
-        if (marks.trimMs > 0) {
-          fresh = shiftLrcText(fresh, marks.trimMs).text;
-        }
-        final LyricTimingVerdict nv = checkLyricTiming(
-          lrc: fresh,
-          durationMs: durationMs,
-          voiceOnsetMs: voice,
-        );
-        if (nv.ok && fresh.trim() != text.trim()) {
-          keepOriginalLrcBakSync(lrc.path);
-          await lrc.writeAsString(fresh);
-          await _syncKaraokeLrc(path, fresh);
-          final int? start = firstVerseMs(fresh);
-          if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
-          await _mark(path, 'GMX_LYR_CHECK', 'FIXED');
-          return (mark: 'FIXED', reason: v.reason);
-        }
+        candidates.add(choice.fileText);
+      }
+      candidates.addAll(await worker.syncedLyricCandidates(path));
+      String? fixed = firstPassingLyric(
+        candidates: candidates,
+        current: text,
+        trimMs: marks.trimMs,
+        durationMs: durationMs,
+        voiceOnsetMs: voice,
+      );
+      // 2) Letra completa pero corrida: se mueve entera a donde entra la voz.
+      fixed ??= realignLrcToVoice(
+        lrc: text,
+        durationMs: durationMs,
+        voiceOnsetMs: voice,
+      );
+      if (fixed != null && fixed.trim() != text.trim()) {
+        keepOriginalLrcBakSync(lrc.path);
+        await lrc.writeAsString(fixed);
+        await _syncKaraokeLrc(path, fixed);
+        final int? start = firstVerseMs(fixed);
+        if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
+        await _mark(path, 'GMX_LYR_CHECK', 'FIXED');
+        return (mark: 'FIXED', reason: v.reason);
       }
     }
     await _mark(path, 'GMX_LYR_CHECK', 'REVIEW');

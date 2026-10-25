@@ -82,3 +82,65 @@ LyricTimingVerdict checkLyricTiming({
   }
   return LyricTimingVerdict(LyricTimingIssue.none, first, last, 'ok');
 }
+
+
+/// Mínimo desfase (ms) que vale la pena corregir moviendo toda la letra.
+const int kLyricRealignMinMs = 1000;
+
+/// Mueve TODOS los sellos de la letra para que el primer verso caiga en
+/// [voiceOnsetMs]. Solo si la letra queda bien según [checkLyricTiming];
+/// si no, null. Nunca toca una letra manual. La marca `[gmx_shift:]` se
+/// conserva tal cual (es el recorte del audio, no este ajuste).
+String? realignLrcToVoice({
+  required String lrc,
+  required int durationMs,
+  required int? voiceOnsetMs,
+}) {
+  if (voiceOnsetMs == null || voiceOnsetMs < 0) return null;
+  if (lrcIsManual(lrc) || lrcIsPlain(lrc)) return null;
+  final int? first = firstVerseMs(lrc);
+  if (first == null) return null;
+  final int delta = voiceOnsetMs - first;
+  if (delta.abs() < kLyricRealignMinMs) return null;
+  final RegExp stamp = RegExp(r'\[(\d{1,3}):(\d{2})\.(\d{2,3})\]');
+  final String moved = lrc.replaceAllMapped(stamp, (Match m) {
+    final String f = m.group(3)!;
+    final int frac = f.length == 2 ? int.parse(f) * 10 : int.parse(f);
+    int ms = (int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!)) * 1000 +
+        frac + delta;
+    if (ms < 0) ms = 0;
+    final int cs = (ms % 1000) ~/ 10;
+    return '[${(ms ~/ 60000).toString().padLeft(2, '0')}:'
+        '${((ms % 60000) ~/ 1000).toString().padLeft(2, '0')}.'
+        '${cs.toString().padLeft(2, '0')}]';
+  });
+  final LyricTimingVerdict v = checkLyricTiming(
+    lrc: moved,
+    durationMs: durationMs,
+    voiceOnsetMs: voiceOnsetMs,
+  );
+  return v.ok ? moved : null;
+}
+
+/// Primer candidato (en orden) que, con el recorte [trimMs] aplicado, pasa
+/// el chequeo y es distinto de [current]. Null si ninguno sirve.
+String? firstPassingLyric({
+  required List<String> candidates,
+  required String current,
+  required int trimMs,
+  required int durationMs,
+  int? voiceOnsetMs,
+}) {
+  for (final String raw in candidates) {
+    if (raw.trim().isEmpty || lrcIsPlain(raw)) continue;
+    final String fresh = trimMs > 0 ? shiftLrcText(raw, trimMs).text : raw;
+    if (fresh.trim() == current.trim()) continue;
+    final LyricTimingVerdict v = checkLyricTiming(
+      lrc: fresh,
+      durationMs: durationMs,
+      voiceOnsetMs: voiceOnsetMs,
+    );
+    if (v.ok) return fresh;
+  }
+  return null;
+}
