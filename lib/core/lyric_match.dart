@@ -527,6 +527,51 @@ Uri lrclibQueryUri(String query) {
   return Uri.https('lrclib.net', '/api/search', {'q': query.trim()});
 }
 
+final RegExp _yearSuffix = RegExp(
+  r'^(.*?\S)\s*(?:(?:\s-|\s/|\|)\s*(?:19|20)\d\d|\(\s*(?:19|20)\d\d\s*\))\s*$',
+);
+
+/// Quita un año final separado (` - 1983`, ` / 2023`, `| 1999`, `(1983)`)
+/// si queda título. `1979` solo no se toca.
+String lyricStripYearSuffix(String title) {
+  final Match? m = _yearSuffix.firstMatch(title.trim());
+  if (m == null) return title.trim();
+  final String rest = m.group(1)!.trim();
+  return rest.isEmpty ? title.trim() : rest;
+}
+
+LyricIdentity _with(LyricIdentity id, String artist, String title) =>
+    LyricIdentity(
+      artist: artist,
+      title: title,
+      album: id.album,
+      durationSec: id.durationSec,
+      remixOrExtended: id.remixOrExtended,
+      medley: id.medley,
+      fromFile: id.fromFile,
+    );
+
+/// Reintentos cuando la búsqueda normal da 0 filas, en orden:
+/// sin año; artista/título intercambiados (`TÍTULO - ARTISTA`); ambos.
+List<LyricIdentity> lyricFallbackIdentities(LyricIdentity id) {
+  final String a = id.artist.trim();
+  final String t = id.title.trim();
+  final String a0 = lyricStripYearSuffix(a);
+  final String t0 = lyricStripYearSuffix(t);
+  final List<LyricIdentity> out = <LyricIdentity>[];
+  final Set<String> seen = <String>{'$a|$t'};
+  void push(String x, String y) {
+    if (y.isEmpty || !seen.add('$x|$y')) return;
+    out.add(_with(id, x, y));
+  }
+  push(a, t0);
+  if (a.isNotEmpty) {
+    push(t, a);
+    push(t0, a0);
+  }
+  return out;
+}
+
 /// Sin artista (nombre sin ` - `): búsqueda libre `q=` con el título
 /// completo. Null si hay artista o no hay título.
 Uri? lrclibTitleOnlyUri(LyricIdentity id) {

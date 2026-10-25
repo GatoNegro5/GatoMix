@@ -442,16 +442,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
       );
       final videoId = VideoId(targetUrl);
       final video = await _yt.videos.get(videoId);
-      final safeTitle = video.title
-          .replaceAll(RegExp(r'[\\/:*?"<>|]'), '')
-          .trim();
-      final CleanTrackName cleaned = cleanTrackFileName(safeTitle);
-      final String stemRaw =
-          cleaned.stem.trim().isEmpty ? safeTitle : cleaned.stem.trim();
-      final String safeStem = stemRaw
-          .replaceAll(RegExp(r'[\\/:*?"<>|]'), '')
-          .trim();
-      final String trackStem = safeStem.isEmpty ? 'Pista' : safeStem;
+      final String trackStem = ytTitleToStem(video.title);
 
       final tempDir = Directory.systemTemp;
       final String sep = Platform.pathSeparator;

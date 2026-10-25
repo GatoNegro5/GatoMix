@@ -382,7 +382,7 @@ class NlpWorker {
 
     final List<Map<String, dynamic>> pool = <Map<String, dynamic>>[];
     var serverDown = false;
-    for (final LyricIdentity id in ids) {
+    Future<void> collect(LyricIdentity id) async {
       final Uri? qUri = lrclibTitleOnlyUri(id);
       if (qUri != null) {
         // Sin artista: solo búsqueda libre por título completo (q=).
@@ -391,7 +391,7 @@ class NlpWorker {
         for (final dynamic raw in found.items) {
           if (raw is Map) pool.add(Map<String, dynamic>.from(raw));
         }
-        continue;
+        return;
       }
       try {
         final response = await _resilientGet(lrclibGetUri(id).toString());
@@ -412,9 +412,27 @@ class NlpWorker {
         if (raw is Map) pool.add(Map<String, dynamic>.from(raw));
       }
     }
+
+    for (final LyricIdentity id in ids) {
+      await collect(id);
+    }
+    LyricIdentity main = ids.first;
+    List<LyricIdentity> also =
+        ids.length > 1 ? ids.sublist(1) : const <LyricIdentity>[];
+    if (pool.isEmpty) {
+      // 0 filas: sin año, intercambiado (TÍTULO - ARTISTA), o ambos.
+      for (final LyricIdentity fb in lyricFallbackIdentities(ids.first)) {
+        await collect(fb);
+        if (pool.isNotEmpty) {
+          main = fb;
+          also = const <LyricIdentity>[];
+          break;
+        }
+      }
+    }
     final LyricChoice choice = chooseLrclibLyric(
-      ids.first,
-      also: ids.length > 1 ? ids.sublist(1) : const <LyricIdentity>[],
+      main,
+      also: also,
       searched: pool,
     );
     if (choice.hasText) return choice;

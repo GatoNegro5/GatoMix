@@ -206,3 +206,18 @@ String uniqueMp3Name(String stem, bool Function(String fileName) taken) {
   }
   return '$base (${DateTime.now().millisecondsSinceEpoch}).mp3';
 }
+
+
+final RegExp _fsForbidden = RegExp(r'[\\/:*?"<>|]');
+
+/// Título de YouTube → nombre de archivo. Primero convierte ` / ` y ` | `
+/// en separador ` - ` (antes de quitar caracteres prohibidos), luego limpia.
+/// `AC/DC` (sin espacios) no es separador.
+String ytTitleToStem(String rawTitle) {
+  final String sep = rawTitle.replaceAll(RegExp(r'\s+[/|]\s+'), ' - ');
+  final String safe = sep.replaceAll(_fsForbidden, '').trim();
+  final CleanTrackName cleaned = cleanTrackFileName(safe);
+  final String stem = cleaned.stem.trim().isEmpty ? safe : cleaned.stem.trim();
+  final String out = stem.replaceAll(_fsForbidden, '').trim();
+  return out.isEmpty ? 'Pista' : out;
+}
