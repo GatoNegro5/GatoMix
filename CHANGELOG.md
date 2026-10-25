@@ -2,6 +2,13 @@
 
 ![GatoMix](assets/branding/gatomix_logo.png)
 
+## 1.0.14+28 — LOG CAMBIO (Masterizar: ninguna canción cuelga un lote)
+
+- **Tope de 20 minutos por canción en Rust.** El reloj arranca al entrar a cada canción. Al pasar el tope, la canción sale con `Tiempo agotado por canción`, se borra el temporal y el original queda intacto. `GMX_SONG_TIMEOUT_S` lo cambia para pruebas.
+- **Vigilante del lote sin clics** (`lib/core/song_watchdog.dart`). Si ninguna pista avanza en 30 minutos, se escribe `ERROR watchdog` en el log y el proceso sale con código 3, así el runner sigue con la carpeta siguiente.
+- **Caso Kool & The Gang (2) (GMX_TEST/damaged):** no era un bucle infinito. Es un MP3 de 376 kbps y 5:55 que necesita hasta 4 pasadas de codificación y medición para el pico real y los −14 LUFS: 267 s en el box y unos 13 min en la laptop, mientras corría otro lote. Terminó solo, sin que hubiera que matar nada.
+- Funciona igual en Windows, Android, macOS e iPhone.
+
 ## 1.0.13+27 — LOG CAMBIO (Masterizar: letras con transcriptor y Laboratorio automático)
 
 - **Letras corregidas con palabras con tiempo** (`lib/core/lyric_ai_align.dart`). Usa el archivo opcional `<canción>.gmx_words.json`, que genera `tool/gmx_whisper_words.py` (faster-whisper, offline, solo en escritorio). Sin ese archivo, todo sigue igual que antes.

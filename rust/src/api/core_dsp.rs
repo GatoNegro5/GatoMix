@@ -3518,20 +3518,44 @@ fn master_cancel_flag() -> &'static std::sync::Arc<std::sync::atomic::AtomicBool
 
 thread_local! {
     static CANCEL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static SONG_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tope de reloj por canción (1.0.14): ninguna pista puede colgar un lote.
+/// `GMX_SONG_TIMEOUT_S` lo cambia (pruebas); por defecto 20 min.
+const SONG_TIMEOUT: &str = "Tiempo agotado por canción";
+
+fn song_timeout() -> std::time::Duration {
+    let secs = std::env::var("GMX_SONG_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(20 * 60);
+    std::time::Duration::from_secs(secs)
 }
 
 struct CancelWatch;
 
 impl CancelWatch {
     fn enter() -> Self {
-        CANCEL_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+        CANCEL_DEPTH.with(|d| {
+            if d.get() == 0 {
+                SONG_DEADLINE.with(|t| t.set(Some(std::time::Instant::now() + song_timeout())));
+            }
+            d.set(d.get().saturating_add(1))
+        });
         CancelWatch
     }
 }
 
 impl Drop for CancelWatch {
     fn drop(&mut self) {
-        CANCEL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        CANCEL_DEPTH.with(|d| {
+            d.set(d.get().saturating_sub(1));
+            if d.get() == 0 {
+                SONG_DEADLINE.with(|t| t.set(None));
+            }
+        });
     }
 }
 
@@ -3539,8 +3563,34 @@ fn cancel_now() -> Result<(), String> {
     let watching = CANCEL_DEPTH.with(|d| d.get() > 0);
     if watching && master_cancel_flag().load(std::sync::atomic::Ordering::Acquire) {
         Err(CANCELLED.to_string())
+    } else if watching
+        && SONG_DEADLINE.with(|t| t.get()).is_some_and(|d| std::time::Instant::now() >= d)
+    {
+        Err(SONG_TIMEOUT.to_string())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod song_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_trips_and_clears() {
+        {
+            let _w = CancelWatch::enter();
+            assert!(cancel_now().is_ok());
+            // Solo este hilo: no toca el entorno de los demás tests.
+            SONG_DEADLINE.with(|t| {
+                t.set(Some(std::time::Instant::now() - std::time::Duration::from_millis(1)))
+            });
+            assert_eq!(cancel_now().unwrap_err(), SONG_TIMEOUT);
+        }
+        // Fuera de una canción no hay tope.
+        assert!(cancel_now().is_ok());
+        let _w = CancelWatch::enter();
+        assert!(cancel_now().is_ok());
     }
 }
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/brand_paths.dart';
 import '../core/lab_quarantine.dart';
+import '../core/song_watchdog.dart';
 import '../providers/pipeline_provider.dart';
 import 'workspaces/dsp_workspace.dart';
 
@@ -58,6 +60,8 @@ class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
     '${widget.folder}${Platform.pathSeparator}.gatomix_master_headless.log',
   );
   String _last = '';
+  DateTime _progressAt = DateTime.now();
+  Timer? _watchdog;
 
   void _write(String line) {
     try {
@@ -72,6 +76,13 @@ class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
   @override
   void initState() {
     super.initState();
+    _watchdog = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (headlessStalled(_progressAt, DateTime.now())) {
+        _write('ERROR watchdog: sin progreso en $_last');
+        _watchdog?.cancel();
+        exit(3);
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _run());
   }
 
@@ -98,6 +109,7 @@ class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
     } catch (e) {
       _write('ERROR $e');
     }
+    _watchdog?.cancel();
     await Future<void>.delayed(const Duration(seconds: 2));
     exit(0);
   }
@@ -108,6 +120,7 @@ class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
       final key = '${next.current}/${next.total} ${next.fileName}';
       if (key != _last && next.total > 0) {
         _last = key;
+        _progressAt = DateTime.now();
         _write('PISTA $key');
       }
     });
