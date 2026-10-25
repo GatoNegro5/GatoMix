@@ -542,14 +542,25 @@ double lyricTitleOnlyScore(
   String apiTitle,
 ) {
   final String full = lyricNormLoose(fullTitle);
-  final String art = lyricNormLoose(apiArtist);
-  if (full.isEmpty || art.isEmpty) return 0;
+  if (full.isEmpty) return 0;
   final String padded = ' $full ';
-  if (!padded.contains(' $art ')) return 0;
-  final String rest = padded.replaceFirst(' $art ', ' ').trim();
-  if (rest.isEmpty) return 0;
-  final double ts = lyricTitleScore(rest, apiTitle);
-  return ts >= kLyricTitleStrong ? ts : 0;
+  // El artista completo, o el alias entre paréntesis / el nombre de fuera:
+  // «MIKEL ERENTXUN (DUNCAN DHU)» también vale como «Duncan Dhu».
+  final List<String> forms = <String>{
+    lyricNormLoose(apiArtist),
+    for (final Match m in RegExp(r'[\(\[]([^\)\]]+)[\)\]]').allMatches(apiArtist))
+      lyricNormLoose(m.group(1)!),
+    lyricNorm(apiArtist),
+  }.where((String a) => a.isNotEmpty).toList();
+  var best = 0.0;
+  for (final String art in forms) {
+    if (!padded.contains(' $art ')) continue;
+    final String rest = padded.replaceFirst(' $art ', ' ').trim();
+    if (rest.isEmpty) continue;
+    final double ts = lyricTitleScore(rest, apiTitle);
+    if (ts >= kLyricTitleStrong && ts > best) best = ts;
+  }
+  return best;
 }
 
 /// Las tres lecturas del botón Buscar letra, en paralelo.

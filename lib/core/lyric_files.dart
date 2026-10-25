@@ -187,3 +187,14 @@ Future<LabLrcRestore> moveLabLrcToOrigin({
   if (bak.existsSync()) await bak.delete();
   return LabLrcRestore.moved;
 }
+
+/// Antes de re-descargar el audio en el LAB: asegura el `.lrc.bak` (una sola
+/// vez, ver [keepOriginalLrcBakSync]) y quita el `.lrc` actual para que se
+/// busque letra nueva. True si había `.lrc`.
+bool stashLrcBeforeRedownloadSync(String lrcPath) {
+  final File f = File(lrcPath);
+  keepOriginalLrcBakSync(lrcPath);
+  if (!f.existsSync()) return false;
+  f.deleteSync();
+  return true;
+}

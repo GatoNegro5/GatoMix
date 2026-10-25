@@ -717,10 +717,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           } catch (_) {}
         }
 
-        if (targetLrcFile.existsSync()) {
+        // El .lrc.bak se escribe una sola vez (original o marcador
+        // [gmx_no_original:1]); un .bak existente no se pisa.
+        if (stashLrcBeforeRedownloadSync(targetLrcFile.path)) {
           debugPrint("🟢 [LAB TRACKER FS] La letra vieja queda en .lrc.bak.");
-          await targetLrcFile.copy('${targetLrcFile.path}.bak');
-          targetLrcFile.deleteSync();
         }
 
         String finalPath = newFile.path;
