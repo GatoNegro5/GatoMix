@@ -14,3 +14,8 @@
 - Al reemplazar: `.lrc.bak` solo si no existía; se sincroniza el `_K.lrc`; `GMX_LYR_CHECK=FIXED`. Letras `[gmx_manual]` nunca se tocan.
 - Código Dart puro, igual en Windows, Android, macOS e iPhone. Sin cambios en liveDjProvider ni automixProvider.
 - Nuevas funciones: `firstPassingLyric`, `realignLrcToVoice` (lib/core/lyric_timing_check.dart), `syncedLyricCandidates` (nlp_provider). 9 tests nuevos.
+
+## 1.0.11+25 — Masterizar sin clics
+- Nuevo: `gatomix_player.exe --master-folder "<carpeta>"` corre el mismo Masterizar (mismo código y mismo checkpoint `.dj_master_checkpoint.json`) sin el aviso previo, anota el avance en `<carpeta>/.gatomix_master_headless.log` y cierra la app al terminar.
+- Sin el argumento la app arranca igual que antes (UI sin cambios). Aplica a las 4 plataformas (solo se usa si se pasa el argumento).
+- Prueba: `test/headless_args_test.dart`.

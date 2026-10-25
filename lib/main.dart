@@ -29,6 +29,8 @@ import 'ui/workspaces/lan_sync_workspace.dart';
 import 'ui/workspaces/livedj_workspace.dart';
 import 'ui/workspaces/karaoke_workspace.dart';
 import 'services/audio_interruption.dart';
+import 'core/headless_args.dart';
+import 'ui/headless_master_page.dart';
 
 // ==========================================
 // ENRUTADOR DE ESTADO (SPA - Single Page App)
@@ -95,7 +97,7 @@ final routerProvider = NotifierProvider<RouterNotifier, int>(
   RouterNotifier.new,
 );
 
-Future<void> main() async {
+Future<void> main([List<String> args = const []]) async {
   // 🛠️ REGLA: Cero Deducciones. Atrapamos cualquier colapso pre-runApp.
   try {
     WidgetsFlutterBinding.ensureInitialized();
@@ -129,6 +131,13 @@ Future<void> main() async {
     // 🛠️ BINDING 3: Inicialización del Motor de Reproducción de Audio (libmpv)
     MediaKit.ensureInitialized();
 
+    final String? masterFolder = parseMasterFolderArg(args);
+    if (masterFolder != null) {
+      runApp(
+        ProviderScope(child: HeadlessMasterApp(folder: masterFolder)),
+      );
+      return;
+    }
     runApp(const ProviderScope(child: GatoMixApp()));
   } catch (e, stackTrace) {
     // 🛠️ TRACKER DE KERNEL: Si algo falla a nivel binario, no mostramos pantalla gris.

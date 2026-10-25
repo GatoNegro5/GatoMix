@@ -89,6 +89,19 @@ final aiEngineProvider = StateNotifierProvider<AiEngineNotifier, AiEngineState>(
 class DspNlpWorkspace extends ConsumerWidget {
   const DspNlpWorkspace({super.key});
 
+  /// Modo sin clics (`--master-folder`): mismo Masterizar y mismo checkpoint
+  /// que el botón, solo sin el aviso previo.
+  Future<void> runHeadlessMaster(
+    BuildContext context,
+    WidgetRef ref,
+    String targetPath,
+  ) => _executeUniversalPipeline(
+    context,
+    ref,
+    targetPath,
+    skipPreflight: true,
+  );
+
   void _showSummaryDialog(
     BuildContext context,
     String title,
@@ -411,9 +424,10 @@ class DspNlpWorkspace extends ConsumerWidget {
   Future<void> _executeUniversalPipeline(
     BuildContext context,
     WidgetRef ref,
-    String targetPath,
-  ) async {
-    if (context.mounted) {
+    String targetPath, {
+    bool skipPreflight = false,
+  }) async {
+    if (!skipPreflight && context.mounted) {
       bool isAuthorized = await _showPreFlightCheck(context);
       if (!isAuthorized) return;
     }
