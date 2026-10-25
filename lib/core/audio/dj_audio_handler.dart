@@ -22,6 +22,7 @@ class DjAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   void Function()? onNext;
   void Function()? onPrevious;
   void Function(Duration)? onSeek;
+
   /// Solo recents/cerrar tarea. Home/minimizar no dispara esto.
   Future<void> Function()? onAppDismissed;
 
@@ -163,12 +164,7 @@ class DjAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   void updateOsMetadata({required String title, required Duration duration}) {
     mediaItem.add(
-      MediaItem(
-        id: title,
-        album: 'GatoMix',
-        title: title,
-        duration: duration,
-      ),
+      MediaItem(id: title, album: 'GatoMix', title: title, duration: duration),
     );
   }
 

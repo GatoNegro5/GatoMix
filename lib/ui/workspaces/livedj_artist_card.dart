@@ -26,8 +26,8 @@ class LiveDjArtistCard extends StatelessWidget {
         final avatar = CircleAvatar(
           radius: r,
           backgroundColor: Colors.white10,
-          backgroundImage: (info.photoPath != null &&
-                  File(info.photoPath!).existsSync())
+          backgroundImage:
+              (info.photoPath != null && File(info.photoPath!).existsSync())
               ? FileImage(File(info.photoPath!))
               : null,
           child: info.photoPath == null

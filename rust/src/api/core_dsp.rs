@@ -2107,6 +2107,22 @@ fn decode_errors_tolerable(errors: u32, samples: u64, rate: u32) -> bool {
     lost_ms <= DECODE_TOL_MAX_MS && lost_ms * DECODE_TOL_FRACTION_DEN <= dur_ms
 }
 
+/// Paquetes rotos (de reservorio) en el silencio de cabeza o cola.
+fn count_silent_edge_errors(
+    err_pos: &[(u64, bool)],
+    first_loud: u64,
+    has_loud: bool,
+    last_loud: u64,
+    guard: u64,
+) -> u32 {
+    err_pos
+        .iter()
+        .filter(|&&(p, reservoir)| {
+            reservoir && (p <= first_loud || (has_loud && p >= last_loud + guard))
+        })
+        .count() as u32
+}
+
 /// Errores que bloquean el audio (0 si son tolerables).
 fn blocking_decode_errors(m: &StreamMeasure) -> u32 {
     let inner = m.decode_errors.saturating_sub(m.silent_edge_errors);
@@ -2338,47 +2354,52 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
     let mut err_pos: Vec<(u64, bool)> = Vec::new();
     let mut first_loud: Option<u64> = None;
     let mut last_loud: u64 = 0;
-    let decode_errors = decode_frames_ex(input_path, true, |r, nch, inter| {
-        if filt.is_none() {
-            rate = r;
-            channels = nch.max(1);
-            win = (r as usize / 100).max(1);
-            let (a, b) = k_stages(r as f64);
-            let (c, d) = k_stages(r as f64);
-            filt = Some((a, b, c, d));
-        }
-        let (s1l, s2l, s1r, s2r) = filt.as_mut().unwrap();
-        let nch = nch.max(1);
-        for frame in inter.chunks(nch) {
-            let l = frame[0];
-            let rgt = if nch > 1 { frame[1] } else { l };
-            let mono = (l as f64 + rgt as f64) * 0.5;
-            if l.abs() > EDGE_LOUD || rgt.abs() > EDGE_LOUD {
-                if first_loud.is_none() {
-                    first_loud = Some(samples);
+    let decode_errors = decode_frames_ex(
+        input_path,
+        true,
+        |r, nch, inter| {
+            if filt.is_none() {
+                rate = r;
+                channels = nch.max(1);
+                win = (r as usize / 100).max(1);
+                let (a, b) = k_stages(r as f64);
+                let (c, d) = k_stages(r as f64);
+                filt = Some((a, b, c, d));
+            }
+            let (s1l, s2l, s1r, s2r) = filt.as_mut().unwrap();
+            let nch = nch.max(1);
+            for frame in inter.chunks(nch) {
+                let l = frame[0];
+                let rgt = if nch > 1 { frame[1] } else { l };
+                let mono = (l as f64 + rgt as f64) * 0.5;
+                if l.abs() > EDGE_LOUD || rgt.abs() > EDGE_LOUD {
+                    if first_loud.is_none() {
+                        first_loud = Some(samples);
+                    }
+                    last_loud = samples;
                 }
-                last_loud = samples;
+                acc_m += mono * mono;
+                let kl = k_one(s1l, s2l, l);
+                let kr = if nch > 1 { k_one(s1r, s2r, rgt) } else { kl };
+                acc_k += kl * kl + kr * kr;
+                consider_peak(&mut hl, l, &mut peak);
+                if nch > 1 {
+                    consider_peak(&mut hr, rgt, &mut peak);
+                }
+                acc_n += 1;
+                samples += 1;
+                if acc_n >= win {
+                    mono_ms.push((acc_m / acc_n as f64) as f32);
+                    k_ms.push(acc_k / acc_n as f64);
+                    acc_m = 0.0;
+                    acc_k = 0.0;
+                    acc_n = 0;
+                }
             }
-            acc_m += mono * mono;
-            let kl = k_one(s1l, s2l, l);
-            let kr = if nch > 1 { k_one(s1r, s2r, rgt) } else { kl };
-            acc_k += kl * kl + kr * kr;
-            consider_peak(&mut hl, l, &mut peak);
-            if nch > 1 {
-                consider_peak(&mut hr, rgt, &mut peak);
-            }
-            acc_n += 1;
-            samples += 1;
-            if acc_n >= win {
-                mono_ms.push((acc_m / acc_n as f64) as f32);
-                k_ms.push(acc_k / acc_n as f64);
-                acc_m = 0.0;
-                acc_k = 0.0;
-                acc_n = 0;
-            }
-        }
-        Ok(())
-    }, &mut err_pos)?;
+            Ok(())
+        },
+        &mut err_pos,
+    )?;
     if samples == 0 || rate == 0 {
         return Err("Sin audio decodificable".to_string());
     }
@@ -2390,12 +2411,8 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
     // pista ya se había apagado), para no perdonar un corte en plena música.
     let fl = first_loud.unwrap_or(u64::MAX);
     let guard = rate as u64 / 4;
-    let silent_edge_errors = err_pos
-        .iter()
-        .filter(|&&(p, reservoir)| {
-            reservoir && (p <= fl || (first_loud.is_some() && p >= last_loud + guard))
-        })
-        .count() as u32;
+    let silent_edge_errors =
+        count_silent_edge_errors(&err_pos, fl, first_loud.is_some(), last_loud, guard);
     Ok(StreamMeasure {
         rate,
         channels,
@@ -3579,7 +3596,12 @@ fn try_lossless_repair(path: &str, before: u32) -> Result<Option<(String, Stream
     }
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     Ok(Some((
-        format!("REPAIR:{} errors {}->{}", st.summary(), before, m2.decode_errors),
+        format!(
+            "REPAIR:{} errors {}->{}",
+            st.summary(),
+            before,
+            m2.decode_errors
+        ),
         m2,
     )))
 }
@@ -3637,7 +3659,10 @@ pub fn master_rewrite(
                 measured = Some(m2);
                 rescue_note = Some(note);
             } else {
-                rescue_note = Some(format!("FAIL:repair_no_help,decode_errors={}", m.decode_errors));
+                rescue_note = Some(format!(
+                    "FAIL:repair_no_help,decode_errors={}",
+                    m.decode_errors
+                ));
             }
         }
     }
@@ -4661,7 +4686,60 @@ mod master_guard_tests {
     }
 
     #[test]
-    fn un_paquete_roto_no_recodifica_y_deja_el_motivo() {
+    fn regla_de_bordes_en_silencio() {
+        let r = 44100u64;
+        let guard = r / 4;
+        let (fl, ll) = (r, 200 * r); // suena de 1 s a 200 s
+                                     // Cabeza en silencio: se perdona.
+        assert_eq!(
+            count_silent_edge_errors(&[(0, true), (r / 2, true)], fl, true, ll, guard),
+            2
+        );
+        // Cola ≥ 250 ms tras el último sonido: se perdona; antes, no.
+        assert_eq!(
+            count_silent_edge_errors(&[(ll + guard, true)], fl, true, ll, guard),
+            1
+        );
+        assert_eq!(
+            count_silent_edge_errors(&[(ll + guard - 1, true)], fl, true, ll, guard),
+            0
+        );
+        // En plena música nunca.
+        assert_eq!(
+            count_silent_edge_errors(&[(100 * r, true)], fl, true, ll, guard),
+            0
+        );
+        // Sin reservorio inválido no cuenta aunque esté en el borde.
+        assert_eq!(
+            count_silent_edge_errors(&[(0, false)], fl, true, ll, guard),
+            0
+        );
+        // Pista sin sonido fuerte: solo la cabeza (todo) cuenta, la cola no aplica.
+        assert_eq!(
+            count_silent_edge_errors(&[(5, true)], u64::MAX, false, 0, guard),
+            1
+        );
+        // Y los perdonados no bloquean: 300 errores en bordes, 0 dentro.
+        let m = StreamMeasure {
+            rate: 44100,
+            channels: 2,
+            samples: 240 * r,
+            mono_ms: vec![],
+            k_ms: vec![],
+            true_peak: 0.5,
+            decode_errors: 300,
+            silent_edge_errors: 300,
+        };
+        assert_eq!(blocking_decode_errors(&m), 0);
+        let m2 = StreamMeasure {
+            silent_edge_errors: 100,
+            ..m
+        };
+        assert_eq!(blocking_decode_errors(&m2), 200);
+    }
+
+    #[test]
+    fn un_paquete_roto_se_repara_sin_perdida_y_masteriza() {
         let _g = guard_master();
         let dir = std::env::temp_dir().join(format!("gmx_badpack_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4703,7 +4781,11 @@ mod master_guard_tests {
         let bak = format!("{path_s}.prerepair.bak");
         let bak_bytes = std::fs::read(&bak).expect("falta .prerepair.bak");
         let (d0, d1) = audio_byte_range(&bak_bytes);
-        assert_eq!(&bak_bytes[d0..d1], audio_tagged.as_slice(), "el .bak debe ser el original");
+        assert_eq!(
+            &bak_bytes[d0..d1],
+            audio_tagged.as_slice(),
+            "el .bak debe ser el original"
+        );
         let t = Tag::read_from_path(&path_s).unwrap();
         let resc = t
             .extended_texts()
@@ -5309,13 +5391,25 @@ mod repair_probe {
     #[test]
     #[ignore]
     fn probe_dir() {
-        let Ok(dir) = std::env::var("GMX_REPAIR_DIR") else { return };
-        let mut v: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false)).collect();
+        let Ok(dir) = std::env::var("GMX_REPAIR_DIR") else {
+            return;
+        };
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false))
+            .collect();
         v.sort();
         for p in v {
             let ps = p.to_string_lossy().to_string();
-            let m = match measure_stream(&ps) { Ok(m) => m, Err(e) => { println!("{ps}: measure err {e}"); continue } };
+            let m = match measure_stream(&ps) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("{ps}: measure err {e}");
+                    continue;
+                }
+            };
             let data = std::fs::read(&ps).unwrap();
             let rep = crate::mp3_repair::repair_mp3(&data);
             let (sum, after) = match &rep {
@@ -5324,12 +5418,31 @@ mod repair_probe {
                     std::fs::write(&t, fx).unwrap();
                     let m2 = measure_stream(&t);
                     let _ = std::fs::remove_file(&t);
-                    (st.summary(), m2.map(|m| format!("err={} samples={} block={}", m.decode_errors, m.samples, blocking_decode_errors(&m))).unwrap_or_else(|e| e))
+                    (
+                        st.summary(),
+                        m2.map(|m| {
+                            format!(
+                                "err={} samples={} block={}",
+                                m.decode_errors,
+                                m.samples,
+                                blocking_decode_errors(&m)
+                            )
+                        })
+                        .unwrap_or_else(|e| e),
+                    )
                 }
                 None => ("none".into(), "-".into()),
             };
-            println!("{}: before err={} samples={} rate={} block={} | repair {} | after {}",
-                p.file_name().unwrap().to_string_lossy(), m.decode_errors, m.samples, m.rate, blocking_decode_errors(&m), sum, after);
+            println!(
+                "{}: before err={} samples={} rate={} block={} | repair {} | after {}",
+                p.file_name().unwrap().to_string_lossy(),
+                m.decode_errors,
+                m.samples,
+                m.rate,
+                blocking_decode_errors(&m),
+                sum,
+                after
+            );
         }
     }
 }
@@ -5340,15 +5453,21 @@ mod err_probe {
     #[test]
     #[ignore]
     fn where_errors() {
-        let Ok(f) = std::env::var("GMX_ERR_FILE") else { return };
+        let Ok(f) = std::env::var("GMX_ERR_FILE") else {
+            return;
+        };
         let (mut format, track_id, params) = open_format(&f).unwrap();
         let rate = params.sample_rate.unwrap() as f64;
-        let mut dec = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()).unwrap();
+        let mut dec = symphonia::default::get_codecs()
+            .make(&params, &DecoderOptions::default())
+            .unwrap();
         let mut hist: std::collections::BTreeMap<String, u32> = Default::default();
         let mut pos: Vec<f64> = vec![];
         loop {
             let Ok(p) = format.next_packet() else { break };
-            if p.track_id() != track_id { continue }
+            if p.track_id() != track_id {
+                continue;
+            }
             let ts = p.ts() as f64 / rate;
             if let Err(e) = dec.decode(&p) {
                 *hist.entry(format!("{e}")).or_default() += 1;
@@ -5356,7 +5475,12 @@ mod err_probe {
             }
         }
         println!("HIST {hist:?}");
-        println!("POS {:?}", pos.iter().map(|x| (x*10.0).round()/10.0).collect::<Vec<_>>());
+        println!(
+            "POS {:?}",
+            pos.iter()
+                .map(|x| (x * 10.0).round() / 10.0)
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -5367,15 +5491,29 @@ mod master_probe {
     #[test]
     #[ignore]
     fn master_dir() {
-        let Ok(dir) = std::env::var("GMX_MASTER_DIR") else { return };
-        let mut v: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false)).collect();
+        let Ok(dir) = std::env::var("GMX_MASTER_DIR") else {
+            return;
+        };
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false))
+            .collect();
         v.sort();
         for p in v {
             let ps = p.to_string_lossy().to_string();
             let r = master_rewrite(ps.clone(), true, true, false, -1, -1);
             let t = Tag::read_from_path(&ps).ok();
-            let g = |k: &str| t.as_ref().and_then(|t| t.extended_texts().find(|e| e.description == k).map(|e| e.value.clone())).unwrap_or_default();
+            let g = |k: &str| {
+                t.as_ref()
+                    .and_then(|t| {
+                        t.extended_texts()
+                            .find(|e| e.description == k)
+                            .map(|e| e.value.clone())
+                    })
+                    .unwrap_or_default()
+            };
             match r {
                 Ok(rw) => println!("{}: rewritten={} lufs_in={:.2} applied={} reason='{}' rescue='{}' lufs_done='{}'",
                     p.file_name().unwrap().to_string_lossy(), rw.rewritten, rw.lufs, rw.lufs_applied, g(KEY_REASON), g(KEY_RESCUE), g(KEY_LUFS_DONE)),

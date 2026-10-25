@@ -84,11 +84,14 @@ class KaraokeEngine {
   static List<String> _collect(String path) {
     if (File(path).existsSync()) return [path];
     final out = <String>[];
-    for (final e in Directory(path).listSync(recursive: true, followLinks: false)) {
+    for (final e in Directory(
+      path,
+    ).listSync(recursive: true, followLinks: false)) {
       if (e is! File) continue;
       final p = e.path;
       final low = p.toLowerCase();
-      if (!low.endsWith('.mp3') || low.endsWith('${suffix.toLowerCase()}.mp3')) {
+      if (!low.endsWith('.mp3') ||
+          low.endsWith('${suffix.toLowerCase()}.mp3')) {
         continue;
       }
       if (usableInstrumental(karaokePathFor(p), p)) continue;
@@ -98,8 +101,10 @@ class KaraokeEngine {
     return out;
   }
 
-  static String _name(String p) =>
-      p.split(Platform.pathSeparator).last.replaceAll(RegExp(r'\.mp3$', caseSensitive: false), '');
+  static String _name(String p) => p
+      .split(Platform.pathSeparator)
+      .last
+      .replaceAll(RegExp(r'\.mp3$', caseSensitive: false), '');
 
   /// Procesa un archivo o una carpeta, de a una pista. `onStatus` recibe texto
   /// de avance para la UI. Devuelve cuántas pistas quedaron listas.
@@ -125,7 +130,9 @@ class KaraokeEngine {
         }
         final src = files[i];
         final name = _name(src);
-        final label = files.length > 1 ? '(${i + 1}/${files.length}) $name' : name;
+        final label = files.length > 1
+            ? '(${i + 1}/${files.length}) $name'
+            : name;
         onStatus?.call('Analizando: $label');
         final timer = Timer.periodic(const Duration(seconds: 1), (_) async {
           try {

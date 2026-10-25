@@ -499,7 +499,9 @@ class _YoutubeSearchAndDownloadWorkspaceState
         throw Exception("Fallo CLI Extractor. Traza: $errorTrace");
       }
 
-      setState(() => _statusText = "Codificando a MP3 320k (motor Rust/LAME)...");
+      setState(
+        () => _statusText = "Codificando a MP3 320k (motor Rust/LAME)...",
+      );
 
       try {
         await rust_dsp.encodeToMp3(

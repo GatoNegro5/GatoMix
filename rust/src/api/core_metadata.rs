@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::Path;
 use id3::{Tag, TagLike, Version};
 use regex::Regex;
+use std::fs;
+use std::path::Path;
 
 // 🛠️ REINGENIERÍA: FFmpeg erradicado del pipeline de metadatos.
 // Ahora se ejecuta en memoria pura (Zero-Copy) ahorrando cientos de subprocesos PID.
@@ -52,7 +52,7 @@ pub async fn process_metadata(input_path: String) -> Result<Vec<String>, String>
 fn parse_and_clean(filename: &str) -> (String, String, String) {
     let mut name = filename.to_string();
     let mut ext = String::new();
-    
+
     if let Some(idx) = name.rfind('.') {
         ext = name[idx..].to_string();
         name = name[..idx].to_string();
@@ -70,7 +70,10 @@ fn parse_and_clean(filename: &str) -> (String, String, String) {
     let mut clean_name = garbage_regex.replace_all(&name, " ").to_string();
     clean_name = dash_regex.replace_all(&clean_name, " - ").to_string();
     clean_name = clean_name.replace("_", " ");
-    clean_name = spaces_regex.replace_all(&clean_name, " ").trim().to_string();
+    clean_name = spaces_regex
+        .replace_all(&clean_name, " ")
+        .trim()
+        .to_string();
 
     let parts: Vec<&str> = clean_name.split(" - ").collect();
     let mut artist = "Unknown".to_string();
@@ -83,7 +86,7 @@ fn parse_and_clean(filename: &str) -> (String, String, String) {
 
     artist = to_title_case(&artist);
     title = to_title_case(&title);
-    
+
     let trailing_regex = Regex::new(r"[\.\-_]+$").unwrap();
     title = trailing_regex.replace(&title, "").to_string();
 
@@ -93,18 +96,24 @@ fn parse_and_clean(filename: &str) -> (String, String, String) {
         format!("{}{}", title, ext)
     };
 
-    let safe_filename = invalid_chars_regex.replace_all(&final_filename, "").to_string();
+    let safe_filename = invalid_chars_regex
+        .replace_all(&final_filename, "")
+        .to_string();
     (safe_filename, artist, title)
 }
 
 fn to_title_case(text: &str) -> String {
-    if text.is_empty() { return String::new(); }
+    if text.is_empty() {
+        return String::new();
+    }
     text.split_whitespace()
         .map(|word| {
             let mut c = word.chars();
             match c.next() {
                 None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str().to_lowercase().as_str(),
+                Some(f) => {
+                    f.to_uppercase().collect::<String>() + c.as_str().to_lowercase().as_str()
+                }
             }
         })
         .collect::<Vec<String>>()

@@ -4,19 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 class GatoMixTheme {
   // Traktor / Native Instruments (cabina “lab”)
   static const Color bgDark = Color(0xFF0E1014); // Carbón NI
-  static const Color bgPanel = Color(
-    0xFF1A1E26,
-  ); // Panel elevado
+  static const Color bgPanel = Color(0xFF1A1E26); // Panel elevado
 
-  static const Color deckA = Color(
-    0xFF2E9BFF,
-  ); // Deck A azul Traktor
-  static const Color deckB = Color(
-    0xFFF05A22,
-  ); // Naranja Native Instruments
-  static const Color cyanAccent = Color(
-    0xFFF05A22,
-  ); // Acento de marca / hover
+  static const Color deckA = Color(0xFF2E9BFF); // Deck A azul Traktor
+  static const Color deckB = Color(0xFFF05A22); // Naranja Native Instruments
+  static const Color cyanAccent = Color(0xFFF05A22); // Acento de marca / hover
 
   // Estados Críticos del Sistema
   static const Color syncActive = Color(
@@ -113,11 +105,7 @@ class GatoMixMobileModeBar extends StatelessWidget {
             child: Row(
               mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
               children: [
-                Icon(
-                  open ? Icons.close : Icons.menu,
-                  size: 18,
-                  color: accent,
-                ),
+                Icon(open ? Icons.close : Icons.menu, size: 18, color: accent),
                 const SizedBox(width: 8),
                 Text(
                   title,

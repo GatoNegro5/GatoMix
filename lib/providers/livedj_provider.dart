@@ -583,7 +583,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         }
       }
     }
-    final bool sameSet = banks.length == 10 &&
+    final bool sameSet =
+        banks.length == 10 &&
         banks.every((row) {
           if (row.length != paths.length) return false;
           final a = List<String>.from(row)..sort();
@@ -606,9 +607,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
 
     final int last = (entry['cursor'] as int?) ?? -1;
-    final int use = advance
-        ? (last + 1) % 10
-        : (last < 0 ? 0 : last % 10);
+    final int use = advance ? (last + 1) % 10 : (last < 0 ? 0 : last % 10);
     final List<String> order = List<String>.from(banks[use]);
     final known = paths.toSet();
     final queued = <File>[
@@ -715,7 +714,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           await _activePlayer.setRate(1.0);
         } catch (_) {}
         await _activePlayer.open(Media(currentTrackPath), play: false);
-        ref.read(liveDjEqualizerProvider.notifier).adapt(_activePlayer, currentTrackPath);
+        ref
+            .read(liveDjEqualizerProvider.notifier)
+            .adapt(_activePlayer, currentTrackPath);
         try {
           await _activePlayer.stream.duration
               .firstWhere((d) => d.inMilliseconds > 0)
@@ -877,7 +878,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         _exactDurCache[path] = ms;
       }
       if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint('⏱️ [LIVEDJ] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path');
+        debugPrint(
+          '⏱️ [LIVEDJ] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
+        );
         return Duration(milliseconds: ms);
       }
     } catch (_) {}
@@ -965,10 +968,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             return;
           }
           await _standbyPlayer.setVolume(0.0);
-          await _standbyPlayer.open(
-            Media(armPath),
-            play: false,
-          );
+          await _standbyPlayer.open(Media(armPath), play: false);
           // Si durante la carga cambió la pista o empezó un cruce, este armado
           // ya no vale: si no, se recarga el deck que está sonando.
           if (state.currentTrackPath != tickPath ||
@@ -978,7 +978,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           }
           // Solo se da por precargada cuando la carga terminó de verdad.
           _standbyArmedPath = armPath;
-          ref.read(liveDjEqualizerProvider.notifier).adapt(_standbyPlayer, armPath);
+          ref
+              .read(liveDjEqualizerProvider.notifier)
+              .adapt(_standbyPlayer, armPath);
         }
 
         if (state.currentTrackPath != tickPath || player != _activePlayer) {
@@ -989,9 +991,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         // Una estimación corta de arranque (menor que la mitad) no cuenta.
         int endMs = durMs;
         final int deckDur = player.state.duration.inMilliseconds;
-        if (deckDur > 45000 &&
-            deckDur + 1500 < durMs &&
-            deckDur > durMs ~/ 2) {
+        if (deckDur > 45000 && deckDur + 1500 < durMs && deckDur > durMs ~/ 2) {
           endMs = deckDur;
         }
         final bool nearEnd =
@@ -1024,30 +1024,30 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         dur = state.duration;
       }
       state = state.copyWith(duration: dur);
-        globalAudioHandler.syncOs(
-          owner: 'livedj',
-          path: state.currentTrackPath,
-          duration: dur,
-          playing: state.isPlaying,
-          position: state.position,
-        );
-        final triggerMs = _calculateRadioMixOut(
-          dur.inMilliseconds,
-          state.currentTrackPath,
-        );
-        final cueInMs = await _calculateSmartCueIn(
-          state.currentTrackPath!,
-          player,
-        );
-        final mode = _isMixTrack(dur.inMilliseconds)
-            ? LiveDjMixMode.longBypass
-            : LiveDjMixMode.activeSync;
+      globalAudioHandler.syncOs(
+        owner: 'livedj',
+        path: state.currentTrackPath,
+        duration: dur,
+        playing: state.isPlaying,
+        position: state.position,
+      );
+      final triggerMs = _calculateRadioMixOut(
+        dur.inMilliseconds,
+        state.currentTrackPath,
+      );
+      final cueInMs = await _calculateSmartCueIn(
+        state.currentTrackPath!,
+        player,
+      );
+      final mode = _isMixTrack(dur.inMilliseconds)
+          ? LiveDjMixMode.longBypass
+          : LiveDjMixMode.activeSync;
 
-        state = state.copyWith(
-          customCueInMs: cueInMs,
-          customMixOutMs: triggerMs,
-          currentMixMode: mode,
-        );
+      state = state.copyWith(
+        customCueInMs: cueInMs,
+        customMixOutMs: triggerMs,
+        currentMixMode: mode,
+      );
     });
 
     _playingSub = player.stream.playing.listen((playing) {
@@ -1206,8 +1206,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         try {
           t = Uri.decodeFull(s);
         } catch (_) {}
-        return t.replaceAll('\\', '/').replaceFirst('file:///', '').toLowerCase();
+        return t
+            .replaceAll('\\', '/')
+            .replaceFirst('file:///', '')
+            .toLowerCase();
       }
+
       final loaded = norm(medias[idx].uri);
       final want = norm(path);
       return loaded == want || loaded.endsWith(want) || want.endsWith(loaded);
@@ -1232,7 +1236,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   final Random _radioRng = Random();
 
   static const Set<String> _radioExt = {
-    'mp3', 'm4a', 'flac', 'wav', 'aac', 'ogg', 'opus', 'wma',
+    'mp3',
+    'm4a',
+    'flac',
+    'wav',
+    'aac',
+    'ogg',
+    'opus',
+    'wma',
   };
 
   String _radioFold(String s) {
@@ -1270,7 +1281,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (n.contains('_k')) return null; // Karaoke
     if (n.startsWith('actualidad')) return 'actuales';
     for (final k in const [
-      'salsa', 'merengue', 'cumbia', 'guaracha', 'bachata', 'fiesta',
+      'salsa',
+      'merengue',
+      'cumbia',
+      'guaracha',
+      'bachata',
+      'fiesta',
       'nacional',
     ]) {
       if (n.contains(k)) return 'bailable';
@@ -1307,8 +1323,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _saveRadioHistory() {
     try {
-      File(_radioHistoryPath())
-          .writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
+      File(
+        _radioHistoryPath(),
+      ).writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
     } catch (_) {}
   }
 
@@ -1361,7 +1378,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         if (root.existsSync()) {
           final kFile = RegExp(r'_k\.[a-z0-9]+$', caseSensitive: false);
           final Map<String, List<String>> byDir = <String, List<String>>{};
-          await for (final f in root.list(recursive: true, followLinks: false)) {
+          await for (final f in root.list(
+            recursive: true,
+            followLinks: false,
+          )) {
             if (f is! File) continue;
             final fname = f.path.replaceAll('\\', '/').split('/').last;
             final dot = fname.lastIndexOf('.');
@@ -1599,12 +1619,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       int nextIdx = queueIndex ?? _nextQueueIndex();
       // Fin natural sin mezcla: suena la pista que ya estaba precargada (la que
       // la pantalla mostraba como "siguiente"), no una recalculada.
-      if (queueIndex == null && _nextFromCompletion && _standbyArmedPath != null) {
-        final int ai = state.queue.indexWhere((f) => f.path == _standbyArmedPath);
+      if (queueIndex == null &&
+          _nextFromCompletion &&
+          _standbyArmedPath != null) {
+        final int ai = state.queue.indexWhere(
+          (f) => f.path == _standbyArmedPath,
+        );
         if (ai >= 0) nextIdx = ai;
       }
       _nextFromCompletion = false;
-      _djTrace('NEXT elegido idx=$nextIdx de ${state.queue.length} jit=$forceJit');
+      _djTrace(
+        'NEXT elegido idx=$nextIdx de ${state.queue.length} jit=$forceJit',
+      );
       if (nextIdx < 0 || nextIdx >= state.queue.length) {
         _isCrossfading = false;
         await _stopWhenNoNext();
@@ -1628,7 +1654,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       try {
         await incomingPlayer.setVolume(0.0);
         await incomingPlayer.open(Media(nextTrack), play: false);
-        ref.read(liveDjEqualizerProvider.notifier).adapt(incomingPlayer, nextTrack);
+        ref
+            .read(liveDjEqualizerProvider.notifier)
+            .adapt(incomingPlayer, nextTrack);
         try {
           await incomingPlayer.stream.duration
               .firstWhere((d) => d.inMilliseconds > 0)
@@ -1646,7 +1674,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       try {
         await incomingPlayer.setVolume(0.0);
         await incomingPlayer.open(Media(nextTrack), play: false);
-        ref.read(liveDjEqualizerProvider.notifier).adapt(incomingPlayer, nextTrack);
+        ref
+            .read(liveDjEqualizerProvider.notifier)
+            .adapt(incomingPlayer, nextTrack);
         try {
           await incomingPlayer.stream.duration
               .firstWhere((d) => d.inMilliseconds > 0)
@@ -1656,7 +1686,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         debugPrint("🔴 [LIVEDJ OPEN RETRY]: $e");
       }
       if (!_deckHolds(incomingPlayer, nextTrack)) {
-        debugPrint("🔴 [LIVEDJ] Deck entrante sin la pista pedida. Cruce abortado.");
+        debugPrint(
+          "🔴 [LIVEDJ] Deck entrante sin la pista pedida. Cruce abortado.",
+        );
         _isStandbyArmed = false;
         _standbyArmedPath = null;
         _isCrossfading = false;
@@ -1743,8 +1775,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       await incomingPlayer.setVolume(0.0);
       if (gridOut != null && gridIn != null) {
         // Espera al próximo golpe del saliente (≤ 1 compás de pulso) y arranca ahí.
-        final Duration fresh = await fadingPlayer.stream.position.first
-            .timeout(const Duration(seconds: 1));
+        final Duration fresh = await fadingPlayer.stream.position.first.timeout(
+          const Duration(seconds: 1),
+        );
         final Stopwatch sw = Stopwatch()..start();
         final double pOut = 60000.0 / gridOut.bpm;
         final double nowOut = fresh.inMilliseconds.toDouble();

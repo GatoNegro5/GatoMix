@@ -526,8 +526,7 @@ fn wire__crate__api__core_dsp__master_priority_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
-                    let output_ok =
-                        Result::<_, ()>::Ok(crate::api::core_dsp::master_priority())?;
+                    let output_ok = Result::<_, ()>::Ok(crate::api::core_dsp::master_priority())?;
                     Ok(output_ok)
                 })())
             }

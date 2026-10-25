@@ -21,6 +21,7 @@ import '../core/lyric_match.dart';
 import 'db_provider.dart';
 import 'nlp_provider.dart';
 import 'equalizer_provider.dart';
+
 // 🛡️ FIX: Dependencia para dspWorkerProvider
 
 enum MixStrategy { sequential, random }
@@ -358,7 +359,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
           await _forceOpenAndPlay(playlist[index], seekMs: seekMs);
         } else {
           await _activeAutomix.open(Media(playlist[index]), play: false);
-          ref.read(automixEqualizerProvider.notifier).adapt(_activeAutomix, playlist[index]);
+          ref
+              .read(automixEqualizerProvider.notifier)
+              .adapt(_activeAutomix, playlist[index]);
           try {
             await _activeAutomix.stream.duration
                 .firstWhere((d) => d.inMilliseconds > 0)
@@ -457,7 +460,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
         }
       }
     }
-    final bool sameSet = banks.length == 10 &&
+    final bool sameSet =
+        banks.length == 10 &&
         banks.every((row) {
           if (row.length != paths.length) return false;
           final a = List<String>.from(row)..sort();
@@ -473,9 +477,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     final int last = (entry['cursor'] as int?) ?? -1;
-    final int use = advance
-        ? (last + 1) % 10
-        : (last < 0 ? 0 : last % 10);
+    final int use = advance ? (last + 1) % 10 : (last < 0 ? 0 : last % 10);
     final List<String> order = List<String>.from(banks[use]);
 
     final String? playing = state.currentTrackPath;
@@ -508,9 +510,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _saveSnapshot();
     _recalculateMixWindow();
 
-    debugPrint(
-      "🔀 [DSP] Shuffle banco ${use + 1}/10. ${rest.length} pistas.",
-    );
+    debugPrint("🔀 [DSP] Shuffle banco ${use + 1}/10. ${rest.length} pistas.");
   }
 
   void toggleMixStrategy() {
@@ -571,10 +571,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (state.currentTrackPath != null) {
       newCurrentIndex = ordered.indexOf(state.currentTrackPath!);
     }
-    state = state.copyWith(
-      playlist: ordered,
-      currentIndex: newCurrentIndex,
-    );
+    state = state.copyWith(playlist: ordered, currentIndex: newCurrentIndex);
     _saveSnapshot();
     _recalculateMixWindow();
   }
@@ -844,13 +841,15 @@ class AutomixNotifier extends Notifier<AutomixState> {
     // duración real): esperar y reintentar; abortar dejaba el plan sin listo
     // y la mezcla nunca disparaba en la línea roja.
     int energyEnd = await _probeOutroEnergyEndMs(path, durationMs);
-    for (int retry = 0;
-        energyEnd < 0 &&
-            retry < 100 &&
-            gen == _outroProbeGen &&
-            _outroPlanToken == token &&
-            state.currentTrackPath == path;
-        retry++) {
+    for (
+      int retry = 0;
+      energyEnd < 0 &&
+          retry < 100 &&
+          gen == _outroProbeGen &&
+          _outroPlanToken == token &&
+          state.currentTrackPath == path;
+      retry++
+    ) {
       await Future.delayed(const Duration(milliseconds: 150));
       energyEnd = await _probeOutroEnergyEndMs(path, durationMs);
     }
@@ -919,9 +918,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (outgoingPath.isEmpty) return;
 
     Future<void> waitIdle() async {
-      final DateTime deadline = DateTime.now().add(
-        const Duration(seconds: 25),
-      );
+      final DateTime deadline = DateTime.now().add(const Duration(seconds: 25));
       while (_isCrossfading && DateTime.now().isBefore(deadline)) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
@@ -1025,10 +1022,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     if (state.currentTrackPath == nextTrack) {
-      state = state.copyWith(
-        playlist: newPlaylist,
-        currentIndex: startIndex,
-      );
+      state = state.copyWith(playlist: newPlaylist, currentIndex: startIndex);
       if (!state.isPlaying) {
         await _activeAutomix.setVolume(100.0);
         await _activeAutomix.play();
@@ -1047,7 +1041,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
       try {
         await incomingPlayer.setVolume(0.0);
         await incomingPlayer.open(Media(nextTrack), play: false);
-        ref.read(automixEqualizerProvider.notifier).adapt(incomingPlayer, nextTrack);
+        ref
+            .read(automixEqualizerProvider.notifier)
+            .adapt(incomingPlayer, nextTrack);
       } catch (e) {
         _isCrossfading = false;
         return;
@@ -1150,7 +1146,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await incomingPlayer.setVolume(0.0);
       await incomingPlayer.open(Media(nextTrack), play: false);
-      ref.read(automixEqualizerProvider.notifier).adapt(incomingPlayer, nextTrack);
+      ref
+          .read(automixEqualizerProvider.notifier)
+          .adapt(incomingPlayer, nextTrack);
     } catch (e) {
       _isCrossfading = false;
       return;
@@ -1198,10 +1196,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
       playlist: newPlaylist,
       currentIndex: 0,
       currentTrackPath: nextTrack,
-        position: Duration(milliseconds: cueInMs),
-        duration: await _trueDuration(nextTrack, incomingPlayer.state.duration),
-        lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
-        activeLyricIndex: -1,
+      position: Duration(milliseconds: cueInMs),
+      duration: await _trueDuration(nextTrack, incomingPlayer.state.duration),
+      lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
+      activeLyricIndex: -1,
     );
 
     await _loadLyrics(nextTrack);
@@ -1240,7 +1238,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await incomingPlayer.setVolume(0.0);
       await incomingPlayer.open(Media(nextTrack), play: false);
-      ref.read(automixEqualizerProvider.notifier).adapt(incomingPlayer, nextTrack);
+      ref
+          .read(automixEqualizerProvider.notifier)
+          .adapt(incomingPlayer, nextTrack);
     } catch (e) {
       _isCrossfading = false;
       return;
@@ -1288,10 +1288,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
       playlist: newPlaylist,
       currentIndex: 0,
       currentTrackPath: nextTrack,
-        position: Duration(milliseconds: cueInMs),
-        duration: await _trueDuration(nextTrack, incomingPlayer.state.duration),
-        lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
-        activeLyricIndex: -1,
+      position: Duration(milliseconds: cueInMs),
+      duration: await _trueDuration(nextTrack, incomingPlayer.state.duration),
+      lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
+      activeLyricIndex: -1,
     );
 
     await _loadLyrics(nextTrack);
@@ -1341,10 +1341,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       platformOut?.setProperty('audio-pitch-correction', 'yes');
       // La entrante nace sin graves para que nunca convivan dos líneas de bajo
       // sumando energía en el cruce. Inaudible: su volumen todavía es 0.
-      platformIn?.setProperty(
-        'af',
-        useBassSwap ? lowCutIn : inBase(),
-      );
+      platformIn?.setProperty('af', useBassSwap ? lowCutIn : inBase());
       platformOut?.setProperty('af', outBase());
 
       await incomingPlayer.setVolume(0.0);
@@ -1437,7 +1434,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
         _exactDurCache[path] = ms;
       }
       if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint('⏱️ [AUTOMIX] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path');
+        debugPrint(
+          '⏱️ [AUTOMIX] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
+        );
         return Duration(milliseconds: ms);
       }
     } catch (_) {}
@@ -1836,7 +1835,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
       await incomingPlayer.setRate(1.0);
       await incomingPlayer.setVolume(100.0);
       await incomingPlayer.open(Media(newPath), play: true);
-      ref.read(automixEqualizerProvider.notifier).adapt(incomingPlayer, newPath);
+      ref
+          .read(automixEqualizerProvider.notifier)
+          .adapt(incomingPlayer, newPath);
       _usePlayerA = !_usePlayerA;
       _attachListeners(_activeAutomix);
       return;
@@ -1846,7 +1847,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await incomingPlayer.setVolume(0.0);
       await incomingPlayer.open(Media(newPath), play: false);
-      ref.read(automixEqualizerProvider.notifier).adapt(incomingPlayer, newPath);
+      ref
+          .read(automixEqualizerProvider.notifier)
+          .adapt(incomingPlayer, newPath);
       if (state.customCueInMs > 0) {
         await incomingPlayer.seek(Duration(milliseconds: state.customCueInMs));
       }
@@ -2067,9 +2070,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     await _saveLyricsToFile(state.currentTrackPath!, newLyrics);
     state = state.copyWith(lyrics: newLyrics, activeLyricIndex: idx);
-    debugPrint(
-      "✅ [SYNC MED] linea ${idx + 1} al playhead, delta ${deltaMs}ms",
-    );
+    debugPrint("✅ [SYNC MED] linea ${idx + 1} al playhead, delta ${deltaMs}ms");
   }
 
   Future<void> autoSyncSingleLyric({required int lineIndex}) async {

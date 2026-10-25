@@ -54,7 +54,18 @@ class AdaptiveEq {
   /// el −16 LUFS de aquí es independiente del −14 del archivo.
   static const double targetLufs = -16.0;
 
-  static const List<int> bands = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+  static const List<int> bands = [
+    31,
+    62,
+    125,
+    250,
+    500,
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
+  ];
   static const int _sr = 44100;
 
   static final Expando<List<double>> _gains = Expando<List<double>>('aeqGains');
@@ -101,7 +112,9 @@ class AdaptiveEq {
     for (int i = 0; i < 10; i++) {
       final v = solved[i];
       if (v.abs() >= 0.1) {
-        out.add('equalizer=f=${bands[i]}:width_type=o:w=1:g=${v.toStringAsFixed(1)}');
+        out.add(
+          'equalizer=f=${bands[i]}:width_type=o:w=1:g=${v.toStringAsFixed(1)}',
+        );
       }
     }
     return out;
@@ -111,8 +124,9 @@ class AdaptiveEq {
   static double _peakDb(double f0, double gDb, double f) {
     const double bw = 1.0;
     final w0 = 2 * pi * f0 / _sr;
-    final alpha = sin(w0) * (exp(ln2 / 2 * bw * w0 / sin(w0)) -
-            exp(-ln2 / 2 * bw * w0 / sin(w0))) /
+    final alpha =
+        sin(w0) *
+        (exp(ln2 / 2 * bw * w0 / sin(w0)) - exp(-ln2 / 2 * bw * w0 / sin(w0))) /
         2;
     final a = pow(10, gDb / 40).toDouble();
     final c = cos(w0);
@@ -221,12 +235,14 @@ class AdaptiveEq {
       _mem[k] = c;
       return Future.value(c);
     }
-    return _pending[k] ??= _enqueue(() => _measure(path, k)).whenComplete(
-      () => _pending.remove(k),
-    );
+    return _pending[k] ??= _enqueue(
+      () => _measure(path, k),
+    ).whenComplete(() => _pending.remove(k));
   }
 
-  static Future<AdaptiveProfile?> _enqueue(Future<AdaptiveProfile?> Function() job) {
+  static Future<AdaptiveProfile?> _enqueue(
+    Future<AdaptiveProfile?> Function() job,
+  ) {
     final done = Completer<AdaptiveProfile?>();
     _queue = _queue.then((_) async {
       try {
@@ -272,6 +288,7 @@ class AdaptiveEq {
       return null;
     }
   }
+
   // -------------------------------------------------------------- análisis
   // Nivel típico de música comercial por banda octava (dB, relativo a 1 kHz).
   static const List<double> _target = [-1, 4, 6, 3, 1, 0, -3, -6, -11, -18];
@@ -296,7 +313,9 @@ class AdaptiveEq {
     final k = Float64List(n);
     {
       double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-      const b0 = 1.53512485958697, b1 = -2.69169618940638, b2 = 1.19839281085285;
+      const b0 = 1.53512485958697,
+          b1 = -2.69169618940638,
+          b2 = 1.19839281085285;
       const a1 = -1.69065929318241, a2 = 0.73248077421585;
       double u1 = 0, u2 = 0, v1 = 0, v2 = 0;
       const c1 = -1.99004745483398, c2 = 0.99007225036621;
@@ -328,7 +347,9 @@ class AdaptiveEq {
     if (abs.isEmpty) return AdaptiveProfile(List<double>.filled(10, 0), 0);
     final m1 = abs.reduce((a, c) => a + c) / abs.length;
     final rel = abs.where((e) => e > m1 * 0.1).toList(); // -10 LU
-    final m2 = (rel.isEmpty ? abs : rel).reduce((a, c) => a + c) / (rel.isEmpty ? abs.length : rel.length);
+    final m2 =
+        (rel.isEmpty ? abs : rel).reduce((a, c) => a + c) /
+        (rel.isEmpty ? abs.length : rel.length);
     final lufs = -0.691 + 10 * log(m2) / ln10;
     final peakDb = 20 * log(peak) / ln10;
     // Sube/baja hacia el objetivo, nunca más allá del pico medido (-1.5 dB
@@ -362,8 +383,14 @@ class AdaptiveEq {
     final binHz = _sr / fft;
     final lv = List<double>.filled(10, -120);
     for (int bI = 0; bI < 10; bI++) {
-      final int lo = (bands[bI] / sqrt2 / binHz).floor().clamp(1, fft ~/ 2 - 1).toInt();
-      final int hi = (bands[bI] * sqrt2 / binHz).ceil().clamp(lo + 1, fft ~/ 2).toInt();
+      final int lo = (bands[bI] / sqrt2 / binHz)
+          .floor()
+          .clamp(1, fft ~/ 2 - 1)
+          .toInt();
+      final int hi = (bands[bI] * sqrt2 / binHz)
+          .ceil()
+          .clamp(lo + 1, fft ~/ 2)
+          .toInt();
       double e = 0;
       for (int i = lo; i < hi; i++) {
         e += acc[i];

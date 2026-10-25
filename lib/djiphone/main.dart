@@ -14,12 +14,14 @@ import 'package:gatomix/providers/automix_provider.dart';
 import 'package:gatomix/providers/livedj_provider.dart';
 import 'package:gatomix/providers/pipeline_provider.dart';
 import 'package:gatomix/providers/theme_provider.dart';
-import 'package:gatomix/services/audio_interruption.dart';import 'package:gatomix/ui/widgets/app_version_label.dart';
+import 'package:gatomix/services/audio_interruption.dart';
+import 'package:gatomix/ui/widgets/app_version_label.dart';
 import 'package:gatomix/ui/workspaces/automix_workspace.dart';
 import 'package:gatomix/ui/workspaces/dsp_workspace.dart';
 import 'package:gatomix/ui/workspaces/lab_workspace.dart';
 import 'package:gatomix/ui/workspaces/lan_sync_workspace.dart';
 import 'package:gatomix/ui/workspaces/livedj_workspace.dart';
+
 /// Entrada de DjIphone. No es lib/main.dart.
 /// Pantallas: Automix, Live DJ, Masterizar, LAN Sync, Laboratorio.
 /// Índices iguales al player de escritorio (0, 5, 1, 4, 3).
@@ -464,10 +466,7 @@ class _DjIphoneNav extends ConsumerWidget {
   final int currentRoute;
   final VoidCallback onAfterSelect;
 
-  const _DjIphoneNav({
-    required this.currentRoute,
-    required this.onAfterSelect,
-  });
+  const _DjIphoneNav({required this.currentRoute, required this.onAfterSelect});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

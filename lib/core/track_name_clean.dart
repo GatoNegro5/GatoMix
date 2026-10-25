@@ -207,7 +207,6 @@ String uniqueMp3Name(String stem, bool Function(String fileName) taken) {
   return '$base (${DateTime.now().millisecondsSinceEpoch}).mp3';
 }
 
-
 final RegExp _fsForbidden = RegExp(r'[\\/:*?"<>|]');
 
 /// Título de YouTube → nombre de archivo. Primero convierte ` / ` y ` | `

@@ -94,7 +94,8 @@ class TvAdbDeploymentService {
     } catch (_) {}
 
     // platform-tools propio de la app (se baja una sola vez, gratis, de Google).
-    final own = '${_appDataDir()}${Platform.pathSeparator}platform-tools'
+    final own =
+        '${_appDataDir()}${Platform.pathSeparator}platform-tools'
         '${Platform.pathSeparator}${Platform.isWindows ? 'adb.exe' : 'adb'}';
     if (File(own).existsSync()) return own;
     return _installPlatformTools(own);
@@ -103,8 +104,7 @@ class TvAdbDeploymentService {
   /// Carpeta de datos propia de DJ Studio para herramientas descargadas.
   String _appDataDir() {
     final base = Platform.isWindows
-        ? (Platform.environment['LOCALAPPDATA'] ??
-              Directory.systemTemp.path)
+        ? (Platform.environment['LOCALAPPDATA'] ?? Directory.systemTemp.path)
         : '${Platform.environment['HOME'] ?? Directory.systemTemp.path}'
               '${Platform.isMacOS ? '/Library/Application Support' : '/.local/share'}';
     return ensureBrandDataDir(base).path;
@@ -190,7 +190,8 @@ class TvAdbDeploymentService {
         installed: installed,
       );
       final existing = targets[host];
-      if (existing == null || _preferEndpoint(candidate.endpoint, existing.endpoint)) {
+      if (existing == null ||
+          _preferEndpoint(candidate.endpoint, existing.endpoint)) {
         targets[host] = existing == null
             ? candidate
             : candidate.copyWith(pairingEndpoint: existing.pairingEndpoint);
@@ -218,9 +219,7 @@ class TvAdbDeploymentService {
             pairingEndpoint: service.endpoint,
           );
         } else {
-          targets[host] = existing.copyWith(
-            pairingEndpoint: service.endpoint,
-          );
+          targets[host] = existing.copyWith(pairingEndpoint: service.endpoint);
         }
         continue;
       }
@@ -266,9 +265,7 @@ class TvAdbDeploymentService {
   }
 
   Future<String?> _serialLanHost(String serial) async {
-    final dotted = RegExp(
-      r'(\d{1,3}(?:\.\d{1,3}){3})',
-    ).firstMatch(serial);
+    final dotted = RegExp(r'(\d{1,3}(?:\.\d{1,3}){3})').firstMatch(serial);
     if (dotted != null) return dotted.group(1);
     try {
       final result = await _adb([
@@ -451,8 +448,7 @@ class TvAdbDeploymentService {
       onProgress('Aviso: ADB no confirmó Leanback; continuando…');
     }
 
-    final alreadyInstalled =
-        target.installed || await isAppInstalled(endpoint);
+    final alreadyInstalled = target.installed || await isAppInstalled(endpoint);
     if (alreadyInstalled) {
       onProgress('APK ya instalado. Abriendo…');
     } else {

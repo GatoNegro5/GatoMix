@@ -95,7 +95,9 @@ class AudioEqualizerService {
       10,
       (i) => (_enabled ? _gains[i] : 0.0) + adaptive[i],
     );
-    final eq = AdaptiveEq.eqChain(merged, preamp: _enabled ? _preamp : 0.0,
+    final eq = AdaptiveEq.eqChain(
+      merged,
+      preamp: _enabled ? _preamp : 0.0,
       levelDb: level,
     );
     final chain = [

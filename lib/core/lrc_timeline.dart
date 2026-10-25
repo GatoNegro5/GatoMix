@@ -17,18 +17,12 @@ class LrcShift {
 }
 
 final RegExp _stamp = RegExp(r'\[(\d{1,3}):(\d{2})\.(\d{2,3})\]');
-final RegExp _manualMark = RegExp(
-  r'\[gmx_manual:\s*1\]',
-  caseSensitive: false,
-);
+final RegExp _manualMark = RegExp(r'\[gmx_manual:\s*1\]', caseSensitive: false);
 final RegExp _shiftMark = RegExp(
   r'\[gmx_shift:\s*(-?\d+)\]',
   caseSensitive: false,
 );
-final RegExp _plainMark = RegExp(
-  r'\[gmx_plain:\s*1\]',
-  caseSensitive: false,
-);
+final RegExp _plainMark = RegExp(r'\[gmx_plain:\s*1\]', caseSensitive: false);
 
 bool lrcIsManual(String content) => _manualMark.hasMatch(content);
 

@@ -63,9 +63,7 @@ int _syncsafe(List<int> b, int o) =>
 
 double _parseBpmText(List<int> bytes) {
   final String text = String.fromCharCodes(
-    bytes.where(
-      (b) => b == 0x2C || b == 0x2E || (b >= 0x30 && b <= 0x39),
-    ),
+    bytes.where((b) => b == 0x2C || b == 0x2E || (b >= 0x30 && b <= 0x39)),
   );
   final match = RegExp(r'(\d{1,6}(?:[.,]\d+)?)').firstMatch(text);
   if (match == null) return 0.0;
@@ -97,8 +95,7 @@ Future<double> _id3Bpm(String path) async {
       if (ext.length < 4) return 0.0;
       pos += ver == 4
           ? _syncsafe(ext, 0)
-          : 4 +
-                ((ext[0] << 24) | (ext[1] << 16) | (ext[2] << 8) | ext[3]);
+          : 4 + ((ext[0] << 24) | (ext[1] << 16) | (ext[2] << 8) | ext[3]);
     }
 
     final hdrLen = ver == 2 ? 6 : 10;

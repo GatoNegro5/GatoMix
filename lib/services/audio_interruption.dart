@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/automix_provider.dart';
 import '../providers/livedj_provider.dart';
+
 /// Comportamiento de app profesional ante interrupciones del sistema
 /// (llamada telefónica, alarma, otra app de audio, auriculares fuera).
 ///

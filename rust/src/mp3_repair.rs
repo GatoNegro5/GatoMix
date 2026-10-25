@@ -15,11 +15,21 @@ pub struct FrameHdr {
     pub mono: bool,
 }
 
-const BR_V1_L3: [u32; 16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-const BR_V2_L3: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
-const BR_V1_L2: [u32; 16] = [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0];
-const BR_V1_L1: [u32; 16] = [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0];
-const BR_V2_L1: [u32; 16] = [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0];
+const BR_V1_L3: [u32; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
+const BR_V2_L3: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+const BR_V1_L2: [u32; 16] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0,
+];
+const BR_V1_L1: [u32; 16] = [
+    0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0,
+];
+const BR_V2_L1: [u32; 16] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0,
+];
 
 pub fn parse_header(b: &[u8]) -> Option<FrameHdr> {
     if b.len() < 4 || b[0] != 0xFF || (b[1] & 0xE0) != 0xE0 {
@@ -177,8 +187,7 @@ pub fn repair_mp3(d: &[u8]) -> Option<(Vec<u8>, RepairStats)> {
         }
         // Confirmar con la trama siguiente (o el final) antes de aceptar.
         let confirmed = next == end
-            || (next + 4 <= end
-                && parse_header(&d[next..]).map_or(false, |n| same_stream(&h, &n)))
+            || (next + 4 <= end && parse_header(&d[next..]).map_or(false, |n| same_stream(&h, &n)))
             || (stream.is_some() && end - next < 4);
         if !confirmed && stream.is_none() {
             st.garbage_bytes += 1;
@@ -210,10 +219,15 @@ pub fn repair_mp3(d: &[u8]) -> Option<(Vec<u8>, RepairStats)> {
     let has_xing = s.layer == 3
         && first.len() >= xo + 16
         && (&first[xo..xo + 4] == b"Xing" || &first[xo..xo + 4] == b"Info");
-    let audio_frames = if has_xing { frames.len() - 1 } else { frames.len() };
+    let audio_frames = if has_xing {
+        frames.len() - 1
+    } else {
+        frames.len()
+    };
     let audio_bytes: usize = frames.iter().map(|f| f.1).sum();
     if has_xing {
-        let flags = u32::from_be_bytes([first[xo + 4], first[xo + 5], first[xo + 6], first[xo + 7]]);
+        let flags =
+            u32::from_be_bytes([first[xo + 4], first[xo + 5], first[xo + 6], first[xo + 7]]);
         let mut p = xo + 8;
         if flags & 1 != 0 {
             let old = u32::from_be_bytes([first[p], first[p + 1], first[p + 2], first[p + 3]]);
@@ -305,6 +319,9 @@ mod tests {
         }
         let (out, st) = repair_mp3(&d).unwrap();
         assert!(st.xing_fixed);
-        assert_eq!(u32::from_be_bytes([out[xo + 8], out[xo + 9], out[xo + 10], out[xo + 11]]), 20);
+        assert_eq!(
+            u32::from_be_bytes([out[xo + 8], out[xo + 9], out[xo + 10], out[xo + 11]]),
+            20
+        );
     }
 }

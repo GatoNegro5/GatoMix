@@ -2,7 +2,9 @@ import 'dart:io';
 
 /// Nombre de la carpeta anterior a 1.0.0. Va partido a propósito: el nombre
 /// viejo completo está solo en CHANGELOG.md.
-const legacyBrand = 'DJ' 'Studio';
+const legacyBrand =
+    'DJ'
+    'Studio';
 
 /// `%LOCALAPPDATA%\GatoMix` (y el equivalente en macOS/Linux). Si todavía
 /// existe la carpeta anterior y la nueva no, la renombra en silencio.
@@ -45,7 +47,10 @@ String labFolder(String base) {
 Directory quarantineDir(String parent) {
   final sep = Platform.pathSeparator;
   final next = Directory('$parent${sep}Cuarentena_GatoMix');
-  final prev = Directory('$parent$sep' 'Cuarentena_$legacyBrand');
+  final prev = Directory(
+    '$parent$sep'
+    'Cuarentena_$legacyBrand',
+  );
   if (!next.existsSync() && prev.existsSync()) {
     try {
       prev.renameSync(next.path);

@@ -183,7 +183,6 @@ class CuePreviewNotifier extends StateNotifier<CueState> {
   }
 }
 
-final cuePreviewProvider =
-    StateNotifierProvider<CuePreviewNotifier, CueState>(
-      (ref) => CuePreviewNotifier(),
-    );
+final cuePreviewProvider = StateNotifierProvider<CuePreviewNotifier, CueState>(
+  (ref) => CuePreviewNotifier(),
+);

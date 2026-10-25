@@ -165,11 +165,7 @@ class MetadataWorker {
     final Id3Names id3 = await loadId3TitleArtist(filePath);
     final cleanName = _uniqueName(
       file.parent,
-      _cleanFilename(
-        filename,
-        id3Artist: id3.artist,
-        id3Title: id3.title,
-      ),
+      _cleanFilename(filename, id3Artist: id3.artist, id3Title: id3.title),
       filePath,
     );
 
@@ -211,8 +207,12 @@ class MetadataWorker {
 
   Future<void> _retargetAutoLyric(String oldMp3, String newMp3) async {
     final RegExp ext = RegExp(r'\.mp3$', caseSensitive: false);
-    final String oldBase = File(oldMp3.replaceAll(ext, '.lrc')).uri.pathSegments.last;
-    final String newBase = File(newMp3.replaceAll(ext, '.lrc')).uri.pathSegments.last;
+    final String oldBase = File(
+      oldMp3.replaceAll(ext, '.lrc'),
+    ).uri.pathSegments.last;
+    final String newBase = File(
+      newMp3.replaceAll(ext, '.lrc'),
+    ).uri.pathSegments.last;
     if (oldBase == newBase) return;
     final File reg = File(
       '${File(newMp3).parent.path}${Platform.pathSeparator}_lyrics_auto.json',

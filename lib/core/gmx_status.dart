@@ -57,7 +57,9 @@ class GmxSnapshot {
   });
 
   bool get isMegamix =>
-      type.toUpperCase() == 'MEGAMIX' || megamixBySize || lyr.toUpperCase() == 'NA';
+      type.toUpperCase() == 'MEGAMIX' ||
+      megamixBySize ||
+      lyr.toUpperCase() == 'NA';
 }
 
 class SongAudit {

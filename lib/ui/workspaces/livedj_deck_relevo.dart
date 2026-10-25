@@ -193,11 +193,7 @@ RelevoSpill relevoSpill({
     Color.lerp(outgoing, incoming, u)!,
     0.50,
   )!;
-  final Color edge = Color.lerp(
-    GatoMixTheme.bgDark,
-    outgoing,
-    0.36 * (1 - u),
-  )!;
+  final Color edge = Color.lerp(GatoMixTheme.bgDark, outgoing, 0.36 * (1 - u))!;
   return RelevoSpill(
     center: Alignment(0, ay),
     radius: 0.18 + 1.45 * u,

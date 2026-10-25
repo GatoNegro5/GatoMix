@@ -45,7 +45,9 @@ class KaraokeCore {
     final votes = voting
         ? Map<String, int>.from(board['votes'] as Map? ?? {})
         : Map<String, int>.from(votesNotifier.value);
-    final left = voting ? voteDeadline!.difference(now).inSeconds.clamp(0, 10) : 0;
+    final left = voting
+        ? voteDeadline!.difference(now).inSeconds.clamp(0, 10)
+        : 0;
     return {
       'phase': phase,
       'singer': singer,
@@ -188,7 +190,10 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
   /// cubre :55055; sin esta, la Google TV no completa el upgrade WebSocket.
   Future<void> _ensureTvFirewallRule() async {
     if (!Platform.isWindows) return;
-    const oldRule = 'DJ' 'Studio' ' TV Sync';
+    const oldRule =
+        'DJ'
+        'Studio'
+        ' TV Sync';
     const ruleName = 'GatoMix TV Sync';
     try {
       final probeOld = await Process.run('powershell', [
@@ -396,8 +401,10 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
       '.lrc',
     );
     return {
-      'mp3': 'http://$_hostIp:55056/karaoke/audio?p=${Uri.encodeQueryComponent(audioPath)}',
-      'lrc': 'http://$_hostIp:55056/karaoke/lrc?p=${Uri.encodeQueryComponent(lrcPath)}',
+      'mp3':
+          'http://$_hostIp:55056/karaoke/audio?p=${Uri.encodeQueryComponent(audioPath)}',
+      'lrc':
+          'http://$_hostIp:55056/karaoke/lrc?p=${Uri.encodeQueryComponent(lrcPath)}',
       'track': originalPath.replaceAll('\\', '/').split('/').last,
     };
   }
@@ -431,10 +438,7 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
       final queued = KaraokeCore().peekNext();
       if (queued == null) return;
       final originalPath = '${queued['song']}';
-      final urls = _edgeUrls(
-        _resolveKaraokeAudio(originalPath),
-        originalPath,
-      );
+      final urls = _edgeUrls(_resolveKaraokeAudio(originalPath), originalPath);
       try {
         ref
             .read(tvSyncProvider)
@@ -1095,8 +1099,7 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
                                   const SizedBox(height: 8),
                                 if (current.isNotEmpty)
                                   OutlinedButton(
-                                    onPressed: () =>
-                                        unawaited(_skipTrack()),
+                                    onPressed: () => unawaited(_skipTrack()),
                                     style: OutlinedButton.styleFrom(
                                       foregroundColor: const Color(0xFF39FF14),
                                       side: const BorderSide(
@@ -1492,7 +1495,8 @@ class _TvDeploymentDialogState extends State<TvDeploymentDialog> {
     bool connected = false;
     try {
       final String result = await widget.service.connectManual(full);
-      connected = result.toLowerCase().contains('connected to') &&
+      connected =
+          result.toLowerCase().contains('connected to') &&
           !result.toLowerCase().contains('failed');
       if (!mounted) return;
       setState(() {
@@ -1535,9 +1539,7 @@ class _TvDeploymentDialogState extends State<TvDeploymentDialog> {
       });
       final paired = await _pair(e.target, manageBusy: false);
       if (!paired || !mounted) return;
-      await _install(
-        e.target.copyWith(state: TvAdbTargetState.discoverable),
-      );
+      await _install(e.target.copyWith(state: TvAdbTargetState.discoverable));
     } catch (e) {
       if (mounted) setState(() => _status = 'Instalación fallida: $e');
     } finally {
@@ -1567,7 +1569,12 @@ class _TvDeploymentDialogState extends State<TvDeploymentDialog> {
                 color: needsAction ? color : Colors.transparent,
                 border: Border.all(color: color, width: 2),
                 boxShadow: needsAction
-                    ? [BoxShadow(color: color.withValues(alpha: 0.7), blurRadius: 10)]
+                    ? [
+                        BoxShadow(
+                          color: color.withValues(alpha: 0.7),
+                          blurRadius: 10,
+                        ),
+                      ]
                     : const [],
               ),
             ),
@@ -1707,9 +1714,7 @@ class _TvDeploymentDialogState extends State<TvDeploymentDialog> {
                                 _actionLamp(
                                   label: 'Conectado/Emparejado',
                                   needsAction: !target.paired,
-                                  onPressed: _busy
-                                      ? null
-                                      : () => _pair(target),
+                                  onPressed: _busy ? null : () => _pair(target),
                                 ),
                                 const SizedBox(width: 16),
                                 _actionLamp(

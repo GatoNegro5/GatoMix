@@ -417,8 +417,9 @@ class NlpWorker {
       await collect(id);
     }
     LyricIdentity main = ids.first;
-    List<LyricIdentity> also =
-        ids.length > 1 ? ids.sublist(1) : const <LyricIdentity>[];
+    List<LyricIdentity> also = ids.length > 1
+        ? ids.sublist(1)
+        : const <LyricIdentity>[];
     if (pool.isEmpty) {
       // 0 filas: sin año, intercambiado (TÍTULO - ARTISTA), o ambos.
       for (final LyricIdentity fb in lyricFallbackIdentities(ids.first)) {

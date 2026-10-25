@@ -234,9 +234,7 @@ class _LibraryTreePanelState extends ConsumerState<LibraryTreePanel> {
 
   @override
   Widget build(BuildContext context) {
-    final expandedPaths = ref.watch(
-      _dir.select((s) => s.expandedPaths),
-    );
+    final expandedPaths = ref.watch(_dir.select((s) => s.expandedPaths));
     final bool isMobile = MediaQuery.of(context).size.width < 800;
 
     return Column(
@@ -438,9 +436,7 @@ class FolderContentPanel extends ConsumerWidget {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              bpm > 0
-                                  ? bpm.toStringAsFixed(1)
-                                  : "---",
+                              bpm > 0 ? bpm.toStringAsFixed(1) : "---",
                               style: TextStyle(
                                 color: bpm > 0
                                     ? const Color(0xFFFF007F)
@@ -705,9 +701,7 @@ class AutomixPanel extends ConsumerWidget {
 
     final automixQueue = ref.watch(automixQueueProvider);
     final sortMode = ref.watch(trackSortProvider);
-    final mixStrategy = ref.watch(
-      automixProvider.select((p) => p.mixStrategy),
-    );
+    final mixStrategy = ref.watch(automixProvider.select((p) => p.mixStrategy));
     final playlist = ref.watch(automixProvider.select((p) => p.playlist));
     final playedTracks = ref.watch(playedTracksProvider);
     final bpmCache = ref.watch(bpmCacheProvider);
@@ -828,150 +822,151 @@ class AutomixPanel extends ConsumerWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                    ElevatedButton.icon(
-                      onPressed: displayFiles.isEmpty || isBusy
-                          ? null
-                          : () {
-                              final allPaths = displayFiles
-                                  .map((f) => f.path)
-                                  .toList();
-                              _playLocalTrack(ref, allPaths, 0);
-                            },
-                      icon: Icon(Icons.play_arrow, size: isMobile ? 13 : 16),
-                      label: Text(
-                        "PLAY",
-                        style: TextStyle(
-                          fontSize: isMobile ? 9 : 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFFF007F),
-                        foregroundColor: Colors.white,
-                        padding: EdgeInsets.symmetric(
-                          horizontal: isMobile ? 6 : 8,
-                        ),
-                        minimumSize: Size(0, isMobile ? 22 : 30),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ),
-                    if (automixQueue.isNotEmpty) ...[
-                      IconButton(
-                        icon: Icon(
-                          Icons.delete_sweep,
-                          color: Colors.redAccent,
-                          size: isMobile ? 16 : 18,
-                        ),
-                        onPressed: () =>
-                            ref.read(automixQueueProvider.notifier).clearQueue(),
-                        tooltip: "Limpiar Cola",
-                        constraints: const BoxConstraints.tightFor(
-                          width: 28,
-                          height: 28,
-                        ),
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                      IconButton(
-                        icon: Icon(
-                          Icons.save,
-                          color: const Color(0xFF00FFFF),
-                          size: isMobile ? 16 : 18,
-                        ),
-                        onPressed: () =>
-                            _saveAutomixQueue(context, automixQueue),
-                        tooltip: "Guardar Lista en Disco",
-                        constraints: const BoxConstraints.tightFor(
-                          width: 28,
-                          height: 28,
-                        ),
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                    ],
-                    IconButton(
-                      icon: Icon(
-                        Icons.folder_open,
-                        color: const Color(0xFF39FF14),
-                        size: isMobile ? 16 : 18,
-                      ),
-                      onPressed: () => _loadAutomixQueue(context, ref),
-                      tooltip: "Cargar Lista",
-                      constraints: const BoxConstraints.tightFor(
-                        width: 28,
-                        height: 28,
-                      ),
-                      padding: EdgeInsets.zero,
-                      visualDensity: VisualDensity.compact,
-                      style: IconButton.styleFrom(
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                    PopupMenuButton<TrackSortMode>(
-                      initialValue: sortMode,
-                      padding: EdgeInsets.zero,
-                      iconSize: isMobile ? 16 : 20,
-                      constraints: const BoxConstraints.tightFor(
-                        width: 28,
-                        height: 28,
-                      ),
-                      icon: Icon(
-                        Icons.sort,
-                        color: Colors.white70,
-                        size: isMobile ? 16 : 20,
-                      ),
-                      color: GatoMixTheme.bgDark,
-                      shape: RoundedRectangleBorder(
-                        side: const BorderSide(color: Color(0xFFFF007F)),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      tooltip: "Ordenar Automix",
-                      onSelected: (mode) => ref
-                          .read(trackSortProvider.notifier)
-                          .updateMode(mode),
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(
-                          value: TrackSortMode.alphabetical,
-                          child: Text(
-                            "Alfabético (A-Z)",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
+                      ElevatedButton.icon(
+                        onPressed: displayFiles.isEmpty || isBusy
+                            ? null
+                            : () {
+                                final allPaths = displayFiles
+                                    .map((f) => f.path)
+                                    .toList();
+                                _playLocalTrack(ref, allPaths, 0);
+                              },
+                        icon: Icon(Icons.play_arrow, size: isMobile ? 13 : 16),
+                        label: Text(
+                          "PLAY",
+                          style: TextStyle(
+                            fontSize: isMobile ? 9 : 11,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-                        PopupMenuItem(
-                          value: TrackSortMode.bpmDesc,
-                          child: Text(
-                            "BPM (Mayor a Menor)",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFFF007F),
+                          foregroundColor: Colors.white,
+                          padding: EdgeInsets.symmetric(
+                            horizontal: isMobile ? 6 : 8,
+                          ),
+                          minimumSize: Size(0, isMobile ? 22 : 30),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ),
+                      if (automixQueue.isNotEmpty) ...[
+                        IconButton(
+                          icon: Icon(
+                            Icons.delete_sweep,
+                            color: Colors.redAccent,
+                            size: isMobile ? 16 : 18,
+                          ),
+                          onPressed: () => ref
+                              .read(automixQueueProvider.notifier)
+                              .clearQueue(),
+                          tooltip: "Limpiar Cola",
+                          constraints: const BoxConstraints.tightFor(
+                            width: 28,
+                            height: 28,
+                          ),
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
                         ),
-                        PopupMenuItem(
-                          value: TrackSortMode.bpmAsc,
-                          child: Text(
-                            "BPM (Menor a Mayor)",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
+                        IconButton(
+                          icon: Icon(
+                            Icons.save,
+                            color: const Color(0xFF00FFFF),
+                            size: isMobile ? 16 : 18,
+                          ),
+                          onPressed: () =>
+                              _saveAutomixQueue(context, automixQueue),
+                          tooltip: "Guardar Lista en Disco",
+                          constraints: const BoxConstraints.tightFor(
+                            width: 28,
+                            height: 28,
+                          ),
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
                         ),
                       ],
-                    ),
-                  ],
+                      IconButton(
+                        icon: Icon(
+                          Icons.folder_open,
+                          color: const Color(0xFF39FF14),
+                          size: isMobile ? 16 : 18,
+                        ),
+                        onPressed: () => _loadAutomixQueue(context, ref),
+                        tooltip: "Cargar Lista",
+                        constraints: const BoxConstraints.tightFor(
+                          width: 28,
+                          height: 28,
+                        ),
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        style: IconButton.styleFrom(
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                      PopupMenuButton<TrackSortMode>(
+                        initialValue: sortMode,
+                        padding: EdgeInsets.zero,
+                        iconSize: isMobile ? 16 : 20,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 28,
+                          height: 28,
+                        ),
+                        icon: Icon(
+                          Icons.sort,
+                          color: Colors.white70,
+                          size: isMobile ? 16 : 20,
+                        ),
+                        color: GatoMixTheme.bgDark,
+                        shape: RoundedRectangleBorder(
+                          side: const BorderSide(color: Color(0xFFFF007F)),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        tooltip: "Ordenar Automix",
+                        onSelected: (mode) => ref
+                            .read(trackSortProvider.notifier)
+                            .updateMode(mode),
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: TrackSortMode.alphabetical,
+                            child: Text(
+                              "Alfabético (A-Z)",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: TrackSortMode.bpmDesc,
+                            child: Text(
+                              "BPM (Mayor a Menor)",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: TrackSortMode.bpmAsc,
+                            child: Text(
+                              "BPM (Menor a Mayor)",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
               ),
             ],
           ),
@@ -1248,9 +1243,10 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final bool compact = Platform.isAndroid || Platform.isIOS;
-        final bool menuOpen = compact ? ref.watch(mobileNavOpenProvider) : false;
-        final bool syncExpand =
-            compact && ref.watch(automixSyncArmedProvider);
+        final bool menuOpen = compact
+            ? ref.watch(mobileNavOpenProvider)
+            : false;
+        final bool syncExpand = compact && ref.watch(automixSyncArmedProvider);
 
         final Widget lyricsBox = ClipRect(
           child: Container(
@@ -1270,13 +1266,9 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                 child: Text(
                   displaySubtitle,
                   style: TextStyle(
-                    color: isPlaying
-                        ? const Color(0xFFFF007F)
-                        : Colors.white54,
+                    color: isPlaying ? const Color(0xFFFF007F) : Colors.white54,
                     fontSize: 14,
-                    fontWeight: isPlaying
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    fontWeight: isPlaying ? FontWeight.bold : FontWeight.normal,
                   ),
                 ),
               ),
@@ -1338,15 +1330,16 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                               automixProvider.select((s) => s.activeLyricIndex),
                             );
                             final isCurrent = index == activeIdx;
-                            final bool previewFirst = activeIdx < 0 && index == 0;
+                            final bool previewFirst =
+                                activeIdx < 0 && index == 0;
                             final isPassed = index < activeIdx;
                             final Color textColor = isCurrent
                                 ? const Color(0xFF39FF14)
                                 : (previewFirst
-                                    ? Colors.white
-                                    : (isPassed
-                                    ? Colors.white38
-                                    : Colors.white70));
+                                      ? Colors.white
+                                      : (isPassed
+                                            ? Colors.white38
+                                            : Colors.white70));
                             return Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -1394,63 +1387,63 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                       },
                     )
                   : ListWheelScrollView(
-                controller: _lyricsController,
-                itemExtent: compact ? 20.0 : 32.0,
-                diameterRatio: 10.0,
-                perspective: 0.0001,
-                physics: const NeverScrollableScrollPhysics(),
-                children: List.generate(lyrics.length, (index) {
-                  return Consumer(
-                    builder: (context, ref, _) {
-                      final activeIdx = ref.watch(
-                        automixProvider.select((s) => s.activeLyricIndex),
-                      );
-                      final highlightIdx = activeIdx;
-                      final isCurrent = index == highlightIdx;
-                      final isNext = index == highlightIdx + 1;
-                      final isPassed = index < highlightIdx;
+                      controller: _lyricsController,
+                      itemExtent: compact ? 20.0 : 32.0,
+                      diameterRatio: 10.0,
+                      perspective: 0.0001,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: List.generate(lyrics.length, (index) {
+                        return Consumer(
+                          builder: (context, ref, _) {
+                            final activeIdx = ref.watch(
+                              automixProvider.select((s) => s.activeLyricIndex),
+                            );
+                            final highlightIdx = activeIdx;
+                            final isCurrent = index == highlightIdx;
+                            final isNext = index == highlightIdx + 1;
+                            final isPassed = index < highlightIdx;
 
-                      Color textColor;
-                      double fontSize;
-                      FontWeight fontWeight;
+                            Color textColor;
+                            double fontSize;
+                            FontWeight fontWeight;
 
-                      if (isCurrent) {
-                        textColor = const Color(0xFF39FF14);
-                        fontSize = compact ? 14 : 24;
-                        fontWeight = FontWeight.bold;
-                      } else if (highlightIdx < 0 && index == 0) {
-                        textColor = Colors.white;
-                        fontSize = compact ? 14 : 24;
-                        fontWeight = FontWeight.bold;
-                      } else if (isNext) {
-                        textColor = Colors.white.withValues(alpha: 0.95);
-                        fontSize = compact ? 11 : 14;
-                        fontWeight = FontWeight.w600;
-                      } else {
-                        textColor = Colors.white38;
-                        fontSize = compact ? 10 : 12;
-                        fontWeight = FontWeight.normal;
-                      }
+                            if (isCurrent) {
+                              textColor = const Color(0xFF39FF14);
+                              fontSize = compact ? 14 : 24;
+                              fontWeight = FontWeight.bold;
+                            } else if (highlightIdx < 0 && index == 0) {
+                              textColor = Colors.white;
+                              fontSize = compact ? 14 : 24;
+                              fontWeight = FontWeight.bold;
+                            } else if (isNext) {
+                              textColor = Colors.white.withValues(alpha: 0.95);
+                              fontSize = compact ? 11 : 14;
+                              fontWeight = FontWeight.w600;
+                            } else {
+                              textColor = Colors.white38;
+                              fontSize = compact ? 10 : 12;
+                              fontWeight = FontWeight.normal;
+                            }
 
-                      return Center(
-                        child: Text(
-                          lyrics[index].text.toString(),
-                          style: TextStyle(
-                            color: textColor,
-                            fontSize: fontSize,
-                            fontWeight: fontWeight,
-                            fontStyle: isPassed
-                                ? FontStyle.italic
-                                : FontStyle.normal,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.visible,
-                        ),
-                      );
-                    },
-                  );
-                }),
-              ),
+                            return Center(
+                              child: Text(
+                                lyrics[index].text.toString(),
+                                style: TextStyle(
+                                  color: textColor,
+                                  fontSize: fontSize,
+                                  fontWeight: fontWeight,
+                                  fontStyle: isPassed
+                                      ? FontStyle.italic
+                                      : FontStyle.normal,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.visible,
+                              ),
+                            );
+                          },
+                        );
+                      }),
+                    ),
             ),
           ),
         );
@@ -1474,9 +1467,11 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                               accent: GatoMixTheme.deckA,
                               open: menuOpen,
                               expand: false,
-                              onTap: () => ref
-                                  .read(mobileNavOpenProvider.notifier)
-                                  .state = !menuOpen,
+                              onTap: () =>
+                                  ref
+                                          .read(mobileNavOpenProvider.notifier)
+                                          .state =
+                                      !menuOpen,
                             ),
                             const SizedBox(width: 6),
                             Expanded(child: lyricsBox),
@@ -1491,9 +1486,9 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                             accent: GatoMixTheme.deckA,
                             open: menuOpen,
                             expand: false,
-                            onTap: () => ref
-                                .read(mobileNavOpenProvider.notifier)
-                                .state = !menuOpen,
+                            onTap: () =>
+                                ref.read(mobileNavOpenProvider.notifier).state =
+                                    !menuOpen,
                           ),
                           const SizedBox(width: 6),
                           Expanded(
@@ -1520,9 +1515,7 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                     SizedBox(
                       width: compact ? 92 : 110,
                       child: Flex(
-                        direction: compact
-                            ? Axis.horizontal
-                            : Axis.vertical,
+                        direction: compact ? Axis.horizontal : Axis.vertical,
                         mainAxisAlignment: MainAxisAlignment.center,
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -1658,10 +1651,11 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                                         tooltip: autoMixArmed
                                             ? "AutoMix ARMADO"
                                             : "AutoMix BYPASS (Navegación Libre)",
-                                        constraints: const BoxConstraints.tightFor(
-                                          width: 28,
-                                          height: 28,
-                                        ),
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 28,
+                                              height: 28,
+                                            ),
                                         padding: EdgeInsets.zero,
                                         visualDensity: VisualDensity.compact,
                                         style: IconButton.styleFrom(
@@ -1753,10 +1747,11 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                                         ),
                                         tooltip:
                                             "Borrar Cues (Restaurar Letra de Internet)",
-                                        constraints: const BoxConstraints.tightFor(
-                                          width: 28,
-                                          height: 28,
-                                        ),
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 28,
+                                              height: 28,
+                                            ),
                                         padding: EdgeInsets.zero,
                                         visualDensity: VisualDensity.compact,
                                         style: IconButton.styleFrom(
@@ -1980,7 +1975,8 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
   bool _onUndoKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
     if (!isArmed || _filaCtrl.text.isNotEmpty) return false;
-    final bool ctrl = HardwareKeyboard.instance.isControlPressed ||
+    final bool ctrl =
+        HardwareKeyboard.instance.isControlPressed ||
         HardwareKeyboard.instance.isMetaPressed;
     if (!ctrl || event.logicalKey != LogicalKeyboardKey.keyZ) return false;
     widget.onUndo?.call();
@@ -2045,54 +2041,56 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
 
       await automixNotifier.mixOutForQuarantine(trackPath);
 
-    String baseMusicPath;
-    if (Platform.isIOS) {
-      baseMusicPath = IphoneLibrary.musicRoot;
-    } else if (Platform.isWindows) {
-      final userProfile = Platform.environment['USERPROFILE'];
-      baseMusicPath = userProfile != null ? '$userProfile\\Music' : 'C:\\Music';
-    } else if (Platform.isMacOS || Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      baseMusicPath = home != null ? '$home/Music' : '/tmp';
-    } else {
-      baseMusicPath = '/storage/emulated/0/Music';
-    }
-
-    final labDir = Directory(labFolder(baseMusicPath));
-    if (!labDir.existsSync()) labDir.createSync(recursive: true);
-
-    final registryFile = File(
-      '${labDir.path}${Platform.pathSeparator}quarantine_registry.json',
-    );
-    Map<String, dynamic> registry = {};
-    if (registryFile.existsSync()) {
-      try {
-        registry = jsonDecode(registryFile.readAsStringSync());
-      } catch (_) {}
-    }
-
-    final fileName = file.uri.pathSegments.last;
-    final newPath = '${labDir.path}${Platform.pathSeparator}$fileName';
-
-    bool moved = false;
-    int attempts = 0;
-
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    while (!moved && attempts < 20) {
-      try {
-        file.renameSync(newPath);
-        moved = true;
-      } catch (e) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        attempts++;
+      String baseMusicPath;
+      if (Platform.isIOS) {
+        baseMusicPath = IphoneLibrary.musicRoot;
+      } else if (Platform.isWindows) {
+        final userProfile = Platform.environment['USERPROFILE'];
+        baseMusicPath = userProfile != null
+            ? '$userProfile\\Music'
+            : 'C:\\Music';
+      } else if (Platform.isMacOS || Platform.isLinux) {
+        final home = Platform.environment['HOME'];
+        baseMusicPath = home != null ? '$home/Music' : '/tmp';
+      } else {
+        baseMusicPath = '/storage/emulated/0/Music';
       }
-    }
 
-    if (!moved) {
-      debugPrint("🔴 VETO TÉCNICO: libmpv no liberó el handle.");
-      return;
-    }
+      final labDir = Directory(labFolder(baseMusicPath));
+      if (!labDir.existsSync()) labDir.createSync(recursive: true);
+
+      final registryFile = File(
+        '${labDir.path}${Platform.pathSeparator}quarantine_registry.json',
+      );
+      Map<String, dynamic> registry = {};
+      if (registryFile.existsSync()) {
+        try {
+          registry = jsonDecode(registryFile.readAsStringSync());
+        } catch (_) {}
+      }
+
+      final fileName = file.uri.pathSegments.last;
+      final newPath = '${labDir.path}${Platform.pathSeparator}$fileName';
+
+      bool moved = false;
+      int attempts = 0;
+
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      while (!moved && attempts < 20) {
+        try {
+          file.renameSync(newPath);
+          moved = true;
+        } catch (e) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          attempts++;
+        }
+      }
+
+      if (!moved) {
+        debugPrint("🔴 VETO TÉCNICO: libmpv no liberó el handle.");
+        return;
+      }
 
       registry[fileName] = trackPath;
       final lrcFile = File(
@@ -2529,8 +2527,7 @@ class _VocalCountIn extends ConsumerWidget {
       }
     }
     if (upcoming == null) return const SizedBox.shrink();
-    final int leftMs =
-        upcoming.timestamp.inMilliseconds - pos.inMilliseconds;
+    final int leftMs = upcoming.timestamp.inMilliseconds - pos.inMilliseconds;
     if (leftMs <= 0 || leftMs > 3000) return const SizedBox.shrink();
     final int n = (leftMs / 1000).ceil().clamp(1, 3);
     return Align(

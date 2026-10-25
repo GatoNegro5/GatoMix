@@ -45,7 +45,14 @@ String artistFromPath(String path) {
   final i = name.indexOf(' - ');
   if (i <= 0) return '';
   var a = name.substring(0, i).trim();
-  a = a.split(RegExp(r'\s*(?:,|&|\bft\.?\b|\bfeat\.?\b|\bx\b| y )\s*', caseSensitive: false)).first;
+  a = a
+      .split(
+        RegExp(
+          r'\s*(?:,|&|\bft\.?\b|\bfeat\.?\b|\bx\b| y )\s*',
+          caseSensitive: false,
+        ),
+      )
+      .first;
   return a.trim();
 }
 
@@ -68,72 +75,79 @@ String _key(String artist) =>
 Future<ArtistInfo?> loadArtistInfo(String artist) {
   final a = artist.trim();
   if (a.isEmpty) return Future.value(null);
-  return _mem.putIfAbsent(a.toLowerCase(), () async {
-    final dir = _cacheDir();
-    final meta = File('${dir.path}${Platform.pathSeparator}${_key(a)}.json');
-    try {
-      if (meta.existsSync()) {
-        final cached = ArtistInfo.fromJson(
-          jsonDecode(meta.readAsStringSync()) as Map<String, dynamic>,
+  return _mem
+      .putIfAbsent(a.toLowerCase(), () async {
+        final dir = _cacheDir();
+        final meta = File(
+          '${dir.path}${Platform.pathSeparator}${_key(a)}.json',
         );
-        if (cached.photoPath == null || File(cached.photoPath!).existsSync()) {
-          return cached;
-        }
-      }
-    } catch (_) {}
-
-    try {
-      final r = await http
-          .get(
-            Uri.parse(
-              'https://api.deezer.com/search/artist?q=${Uri.encodeQueryComponent(a)}&limit=1',
-            ),
-          )
-          .timeout(const Duration(seconds: 6));
-      if (r.statusCode != 200) return null;
-      final data = (jsonDecode(r.body)['data'] as List?) ?? const [];
-      if (data.isEmpty) return null;
-      final d = data.first as Map<String, dynamic>;
-      final String shown = (d['name'] ?? a).toString();
-      final int fans = (d['nb_fan'] as num?)?.toInt() ?? 0;
-      final String? picUrl =
-          (d['picture_medium'] ?? d['picture_big'] ?? d['picture'])?.toString();
-
-      String? photoPath;
-      if (picUrl != null && picUrl.isNotEmpty) {
         try {
-          final img = await http
-              .get(Uri.parse(picUrl))
-              .timeout(const Duration(seconds: 8));
-          if (img.statusCode == 200 && img.bodyBytes.isNotEmpty) {
-            photoPath = '${dir.path}${Platform.pathSeparator}${_key(a)}.jpg';
-            File(photoPath).writeAsBytesSync(img.bodyBytes);
+          if (meta.existsSync()) {
+            final cached = ArtistInfo.fromJson(
+              jsonDecode(meta.readAsStringSync()) as Map<String, dynamic>,
+            );
+            if (cached.photoPath == null ||
+                File(cached.photoPath!).existsSync()) {
+              return cached;
+            }
           }
         } catch (_) {}
-      }
 
-      final String bio = await _wikiBio(shown);
-      final info = ArtistInfo(
-        name: shown,
-        photoPath: photoPath,
-        fans: fans,
-        bio: bio,
-      );
-      try {
-        meta.writeAsStringSync(jsonEncode(info.toJson()));
-      } catch (_) {}
-      return info;
-    } catch (_) {
-      // Sin internet / certificado / límite: la UI queda como siempre.
-      return null;
-    }
-  }).then((v) {
-    if (v == null) {
-      // No se recuerda el fallo: al volver el internet se reintenta.
-      _mem.remove(a.toLowerCase());
-    }
-    return v;
-  });
+        try {
+          final r = await http
+              .get(
+                Uri.parse(
+                  'https://api.deezer.com/search/artist?q=${Uri.encodeQueryComponent(a)}&limit=1',
+                ),
+              )
+              .timeout(const Duration(seconds: 6));
+          if (r.statusCode != 200) return null;
+          final data = (jsonDecode(r.body)['data'] as List?) ?? const [];
+          if (data.isEmpty) return null;
+          final d = data.first as Map<String, dynamic>;
+          final String shown = (d['name'] ?? a).toString();
+          final int fans = (d['nb_fan'] as num?)?.toInt() ?? 0;
+          final String? picUrl =
+              (d['picture_medium'] ?? d['picture_big'] ?? d['picture'])
+                  ?.toString();
+
+          String? photoPath;
+          if (picUrl != null && picUrl.isNotEmpty) {
+            try {
+              final img = await http
+                  .get(Uri.parse(picUrl))
+                  .timeout(const Duration(seconds: 8));
+              if (img.statusCode == 200 && img.bodyBytes.isNotEmpty) {
+                photoPath =
+                    '${dir.path}${Platform.pathSeparator}${_key(a)}.jpg';
+                File(photoPath).writeAsBytesSync(img.bodyBytes);
+              }
+            } catch (_) {}
+          }
+
+          final String bio = await _wikiBio(shown);
+          final info = ArtistInfo(
+            name: shown,
+            photoPath: photoPath,
+            fans: fans,
+            bio: bio,
+          );
+          try {
+            meta.writeAsStringSync(jsonEncode(info.toJson()));
+          } catch (_) {}
+          return info;
+        } catch (_) {
+          // Sin internet / certificado / límite: la UI queda como siempre.
+          return null;
+        }
+      })
+      .then((v) {
+        if (v == null) {
+          // No se recuerda el fallo: al volver el internet se reintenta.
+          _mem.remove(a.toLowerCase());
+        }
+        return v;
+      });
 }
 
 Future<String> _wikiBio(String name) async {

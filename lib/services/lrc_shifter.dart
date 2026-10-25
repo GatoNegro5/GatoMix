@@ -1,4 +1,5 @@
 import 'dart:io';
+
 // ❌ CERO DEPENDENCIAS DE FLUTTER AQUÍ
 
 void main() {

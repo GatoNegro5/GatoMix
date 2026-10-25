@@ -339,7 +339,9 @@ class _YoutubeSearchAndDownloadWorkspaceState
         final manifest = await _yt.videos.streamsClient.getManifest(
           VideoId(videoId),
         );
-        directStreamUrl = manifest.audioOnly.withHighestBitrate().url
+        directStreamUrl = manifest.audioOnly
+            .withHighestBitrate()
+            .url
             .toString();
       } else {
         final process = await Process.run(ytdlpPath, [
@@ -446,7 +448,9 @@ class _YoutubeSearchAndDownloadWorkspaceState
 
       final tempDir = Directory.systemTemp;
       final String sep = Platform.pathSeparator;
-      final tempRawPath = '${tempDir.path}$sep' 'raw_vr_audio.m4a';
+      final tempRawPath =
+          '${tempDir.path}$sep'
+          'raw_vr_audio.m4a';
       final tempM4aPath = '${tempDir.path}$sep$trackStem.m4a';
       final tempMp3Path = '${tempDir.path}$sep$trackStem.mp3';
       final tempLrcPath = '${tempDir.path}$sep$trackStem.lrc';
@@ -519,9 +523,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
         File(tempRawPath).renameSync(tempM4aPath);
       }
 
-      setState(
-        () => _statusText = "Buscando letra con el nombre limpio...",
-      );
+      setState(() => _statusText = "Buscando letra con el nombre limpio...");
       await ref.read(nlpWorkerProvider).processSingleFile(tempM4aPath);
       if (!File(tempLrcPath).existsSync()) {
         await _extractLyricsFromYoutube(targetUrl, tempMp3Path);
@@ -744,7 +746,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
       );
 
       final marks = await rust_dsp.readGmxMarks(inputPath: currentPath);
-      final bool lyricsOk = isHeavyMix ||
+      final bool lyricsOk =
+          isHeavyMix ||
           marks.lyr == 'SYNC' ||
           marks.lyr == 'PLAIN' ||
           marks.lyr == 'MANUAL' ||
@@ -1391,7 +1394,9 @@ class KaraokeAIEngine {
     }
 
     debugPrint("🤖 [AI ENGINE] Karaoke IA (Rust/ONNX) en: $path");
-    KaraokeEngine.run(path, onStatus: (s) => debugPrint("🔵 [KARAOKE]: $s"))
-        .whenComplete(() => debugPrint("✅ [AI ENGINE] Extracción IA terminada"));
+    KaraokeEngine.run(
+      path,
+      onStatus: (s) => debugPrint("🔵 [KARAOKE]: $s"),
+    ).whenComplete(() => debugPrint("✅ [AI ENGINE] Extracción IA terminada"));
   }
 }

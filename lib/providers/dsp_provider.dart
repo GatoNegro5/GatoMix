@@ -351,7 +351,9 @@ class DspWorker {
 
       try {
         // Los cues fijados a mano (SET IN/OUT) jamás se purgan.
-        final meta = await ref.read(dbServiceProvider).getTrackMetadata(file.path);
+        final meta = await ref
+            .read(dbServiceProvider)
+            .getTrackMetadata(file.path);
         if (meta != null && meta.isManualCue) continue;
         await ref.read(dbServiceProvider).deleteTrackMetadata(file.path);
       } catch (_) {

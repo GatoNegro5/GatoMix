@@ -69,7 +69,10 @@ class AfCaps {
         }
       }
 
-      final eqOk = await accepts('equalizer=f=1000:width_type=o:w=1:g=1.0', 'equalizer');
+      final eqOk = await accepts(
+        'equalizer=f=1000:width_type=o:w=1:g=1.0',
+        'equalizer',
+      );
       if (eqOk) {
         _ok.add('equalizer');
       } else {

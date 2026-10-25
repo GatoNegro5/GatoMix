@@ -95,12 +95,7 @@ class DspNlpWorkspace extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     String targetPath,
-  ) => _executeUniversalPipeline(
-    context,
-    ref,
-    targetPath,
-    skipPreflight: true,
-  );
+  ) => _executeUniversalPipeline(context, ref, targetPath, skipPreflight: true);
 
   void _showSummaryDialog(
     BuildContext context,
@@ -618,7 +613,9 @@ class DspNlpWorkspace extends ConsumerWidget {
               (checkpoint['processed'] as List).add(originalName);
             } else {
               currentStage = 'METADATA_CLEANUP';
-              final Timer tick = Timer.periodic(const Duration(seconds: 1), (_) {
+              final Timer tick = Timer.periodic(const Duration(seconds: 1), (
+                _,
+              ) {
                 pipe.updateProgress(
                   finished + 1,
                   total,
@@ -1000,7 +997,11 @@ class DspNlpWorkspace extends ConsumerWidget {
     final int n = await ref.read(nlpWorkerProvider).resetAutoLyrics(targetPath);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("📝 $n letras automáticas borradas. Las tuyas siguen intactas.")),
+        SnackBar(
+          content: Text(
+            "📝 $n letras automáticas borradas. Las tuyas siguen intactas.",
+          ),
+        ),
       );
     }
   }
@@ -1340,7 +1341,12 @@ class DspNlpWorkspace extends ConsumerWidget {
                       ref,
                       dirState.currentPath,
                     ),
-              footer: _masterCardFooter(context, ref, dirState.currentPath, isBusy),
+              footer: _masterCardFooter(
+                context,
+                ref,
+                dirState.currentPath,
+                isBusy,
+              ),
             ),
           );
         } else {
@@ -1359,7 +1365,12 @@ class DspNlpWorkspace extends ConsumerWidget {
                       ref,
                       dirState.currentPath,
                     ),
-              footer: _masterCardFooter(context, ref, dirState.currentPath, isBusy),
+              footer: _masterCardFooter(
+                context,
+                ref,
+                dirState.currentPath,
+                isBusy,
+              ),
             ),
           );
         }
@@ -1378,11 +1389,8 @@ class DspNlpWorkspace extends ConsumerWidget {
             footer: OutlinedButton.icon(
               onPressed: (dirState.currentPath.isEmpty || isBusy)
                   ? null
-                  : () => _executeLyricsReset(
-                      context,
-                      ref,
-                      dirState.currentPath,
-                    ),
+                  : () =>
+                        _executeLyricsReset(context, ref, dirState.currentPath),
               icon: const Icon(Icons.delete_sweep_outlined, size: 16),
               label: const Text(
                 'BORRAR LETRAS AUTOMÁTICAS',
@@ -1397,48 +1405,51 @@ class DspNlpWorkspace extends ConsumerWidget {
           // 🛠️ TARJETA MUTANTE: Se transforma y muestra el porcentaje al activarse
           if (MasterProfile.current().allowKaraoke)
             _buildActionCard(
-            title: aiState.isRunning
-                ? "IA TRABAJANDO..."
-                : "EXTRACCIÓN KARAOKE IA",
-            description: aiState.isRunning
-                ? aiState.status
-                : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
-            icon: aiState.isRunning ? Icons.memory : Icons.mic_external_off,
-            color: aiState.isRunning
-                ? Colors.orangeAccent
-                : const Color(0xFFB026FF),
-            isPrimary: false,
-            onTap: (aiState.isRunning ||
-                    dirState.currentPath.isEmpty ||
-                    isBusy)
-                ? null
-                : () =>
-                      _executeKaraokeBatch(context, ref, dirState.currentPath),
-            footer: aiState.isRunning
-                ? OutlinedButton.icon(
-                    onPressed: aiState.stopping
-                        ? null
-                        : () =>
-                              ref.read(aiEngineProvider.notifier).requestStop(),
-                    icon: const Icon(Icons.stop_circle_outlined),
-                    label: Text(
-                      aiState.stopping
-                          ? 'CIERRA ESTA PISTA…'
-                          : 'CANCELAR COLA',
+              title: aiState.isRunning
+                  ? "IA TRABAJANDO..."
+                  : "EXTRACCIÓN KARAOKE IA",
+              description: aiState.isRunning
+                  ? aiState.status
+                  : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
+              icon: aiState.isRunning ? Icons.memory : Icons.mic_external_off,
+              color: aiState.isRunning
+                  ? Colors.orangeAccent
+                  : const Color(0xFFB026FF),
+              isPrimary: false,
+              onTap:
+                  (aiState.isRunning || dirState.currentPath.isEmpty || isBusy)
+                  ? null
+                  : () => _executeKaraokeBatch(
+                      context,
+                      ref,
+                      dirState.currentPath,
                     ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: aiState.stopping
-                          ? Colors.white38
-                          : Colors.redAccent,
-                      side: BorderSide(
-                        color: aiState.stopping
-                            ? Colors.white24
-                            : Colors.redAccent,
+              footer: aiState.isRunning
+                  ? OutlinedButton.icon(
+                      onPressed: aiState.stopping
+                          ? null
+                          : () => ref
+                                .read(aiEngineProvider.notifier)
+                                .requestStop(),
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      label: Text(
+                        aiState.stopping
+                            ? 'CIERRA ESTA PISTA…'
+                            : 'CANCELAR COLA',
                       ),
-                    ),
-                  )
-                : null,
-          ),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: aiState.stopping
+                            ? Colors.white38
+                            : Colors.redAccent,
+                        side: BorderSide(
+                          color: aiState.stopping
+                              ? Colors.white24
+                              : Colors.redAccent,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
           _buildActionCard(
             title: "INFORME DE AUDITORÍA",
             description:
@@ -1874,10 +1885,7 @@ class DspNlpWorkspace extends ConsumerWidget {
                         noTrim,
                         "Todavía no se cortaron los silencios",
                       ),
-                      _buildAuditList(
-                        noLufs,
-                        "Todavía no están en −14 LUFS",
-                      ),
+                      _buildAuditList(noLufs, "Todavía no están en −14 LUFS"),
                       _buildAuditList(
                         badName,
                         "El nombre todavía no quedó Artista - Título",
@@ -2057,12 +2065,15 @@ class DspNlpWorkspace extends ConsumerWidget {
             lrcText = await lrcFile.readAsString();
           } catch (_) {}
         }
-        final bool garbageLrc = lrcText.contains('Letra no encontrada') ||
+        final bool garbageLrc =
+            lrcText.contains('Letra no encontrada') ||
             lrcText.contains('Error de conexión');
         final bool lrcExists = lrcFile.existsSync() && !garbageLrc;
-        final bool manual = lrcIsManual(lrcText) ||
-            (lrcExists && !_lrcListedAsAuto(lrcFile));
-        final meta = await ref.read(dbServiceProvider).getTrackMetadata(file.path);
+        final bool manual =
+            lrcIsManual(lrcText) || (lrcExists && !_lrcListedAsAuto(lrcFile));
+        final meta = await ref
+            .read(dbServiceProvider)
+            .getTrackMetadata(file.path);
         final String kPath = file.path.replaceAll(
           RegExp(r'\.mp3$', caseSensitive: false),
           '_K.mp3',
@@ -2195,7 +2206,9 @@ class DspNlpWorkspace extends ConsumerWidget {
                         if (ctx.mounted) {
                           ScaffoldMessenger.of(ctx).showSnackBar(
                             SnackBar(
-                              content: Text('Restaurado: ${backup.uri.pathSegments.last}'),
+                              content: Text(
+                                'Restaurado: ${backup.uri.pathSegments.last}',
+                              ),
                             ),
                           );
                         }
@@ -2369,7 +2382,6 @@ bool _lrcListedAsAuto(File lrc) {
   }
 }
 
-
 class KaraokeAIEngine {
   static void spawnBackgroundExtraction(String path, {WidgetRef? ref}) {
     final isFile = File(path).existsSync();
@@ -2386,9 +2398,12 @@ class KaraokeAIEngine {
     ref?.read(aiEngineProvider.notifier).start(path);
     debugPrint("🤖 [AI ENGINE] Karaoke IA (Rust/ONNX) en: $path");
 
-    KaraokeEngine.run(path, onStatus: (s) {
-      ref?.read(aiEngineProvider.notifier).updateStatus(s);
-    }).whenComplete(() {
+    KaraokeEngine.run(
+      path,
+      onStatus: (s) {
+        ref?.read(aiEngineProvider.notifier).updateStatus(s);
+      },
+    ).whenComplete(() {
       debugPrint("✅ [AI ENGINE] Extracción IA terminada");
       ref?.read(aiEngineProvider.notifier).stop();
     });

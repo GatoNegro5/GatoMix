@@ -37,9 +37,9 @@ class LiveDjWorkspace extends ConsumerWidget {
               child: Tooltip(
                 message: 'Volver a GatoMix',
                 child: GestureDetector(
-                  onTap: () => ref
-                      .read(liveDjPlaylistViewProvider.notifier)
-                      .state = false,
+                  onTap: () =>
+                      ref.read(liveDjPlaylistViewProvider.notifier).state =
+                          false,
                   child: const Padding(
                     padding: EdgeInsets.all(6),
                     child: Icon(
@@ -140,8 +140,7 @@ class LiveDjFolderPanel extends ConsumerWidget {
                             .toList();
                         final notifier = ref.read(liveDjProvider.notifier);
                         notifier.addAllTracks(rawFiles);
-                        if (ref.read(liveDjProvider).currentTrackPath ==
-                            null) {
+                        if (ref.read(liveDjProvider).currentTrackPath == null) {
                           await notifier.togglePlayPause();
                         }
                       },
@@ -273,15 +272,15 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
     final state = ref.watch(liveDjProvider);
     final pos = state.position;
     final dur = state.duration;
-    final currentName = (state.currentTrackPath ??
-            (state.queue.isNotEmpty ? state.queue.first.path : null))
-        ?.replaceAll('\\', '/')
-        .split('/')
-        .last ??
+    final currentName =
+        (state.currentTrackPath ??
+                (state.queue.isNotEmpty ? state.queue.first.path : null))
+            ?.replaceAll('\\', '/')
+            .split('/')
+            .last ??
         "SISTEMA EN ESPERA";
     final isPlayingNow = state.isPlaying;
-    final canToggle =
-        state.currentTrackPath != null || state.queue.isNotEmpty;
+    final canToggle = state.currentTrackPath != null || state.queue.isNotEmpty;
 
     final isMixBypass = state.currentMixMode == LiveDjMixMode.longBypass;
     final mixFormula = ref.watch(mixFormulaProvider);
@@ -321,8 +320,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
           : null;
     } else {
       _stealthCacheKey = null;
-      nextName =
-          state.queue.first.path.replaceAll('\\', '/').split('/').last;
+      nextName = state.queue.first.path.replaceAll('\\', '/').split('/').last;
     }
     // Radio encendida: el "siguiente" es el que la Radio ya eligió, no la cola.
     if (state.radioOn) {
@@ -409,32 +407,32 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
         child: Opacity(
           opacity: enabled ? 1.0 : 0.3,
           child: GestureDetector(
-          onTap: enabled ? onTap : null,
-          child: Container(
-            padding: EdgeInsets.symmetric(
-              horizontal: compact ? 8 : 10,
-              vertical: compact ? 2 : 4,
-            ),
-            decoration: BoxDecoration(
-              color: selected
-                  ? GatoMixTheme.syncActive.withValues(alpha: 0.18)
-                  : Colors.transparent,
-              border: Border.all(
-                color: selected ? GatoMixTheme.syncActive : Colors.white24,
+            onTap: enabled ? onTap : null,
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: compact ? 8 : 10,
+                vertical: compact ? 2 : 4,
               ),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              label,
-              style: TextStyle(
-                color: selected ? GatoMixTheme.syncActive : Colors.white54,
-                fontWeight: FontWeight.bold,
-                fontSize: compact ? 10 : 11,
+              decoration: BoxDecoration(
+                color: selected
+                    ? GatoMixTheme.syncActive.withValues(alpha: 0.18)
+                    : Colors.transparent,
+                border: Border.all(
+                  color: selected ? GatoMixTheme.syncActive : Colors.white24,
+                ),
+                borderRadius: BorderRadius.circular(12),
               ),
-              maxLines: 1,
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? GatoMixTheme.syncActive : Colors.white54,
+                  fontWeight: FontWeight.bold,
+                  fontSize: compact ? 10 : 11,
+                ),
+                maxLines: 1,
+              ),
             ),
           ),
-        ),
         ),
       );
     }
@@ -451,7 +449,8 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                     genreChip(
                       'Todo',
                       state.radioGenres.isEmpty,
-                      () => ref.read(liveDjProvider.notifier).clearRadioGenres(),
+                      () =>
+                          ref.read(liveDjProvider.notifier).clearRadioGenres(),
                     ),
                     for (final id in kRadioGenreIds)
                       genreChip(
@@ -514,13 +513,15 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
               ),
             ),
             LiveDjBpmChip(
-              path: state.currentTrackPath ??
+              path:
+                  state.currentTrackPath ??
                   (state.queue.isNotEmpty ? state.queue.first.path : null),
               fontSize: compact ? 10 : 12,
             ),
             Flexible(
               child: LiveDjArtistCard(
-                path: state.currentTrackPath ??
+                path:
+                    state.currentTrackPath ??
                     (state.queue.isNotEmpty ? state.queue.first.path : null),
                 compact: compact,
               ),
@@ -559,159 +560,155 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
         if (compact)
           Row(
             children: [
-                Text(
-                  "${pos.inMinutes.toString().padLeft(2, '0')}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
-                  style: const TextStyle(
-                    color: GatoMixTheme.cyanAccent,
-                    fontFamily: 'Consolas',
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
+              Text(
+                "${pos.inMinutes.toString().padLeft(2, '0')}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
+                style: const TextStyle(
+                  color: GatoMixTheme.cyanAccent,
+                  fontFamily: 'Consolas',
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
                 ),
-                Expanded(
-                  child: SliderTheme(
-                    data: const SliderThemeData(
-                      trackHeight: 3,
-                      thumbShape: RoundSliderThumbShape(enabledThumbRadius: 5),
-                      overlayShape: RoundSliderOverlayShape(overlayRadius: 8),
-                      activeTrackColor: GatoMixTheme.syncActive,
-                      inactiveTrackColor: Colors.white10,
-                      thumbColor: Colors.white,
-                    ),
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                    Slider(
-                      value:
-                          _dragPosition ??
-                          (dur.inMilliseconds > 0
-                              ? pos.inMilliseconds.toDouble().clamp(
-                                  0.0,
-                                  dur.inMilliseconds.toDouble(),
-                                )
-                              : 0.0),
-                      min: 0.0,
-                      max: dur.inMilliseconds > 0
-                          ? dur.inMilliseconds.toDouble()
-                          : 1.0,
-                      onChangeStart: (val) {
-                        setState(() {
-                          _dragPosition = val;
-                        });
-                      },
-                      onChanged: (val) {
-                        setState(() {
-                          _dragPosition = val;
-                        });
-                      },
-                      onChangeEnd: (val) {
-                        if (dur.inMilliseconds > 0) {
-                          ref.read(liveDjProvider.notifier).seek(
-                            Duration(milliseconds: val.toInt()),
-                          );
-                        }
-                        setState(() {
-                          _dragPosition = null;
-                        });
-                      },
-                    ),
-                    _mixMarker(8, state.customMixOutMs, dur.inMilliseconds),
-                      ],
-                    ),
+              ),
+              Expanded(
+                child: SliderTheme(
+                  data: const SliderThemeData(
+                    trackHeight: 3,
+                    thumbShape: RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape: RoundSliderOverlayShape(overlayRadius: 8),
+                    activeTrackColor: GatoMixTheme.syncActive,
+                    inactiveTrackColor: Colors.white10,
+                    thumbColor: Colors.white,
                   ),
-                ),
-                Text(
-                  "-${(dur - pos).inMinutes.toString().padLeft(2, '0')}:${((dur - pos).inSeconds % 60).toString().padLeft(2, '0')}",
-                  style: const TextStyle(
-                    color: Colors.white54,
-                    fontFamily: 'Consolas',
-                    fontSize: 11,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                IconButton(
-                  padding: EdgeInsets.zero,
-                  visualDensity: VisualDensity.compact,
-                  style: IconButton.styleFrom(
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  constraints: const BoxConstraints.tightFor(
-                    width: 32,
-                    height: 32,
-                  ),
-                  tooltip: isShuffle
-                      ? 'Modo: Aleatorio (Shuffle)'
-                      : 'Modo: Secuencial',
-                  onPressed: () {
-                    ref.read(liveDjProvider.notifier).toggleMixStrategy();
-                  },
-                  icon: Container(
-                    width: 28,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: (isShuffle
-                              ? const Color(0xFFFF007F)
-                              : const Color(0xFF00FFFF))
-                          .withValues(alpha: 0.18),
-                      border: Border.all(
-                        color: isShuffle
-                            ? const Color(0xFFFF007F)
-                            : const Color(0xFF00FFFF),
-                        width: 2,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Slider(
+                        value:
+                            _dragPosition ??
+                            (dur.inMilliseconds > 0
+                                ? pos.inMilliseconds.toDouble().clamp(
+                                    0.0,
+                                    dur.inMilliseconds.toDouble(),
+                                  )
+                                : 0.0),
+                        min: 0.0,
+                        max: dur.inMilliseconds > 0
+                            ? dur.inMilliseconds.toDouble()
+                            : 1.0,
+                        onChangeStart: (val) {
+                          setState(() {
+                            _dragPosition = val;
+                          });
+                        },
+                        onChanged: (val) {
+                          setState(() {
+                            _dragPosition = val;
+                          });
+                        },
+                        onChangeEnd: (val) {
+                          if (dur.inMilliseconds > 0) {
+                            ref
+                                .read(liveDjProvider.notifier)
+                                .seek(Duration(milliseconds: val.toInt()));
+                          }
+                          setState(() {
+                            _dragPosition = null;
+                          });
+                        },
                       ),
-                    ),
-                    child: Icon(
-                      isShuffle
-                          ? Icons.shuffle
-                          : Icons.format_list_numbered,
-                      size: 16,
+                      _mixMarker(8, state.customMixOutMs, dur.inMilliseconds),
+                    ],
+                  ),
+                ),
+              ),
+              Text(
+                "-${(dur - pos).inMinutes.toString().padLeft(2, '0')}:${((dur - pos).inSeconds % 60).toString().padLeft(2, '0')}",
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontFamily: 'Consolas',
+                  fontSize: 11,
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                constraints: const BoxConstraints.tightFor(
+                  width: 32,
+                  height: 32,
+                ),
+                tooltip: isShuffle
+                    ? 'Modo: Aleatorio (Shuffle)'
+                    : 'Modo: Secuencial',
+                onPressed: () {
+                  ref.read(liveDjProvider.notifier).toggleMixStrategy();
+                },
+                icon: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color:
+                        (isShuffle
+                                ? const Color(0xFFFF007F)
+                                : const Color(0xFF00FFFF))
+                            .withValues(alpha: 0.18),
+                    border: Border.all(
                       color: isShuffle
                           ? const Color(0xFFFF007F)
                           : const Color(0xFF00FFFF),
+                      width: 2,
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                IconButton(
-                  padding: EdgeInsets.zero,
-                  visualDensity: VisualDensity.compact,
-                  style: IconButton.styleFrom(
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  constraints: const BoxConstraints.tightFor(
-                    width: 48,
-                    height: 48,
-                  ),
-                  onPressed: canToggle
-                      ? () =>
-                          ref.read(liveDjProvider.notifier).togglePlayPause()
-                      : null,
-                  icon: Icon(
-                    isPlayingNow
-                        ? Icons.pause_circle_filled
-                        : Icons.play_circle_fill,
-                    color: const Color(0xFF39FF14).withValues(
-                      alpha: canToggle ? 1 : 0.28,
-                    ),
-                    size: 42,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                InkWell(
-                  onTap: state.queue.isEmpty
-                      ? null
-                      : () => ref.read(liveDjProvider.notifier).forceNext(),
                   child: Icon(
-                    Icons.skip_next,
-                    size: 22,
-                    color: state.queue.isEmpty
-                        ? Colors.white24
-                        : Colors.white70,
+                    isShuffle ? Icons.shuffle : Icons.format_list_numbered,
+                    size: 16,
+                    color: isShuffle
+                        ? const Color(0xFFFF007F)
+                        : const Color(0xFF00FFFF),
                   ),
                 ),
-              ],
-            )
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                constraints: const BoxConstraints.tightFor(
+                  width: 48,
+                  height: 48,
+                ),
+                onPressed: canToggle
+                    ? () => ref.read(liveDjProvider.notifier).togglePlayPause()
+                    : null,
+                icon: Icon(
+                  isPlayingNow
+                      ? Icons.pause_circle_filled
+                      : Icons.play_circle_fill,
+                  color: const Color(
+                    0xFF39FF14,
+                  ).withValues(alpha: canToggle ? 1 : 0.28),
+                  size: 42,
+                ),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: state.queue.isEmpty
+                    ? null
+                    : () => ref.read(liveDjProvider.notifier).forceNext(),
+                child: Icon(
+                  Icons.skip_next,
+                  size: 22,
+                  color: state.queue.isEmpty ? Colors.white24 : Colors.white70,
+                ),
+              ),
+            ],
+          )
         else ...[
           Row(
             children: [
@@ -750,41 +747,41 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-              Slider(
-                value:
-                    _dragPosition ??
-                    (dur.inMilliseconds > 0
-                        ? pos.inMilliseconds.toDouble().clamp(
-                            0.0,
-                            dur.inMilliseconds.toDouble(),
-                          )
-                        : 0.0),
-                min: 0.0,
-                max: dur.inMilliseconds > 0
-                    ? dur.inMilliseconds.toDouble()
-                    : 1.0,
-                onChangeStart: (val) {
-                  setState(() {
-                    _dragPosition = val;
-                  });
-                },
-                onChanged: (val) {
-                  setState(() {
-                    _dragPosition = val;
-                  });
-                },
-                onChangeEnd: (val) {
-                  if (dur.inMilliseconds > 0) {
-                    ref.read(liveDjProvider.notifier).seek(
-                      Duration(milliseconds: val.toInt()),
-                    );
-                  }
-                  setState(() {
-                    _dragPosition = null;
-                  });
-                },
-              ),
-              _mixMarker(12, state.customMixOutMs, dur.inMilliseconds),
+                  Slider(
+                    value:
+                        _dragPosition ??
+                        (dur.inMilliseconds > 0
+                            ? pos.inMilliseconds.toDouble().clamp(
+                                0.0,
+                                dur.inMilliseconds.toDouble(),
+                              )
+                            : 0.0),
+                    min: 0.0,
+                    max: dur.inMilliseconds > 0
+                        ? dur.inMilliseconds.toDouble()
+                        : 1.0,
+                    onChangeStart: (val) {
+                      setState(() {
+                        _dragPosition = val;
+                      });
+                    },
+                    onChanged: (val) {
+                      setState(() {
+                        _dragPosition = val;
+                      });
+                    },
+                    onChangeEnd: (val) {
+                      if (dur.inMilliseconds > 0) {
+                        ref
+                            .read(liveDjProvider.notifier)
+                            .seek(Duration(milliseconds: val.toInt()));
+                      }
+                      setState(() {
+                        _dragPosition = null;
+                      });
+                    },
+                  ),
+                  _mixMarker(12, state.customMixOutMs, dur.inMilliseconds),
                 ],
               ),
             ),
@@ -814,10 +811,11 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   height: 48,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: (isShuffle
-                            ? const Color(0xFFFF007F)
-                            : const Color(0xFF00FFFF))
-                        .withValues(alpha: 0.18),
+                    color:
+                        (isShuffle
+                                ? const Color(0xFFFF007F)
+                                : const Color(0xFF00FFFF))
+                            .withValues(alpha: 0.18),
                     border: Border.all(
                       color: isShuffle
                           ? const Color(0xFFFF007F)
@@ -846,16 +844,15 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   height: 48,
                 ),
                 onPressed: canToggle
-                    ? () =>
-                        ref.read(liveDjProvider.notifier).togglePlayPause()
+                    ? () => ref.read(liveDjProvider.notifier).togglePlayPause()
                     : null,
                 icon: Icon(
                   isPlayingNow
                       ? Icons.pause_circle_filled
                       : Icons.play_circle_fill,
-                  color: const Color(0xFF39FF14).withValues(
-                    alpha: canToggle ? 1 : 0.28,
-                  ),
+                  color: const Color(
+                    0xFF39FF14,
+                  ).withValues(alpha: canToggle ? 1 : 0.28),
                   size: 45,
                 ),
               ),
@@ -923,8 +920,9 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   ? null
                   : () {
                       final cur = ref.read(mixFormulaProvider);
-                      ref.read(mixFormulaProvider.notifier).state =
-                          cur == MixFormula.dnaEnergy
+                      ref
+                          .read(mixFormulaProvider.notifier)
+                          .state = cur == MixFormula.dnaEnergy
                           ? MixFormula.phraseGrid
                           : (cur == MixFormula.phraseGrid
                                 ? MixFormula.stealthGap
@@ -934,29 +932,29 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                 message:
                     '1 DNA 60-80%  ·  2 Phrase 8  ·  3 Stealth sin voz. Toca para cambiar.',
                 child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: GatoMixTheme.bgDark,
-                  border: Border.all(
-                    color: engineModeColor.withValues(alpha: 0.5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
                   ),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  engineModeStr,
-                  style: TextStyle(
-                    color: engineModeColor,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
+                  decoration: BoxDecoration(
+                    color: GatoMixTheme.bgDark,
+                    border: Border.all(
+                      color: engineModeColor.withValues(alpha: 0.5),
+                    ),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                  textAlign: TextAlign.center,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  child: Text(
+                    engineModeStr,
+                    style: TextStyle(
+                      color: engineModeColor,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
               ),
             ),
           ),
@@ -1095,8 +1093,11 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                             child: GestureDetector(
                               onTap: () {
                                 ref
-                                    .read(liveDjPlaylistViewProvider.notifier)
-                                    .state = !playlistOn;
+                                        .read(
+                                          liveDjPlaylistViewProvider.notifier,
+                                        )
+                                        .state =
+                                    !playlistOn;
                               },
                               child: Padding(
                                 padding: const EdgeInsets.all(6),
@@ -1316,7 +1317,10 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                   size: 18,
                 ),
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+                constraints: const BoxConstraints.tightFor(
+                  width: 28,
+                  height: 28,
+                ),
                 visualDensity: VisualDensity.compact,
                 onPressed: queue.isEmpty
                     ? null
@@ -1330,7 +1334,10 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                   size: 18,
                 ),
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+                constraints: const BoxConstraints.tightFor(
+                  width: 28,
+                  height: 28,
+                ),
                 visualDensity: VisualDensity.compact,
                 onPressed: queue.isEmpty
                     ? null
@@ -1344,7 +1351,10 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                   size: 18,
                 ),
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+                constraints: const BoxConstraints.tightFor(
+                  width: 28,
+                  height: 28,
+                ),
                 visualDensity: VisualDensity.compact,
                 onPressed: () =>
                     ref.read(liveDjProvider.notifier).loadPlaylist(),

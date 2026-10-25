@@ -564,6 +564,7 @@ List<LyricIdentity> lyricFallbackIdentities(LyricIdentity id) {
     if (y.isEmpty || !seen.add('$x|$y')) return;
     out.add(_with(id, x, y));
   }
+
   push(a, t0);
   if (a.isNotEmpty) {
     push(t, a);
@@ -620,10 +621,7 @@ String lyricCleanTitle(String title) {
 String lyricPrimaryArtist(String artist) {
   final String a = artist.trim();
   final List<String> parts = a.split(
-    RegExp(
-      r'\s+(ft\.?|feat\.?|featuring|vs\.?|x)\s+',
-      caseSensitive: false,
-    ),
+    RegExp(r'\s+(ft\.?|feat\.?|featuring|vs\.?|x)\s+', caseSensitive: false),
   );
   return (parts.isEmpty ? a : parts.first).trim();
 }
@@ -674,7 +672,9 @@ double lyricTitleOnlyScore(
   // «MIKEL ERENTXUN (DUNCAN DHU)» también vale como «Duncan Dhu».
   final List<String> forms = <String>{
     lyricNormLoose(apiArtist),
-    for (final Match m in RegExp(r'[\(\[]([^\)\]]+)[\)\]]').allMatches(apiArtist))
+    for (final Match m in RegExp(
+      r'[\(\[]([^\)\]]+)[\)\]]',
+    ).allMatches(apiArtist))
       lyricNormLoose(m.group(1)!),
     lyricNorm(apiArtist),
   }.where((String a) => a.isNotEmpty).toList();

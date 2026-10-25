@@ -133,9 +133,7 @@ Future<void> main([List<String> args = const []]) async {
 
     final String? masterFolder = parseMasterFolderArg(args);
     if (masterFolder != null) {
-      runApp(
-        ProviderScope(child: HeadlessMasterApp(folder: masterFolder)),
-      );
+      runApp(ProviderScope(child: HeadlessMasterApp(folder: masterFolder)));
       return;
     }
     runApp(const ProviderScope(child: GatoMixApp()));
