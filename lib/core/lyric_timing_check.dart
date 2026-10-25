@@ -195,3 +195,23 @@ String? lyricCheckSkipReason({
   if (plain) return 'plain';
   return null;
 }
+
+/// Etapa 2 (1.0.12+26): motivo honesto cuando ningún rescate de letra sirvió.
+/// Va en `GMX_RESCUE_LYR=FAIL:motivo`. No inventa tiempos: solo clasifica.
+/// endsEarly / pastEnd / startsLate = la letra es de OTRA versión (radio edit
+/// contra extended/remix DJ): mover la letra entera no lo arregla.
+String lyricRescueFailReason(LyricTimingVerdict v, {required int durationMs}) {
+  final int a = (durationMs / 1000).round();
+  final int f = ((v.firstMs ?? 0) / 1000).round();
+  final int l = ((v.lastMs ?? 0) / 1000).round();
+  switch (v.issue) {
+    case LyricTimingIssue.endsEarly:
+    case LyricTimingIssue.pastEnd:
+    case LyricTimingIssue.startsLate:
+      return 'FAIL:lyric_version_mismatch,audio=${a}s,lrc=$f-${l}s';
+    case LyricTimingIssue.startsBeforeVoice:
+      return 'FAIL:lyric_before_voice,lrc_start=${f}s';
+    case LyricTimingIssue.none:
+      return '';
+  }
+}

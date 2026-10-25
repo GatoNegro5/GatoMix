@@ -277,11 +277,17 @@ class MasterTrack {
         final int? start = firstVerseMs(fixed);
         if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
         await _mark(path, 'GMX_LYR_CHECK', 'FIXED');
+        await _mark(path, 'GMX_RESCUE_LYR', 'LYRIC_FIXED');
         return (mark: 'FIXED', reason: v.reason);
       }
     }
     await _mark(path, 'GMX_LYR_CHECK', 'REVIEW');
-    return (mark: 'REVIEW', reason: v.reason);
+    // Etapa 2 sin éxito: queda marcado para el Laboratorio con el motivo.
+    final String fail = lrcIsManual(text)
+        ? 'FAIL:manual_lyric_untouched'
+        : lyricRescueFailReason(v, durationMs: durationMs);
+    if (fail.isNotEmpty) await _mark(path, 'GMX_RESCUE_LYR', fail);
+    return (mark: 'REVIEW', reason: fail.isEmpty ? v.reason : '${v.reason} · $fail');
   }
 
   /// Si el `_K` tiene su propio `.lrc`, recibe la misma letra (con su `.bak`).

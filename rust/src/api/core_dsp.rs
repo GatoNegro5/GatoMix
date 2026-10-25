@@ -2109,10 +2109,11 @@ fn decode_errors_tolerable(errors: u32, samples: u64, rate: u32) -> bool {
 
 /// Errores que bloquean el audio (0 si son tolerables).
 fn blocking_decode_errors(m: &StreamMeasure) -> u32 {
-    if decode_errors_tolerable(m.decode_errors, m.samples, m.rate) {
+    let inner = m.decode_errors.saturating_sub(m.silent_edge_errors);
+    if decode_errors_tolerable(inner, m.samples, m.rate) {
         0
     } else {
-        m.decode_errors
+        inner
     }
 }
 
@@ -2176,7 +2177,12 @@ struct StreamMeasure {
     true_peak: f32,
     /// Paquetes MP3 que el decodificador rechazó. >0: no se recodifica.
     decode_errors: u32,
+    /// De esos, los que caen en el silencio de cabeza/cola (no bloquean).
+    silent_edge_errors: u32,
 }
+
+/// −60 dBFS: umbral de "hay sonido" para clasificar errores de borde.
+const EDGE_LOUD: f32 = 0.001;
 
 fn consider_peak(hist: &mut [f32; 4], sample: f32, peak: &mut f32) {
     hist[0] = hist[1];
@@ -2221,7 +2227,19 @@ fn lame_player_skip(path: &str) -> (u64, u32) {
 fn decode_frames(
     input_path: &str,
     gapless: bool,
+    on_frame: impl FnMut(u32, usize, &[f32]) -> Result<(), String>,
+) -> Result<u32, String> {
+    let mut sink = Vec::new();
+    decode_frames_ex(input_path, gapless, on_frame, &mut sink)
+}
+
+/// Igual que `decode_frames`, y anota en `err_pos` la posición (en frames
+/// del PCM entregado) de cada paquete rechazado.
+fn decode_frames_ex(
+    input_path: &str,
+    gapless: bool,
     mut on_frame: impl FnMut(u32, usize, &[f32]) -> Result<(), String>,
+    err_pos: &mut Vec<(u64, bool)>,
 ) -> Result<u32, String> {
     let (mut format, track_id, params) = open_format(input_path)?;
     let rate = params.sample_rate.ok_or("Sin frecuencia de muestreo")?;
@@ -2288,8 +2306,12 @@ fn decode_frames(
                     on_frame(rate, n_ch, &emit)?;
                 }
             }
-            Err(SymError::DecodeError(_)) => {
+            Err(SymError::DecodeError(msg)) => {
                 skipped += 1;
+                // Solo "main_data offset" es el reservorio de bits sin datos
+                // previos (típico de frames de silencio); lo demás es basura.
+                let reservoir = msg.contains("main_data");
+                err_pos.push((seen.saturating_sub(skip_head), reservoir));
                 continue;
             }
             Err(_) => break,
@@ -2313,7 +2335,10 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
     let mut hl = [0f32; 4];
     let mut hr = [0f32; 4];
 
-    let decode_errors = decode_frames(input_path, true, |r, nch, inter| {
+    let mut err_pos: Vec<(u64, bool)> = Vec::new();
+    let mut first_loud: Option<u64> = None;
+    let mut last_loud: u64 = 0;
+    let decode_errors = decode_frames_ex(input_path, true, |r, nch, inter| {
         if filt.is_none() {
             rate = r;
             channels = nch.max(1);
@@ -2328,6 +2353,12 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
             let l = frame[0];
             let rgt = if nch > 1 { frame[1] } else { l };
             let mono = (l as f64 + rgt as f64) * 0.5;
+            if l.abs() > EDGE_LOUD || rgt.abs() > EDGE_LOUD {
+                if first_loud.is_none() {
+                    first_loud = Some(samples);
+                }
+                last_loud = samples;
+            }
             acc_m += mono * mono;
             let kl = k_one(s1l, s2l, l);
             let kr = if nch > 1 { k_one(s1r, s2r, rgt) } else { kl };
@@ -2347,10 +2378,24 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
             }
         }
         Ok(())
-    })?;
+    }, &mut err_pos)?;
     if samples == 0 || rate == 0 {
         return Err("Sin audio decodificable".to_string());
     }
+    // Paquetes rechazados dentro del silencio digital de la cabeza o de la
+    // cola (antes del primer / después del último sonido > −60 dBFS): suelen
+    // ser frames de relleno con reservorio inválido. No se oyen y el corte
+    // los quita; no deben bloquear el −14.
+    // Cola: además el sonido tuvo que acabar ≥ 250 ms antes del error (la
+    // pista ya se había apagado), para no perdonar un corte en plena música.
+    let fl = first_loud.unwrap_or(u64::MAX);
+    let guard = rate as u64 / 4;
+    let silent_edge_errors = err_pos
+        .iter()
+        .filter(|&&(p, reservoir)| {
+            reservoir && (p <= fl || (first_loud.is_some() && p >= last_loud + guard))
+        })
+        .count() as u32;
     Ok(StreamMeasure {
         rate,
         channels,
@@ -2359,6 +2404,7 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
         k_ms,
         true_peak: peak,
         decode_errors,
+        silent_edge_errors,
     })
 }
 
@@ -2923,6 +2969,8 @@ fn gmx_key_ok(key: &str) -> bool {
     matches!(
         key,
         KEY_V
+            | KEY_RESCUE
+            | KEY_RESCUE_LYR
             | KEY_LUFS
             | KEY_LEAD
             | KEY_TAIL
@@ -3496,6 +3544,46 @@ fn discard_partial(path: &str) {
 /// Recorta silencios y/o normaliza a −14 LUFS. Una sola generación si hacen
 /// falta los dos. `force_head_ms` / `force_tail_ms` < 0 = detectar; si no,
 /// cortar exactamente esos ms (el `_K` acompaña a la pista). Una pista que
+/// Clave de la etapa de rescate: REPAIR:<detalle> o FAIL:<motivo>.
+const KEY_RESCUE: &str = "GMX_RESCUE";
+/// Etapa 2 de la letra (Dart): LYRIC_FIXED o FAIL:<motivo>.
+const KEY_RESCUE_LYR: &str = "GMX_RESCUE_LYR";
+
+/// Repara `path` sin pérdida y lo re-mide. Devuelve Some solo si la copia
+/// reparada ya no tiene errores que bloqueen; entonces reemplaza el archivo
+/// (guardando `.prerepair.bak`). Si no ayuda, no toca nada.
+fn try_lossless_repair(path: &str, before: u32) -> Result<Option<(String, StreamMeasure)>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let Some((fixed, st)) = crate::mp3_repair::repair_mp3(&data) else {
+        return Ok(None);
+    };
+    if !st.changed() {
+        return Ok(None);
+    }
+    let tmp = format!("{path}.gmxrepair.mp3");
+    std::fs::write(&tmp, &fixed).map_err(|e| e.to_string())?;
+    let m2 = match measure_stream(&tmp) {
+        Ok(m) => m,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(None);
+        }
+    };
+    if blocking_decode_errors(&m2) > 0 || m2.samples == 0 {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(None);
+    }
+    let bak = format!("{path}.prerepair.bak");
+    if !Path::new(&bak).exists() {
+        std::fs::copy(path, &bak).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(Some((
+        format!("REPAIR:{} errors {}->{}", st.summary(), before, m2.decode_errors),
+        m2,
+    )))
+}
+
 /// ya tiene `GMX_TRIM_MS` no se vuelve a cortar.
 pub fn master_rewrite(
     input_path: String,
@@ -3533,11 +3621,26 @@ pub fn master_rewrite(
     let do_lufs = do_lufs && !already_lufs;
 
     let need_audio = do_trim || do_lufs;
-    let measured = if need_audio {
+    let mut measured = if need_audio {
         Some(measure_stream(&input_path)?)
     } else {
         None
     };
+    // Etapa 2 (1.0.12+26): si hay paquetes rotos que bloquean, reparar sin
+    // pérdida (estilo mp3val) y volver a medir. Solo se queda la reparación
+    // si deja de bloquear; el original queda en `<archivo>.prerepair.bak`.
+    let mut rescue_note: Option<String> = None;
+    if let Some(m) = &measured {
+        if blocking_decode_errors(m) > 0 {
+            if let Some((note, m2)) = try_lossless_repair(&input_path, m.decode_errors)? {
+                tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+                measured = Some(m2);
+                rescue_note = Some(note);
+            } else {
+                rescue_note = Some(format!("FAIL:repair_no_help,decode_errors={}", m.decode_errors));
+            }
+        }
+    }
 
     let mut cut_head_ms: u64 = 0;
     let mut cut_tail_ms: u64 = 0;
@@ -3746,6 +3849,9 @@ pub fn master_rewrite(
         } else {
             tag.remove_extended_text(Some(KEY_DECODE_TOL), None);
         }
+    }
+    if let Some(n) = &rescue_note {
+        set_ext(&mut tag, KEY_RESCUE, n.clone());
     }
     set_ext(&mut tag, KEY_V, SCHEMA_V2.to_string());
 
@@ -4590,22 +4696,24 @@ mod master_guard_tests {
         let (b0, b1) = audio_byte_range(&before);
         let audio_tagged = before[b0..b1].to_vec();
 
+        // 1.0.12+26: la Etapa 2 repara sin pérdida (quita los frames rotos),
+        // re-mide y, como ya no bloquea, masteriza. El original queda en .bak.
         let rw = master_rewrite(path_s.clone(), true, true, false, -1, -1).unwrap();
-        assert!(!rw.rewritten, "no debía recodificar");
-        assert_eq!(rw.trim_head_ms, 0);
-        assert!(!rw.lufs_applied);
-
-        let after = std::fs::read(&path_s).unwrap();
-        let (c0, c1) = audio_byte_range(&after);
-        assert_eq!(&after[c0..c1], audio_tagged.as_slice());
+        assert!(rw.rewritten, "tras reparar debía masterizar");
+        let bak = format!("{path_s}.prerepair.bak");
+        let bak_bytes = std::fs::read(&bak).expect("falta .prerepair.bak");
+        let (d0, d1) = audio_byte_range(&bak_bytes);
+        assert_eq!(&bak_bytes[d0..d1], audio_tagged.as_slice(), "el .bak debe ser el original");
+        let t = Tag::read_from_path(&path_s).unwrap();
+        let resc = t
+            .extended_texts()
+            .find(|e| e.description == KEY_RESCUE)
+            .map(|e| e.value.clone())
+            .unwrap_or_default();
+        assert!(resc.starts_with("REPAIR:"), "rescue={resc}");
         let marks = read_gmx_marks(path_s.clone());
-        assert!(
-            marks.reason.starts_with("decode_errors="),
-            "motivo={}",
-            marks.reason
-        );
-        assert_eq!(marks.trim_ms, -1, "no se sella un corte que no se hizo");
-        assert!(!marks.lufs_done);
+        assert!(marks.reason.is_empty(), "motivo={}", marks.reason);
+        assert!(marks.lufs_done);
         let _ = audio_before;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5191,5 +5299,88 @@ mod priority_tests {
         .unwrap();
         assert_eq!(label, "nice10");
         assert_eq!(super::nice_priority::current_nice(), main_before);
+    }
+}
+
+#[cfg(test)]
+mod repair_probe {
+    use super::*;
+    /// Diagnóstico manual: GMX_REPAIR_DIR=<carpeta> cargo test --lib repair_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_dir() {
+        let Ok(dir) = std::env::var("GMX_REPAIR_DIR") else { return };
+        let mut v: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false)).collect();
+        v.sort();
+        for p in v {
+            let ps = p.to_string_lossy().to_string();
+            let m = match measure_stream(&ps) { Ok(m) => m, Err(e) => { println!("{ps}: measure err {e}"); continue } };
+            let data = std::fs::read(&ps).unwrap();
+            let rep = crate::mp3_repair::repair_mp3(&data);
+            let (sum, after) = match &rep {
+                Some((fx, st)) => {
+                    let t = format!("{ps}.probe.tmp");
+                    std::fs::write(&t, fx).unwrap();
+                    let m2 = measure_stream(&t);
+                    let _ = std::fs::remove_file(&t);
+                    (st.summary(), m2.map(|m| format!("err={} samples={} block={}", m.decode_errors, m.samples, blocking_decode_errors(&m))).unwrap_or_else(|e| e))
+                }
+                None => ("none".into(), "-".into()),
+            };
+            println!("{}: before err={} samples={} rate={} block={} | repair {} | after {}",
+                p.file_name().unwrap().to_string_lossy(), m.decode_errors, m.samples, m.rate, blocking_decode_errors(&m), sum, after);
+        }
+    }
+}
+
+#[cfg(test)]
+mod err_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn where_errors() {
+        let Ok(f) = std::env::var("GMX_ERR_FILE") else { return };
+        let (mut format, track_id, params) = open_format(&f).unwrap();
+        let rate = params.sample_rate.unwrap() as f64;
+        let mut dec = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()).unwrap();
+        let mut hist: std::collections::BTreeMap<String, u32> = Default::default();
+        let mut pos: Vec<f64> = vec![];
+        loop {
+            let Ok(p) = format.next_packet() else { break };
+            if p.track_id() != track_id { continue }
+            let ts = p.ts() as f64 / rate;
+            if let Err(e) = dec.decode(&p) {
+                *hist.entry(format!("{e}")).or_default() += 1;
+                pos.push(ts);
+            }
+        }
+        println!("HIST {hist:?}");
+        println!("POS {:?}", pos.iter().map(|x| (x*10.0).round()/10.0).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod master_probe {
+    use super::*;
+    /// GMX_MASTER_DIR=<copias> cargo test --release --lib master_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn master_dir() {
+        let Ok(dir) = std::env::var("GMX_MASTER_DIR") else { return };
+        let mut v: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "mp3").unwrap_or(false)).collect();
+        v.sort();
+        for p in v {
+            let ps = p.to_string_lossy().to_string();
+            let r = master_rewrite(ps.clone(), true, true, false, -1, -1);
+            let t = Tag::read_from_path(&ps).ok();
+            let g = |k: &str| t.as_ref().and_then(|t| t.extended_texts().find(|e| e.description == k).map(|e| e.value.clone())).unwrap_or_default();
+            match r {
+                Ok(rw) => println!("{}: rewritten={} lufs_in={:.2} applied={} reason='{}' rescue='{}' lufs_done='{}'",
+                    p.file_name().unwrap().to_string_lossy(), rw.rewritten, rw.lufs, rw.lufs_applied, g(KEY_REASON), g(KEY_RESCUE), g(KEY_LUFS_DONE)),
+                Err(e) => println!("{}: ERR {e}", p.file_name().unwrap().to_string_lossy()),
+            }
+        }
     }
 }

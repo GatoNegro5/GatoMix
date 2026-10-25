@@ -569,7 +569,63 @@ List<LyricIdentity> lyricFallbackIdentities(LyricIdentity id) {
     push(t, a);
     push(t0, a0);
   }
+  // Etapa 2 (1.0.12+26): sin Remix/(2)/_K/(Official Video)/Remaster y con
+  // solo el primer artista (sin ft./feat./Vs./&). La duración ±2 s del
+  // ranking sigue filtrando: un título más corto no relaja la coincidencia.
+  final String tc = lyricCleanTitle(t0);
+  final String ac = lyricPrimaryArtist(a0);
+  push(a0, tc);
+  push(ac, t0);
+  push(ac, tc);
+  if (ac.isNotEmpty) push(tc, ac);
   return out;
+}
+
+final RegExp _noiseParen = RegExp(
+  r'\s*[\(\[][^\)\]]*(remix|mix|version|versi[oó]n|edit|remaster(ed)?|official|video|audio|lyrics?|letra|hd|hq|4k|upscale|aspect ratio|live|en vivo|extended|radio)[^\)\]]*[\)\]]',
+  caseSensitive: false,
+);
+
+/// Título sin ruido de YouTube / versiones: «(Remix)», «(2)», «_K»,
+/// «- Remastered 2009», «Official Video», «Original Aspect Ratio…».
+String lyricCleanTitle(String title) {
+  var t = title.trim();
+  t = t.replaceAll(RegExp(r'_K$', caseSensitive: false), '');
+  t = t.replaceAll(_noiseParen, '');
+  t = t.replaceAll(RegExp(r'\s*\(\d{1,2}\)\s*$'), '');
+  t = t.replaceAll(
+    RegExp(
+      r'\s+-\s+.*(remaster|remix|version|edit|live|mix).*$',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  t = t.replaceAll(
+    RegExp(
+      r'\b(original aspect ratio|audio remux|upscale|official (music )?video|videoclip)\b.*$',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  t = t.replaceAll(
+    RegExp(r'\s+(ft\.?|feat\.?|featuring)\s+.*$', caseSensitive: false),
+    '',
+  );
+  t = t.replaceAll(RegExp(r'[\s,;:\-–]+$'), '');
+  return t.replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+/// Primer artista: corta en ft./feat./featuring/vs./x. No en «&» ni «,»
+/// (Earth, Wind & Fire, Hall & Oates son un solo artista).
+String lyricPrimaryArtist(String artist) {
+  final String a = artist.trim();
+  final List<String> parts = a.split(
+    RegExp(
+      r'\s+(ft\.?|feat\.?|featuring|vs\.?|x)\s+',
+      caseSensitive: false,
+    ),
+  );
+  return (parts.isEmpty ? a : parts.first).trim();
 }
 
 /// Búsqueda con respaldo: si [id] da 0 filas, prueba
