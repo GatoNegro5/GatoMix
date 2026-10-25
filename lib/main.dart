@@ -131,9 +131,18 @@ Future<void> main([List<String> args = const []]) async {
     // 🛠️ BINDING 3: Inicialización del Motor de Reproducción de Audio (libmpv)
     MediaKit.ensureInitialized();
 
-    final String? masterFolder = parseMasterFolderArg(args);
+    final String? labRescue = parseLabRescueArg(args);
+    final String? masterFolder = labRescue ?? parseMasterFolderArg(args);
     if (masterFolder != null) {
-      runApp(ProviderScope(child: HeadlessMasterApp(folder: masterFolder)));
+      runApp(
+        ProviderScope(
+          child: HeadlessMasterApp(
+            folder: masterFolder,
+            autoLab: parseAutoLabFlag(args),
+            labRescue: labRescue != null,
+          ),
+        ),
+      );
       return;
     }
     runApp(const ProviderScope(child: GatoMixApp()));

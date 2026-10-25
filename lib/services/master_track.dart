@@ -7,6 +7,7 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/lrc_timeline.dart';
 import '../core/lyric_ai_align.dart';
+import '../core/lab_quarantine.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_timing_check.dart';
@@ -244,7 +245,19 @@ class MasterTrack {
       voiceOnsetMs: voice,
     );
     if (v.ok) {
+      // 1.0.13: tiempos bien pero la letra es de otra canción (lo dice el
+      // transcriptor). No se toca: se marca para el Laboratorio.
+      final LyricAiResult? wrong = lrcIsManual(text)
+          ? null
+          : aiAlignFromSidecar(path, text, durationMs);
+      if (wrong != null && wrong.kind == LyricAiKind.wrongSong) {
+        await _mark(path, 'GMX_LYR_CHECK', 'REVIEW');
+        await _mark(path, 'GMX_RESCUE_LYR', wrong.failReason);
+        recordLyricFailSync(path, wrong.failReason);
+        return (mark: 'REVIEW', reason: wrong.failReason);
+      }
       await _mark(path, 'GMX_LYR_CHECK', 'OK');
+      recordLyricFailSync(path, null);
       return (mark: 'OK', reason: '');
     }
     if (!lrcIsManual(text)) {
@@ -291,6 +304,7 @@ class MasterTrack {
           'GMX_RESCUE_LYR',
           ai?.lrc != null ? 'LYRIC_FIXED:ai_${ai!.kind.name}' : 'LYRIC_FIXED',
         );
+        recordLyricFailSync(path, null);
         return (mark: 'FIXED', reason: v.reason);
       }
     }
@@ -305,6 +319,7 @@ class MasterTrack {
               ? aiFail
               : lyricRescueFailReason(v, durationMs: durationMs));
     if (fail.isNotEmpty) await _mark(path, 'GMX_RESCUE_LYR', fail);
+    recordLyricFailSync(path, fail);
     return (
       mark: 'REVIEW',
       reason: fail.isEmpty ? v.reason : '${v.reason} · $fail',

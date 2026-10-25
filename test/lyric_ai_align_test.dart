@@ -7,9 +7,8 @@ import 'package:gatomix/core/lyric_ai_align.dart';
 // Letra sintética (sin letras con copyright): 30 versos de 4 palabras
 // inventadas, uno cada 6 s desde los 20 s.
 final Random _r = Random(7);
-String _w() => String.fromCharCodes(
-  List<int>.generate(6, (_) => 97 + _r.nextInt(26)),
-);
+String _w() =>
+    String.fromCharCodes(List<int>.generate(6, (_) => 97 + _r.nextInt(26)));
 final List<List<String>> _verses = List<List<String>>.generate(
   30,
   (_) => List<String>.generate(4, (_) => _w()),
