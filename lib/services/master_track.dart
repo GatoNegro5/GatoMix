@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/lrc_timeline.dart';
+import '../core/lyric_ai_align.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_timing_check.dart';
@@ -270,6 +271,14 @@ class MasterTrack {
         durationMs: durationMs,
         voiceOnsetMs: voice,
       );
+      // 3) 1.0.13: palabras con tiempo (transcriptor offline de escritorio,
+      //    `<canción>.gmx_words.json`). Desfase constante o por bloques,
+      //    solo con confianza; si la letra es de otra canción, lo dice.
+      LyricAiResult? ai;
+      if (fixed == null) {
+        ai = aiAlignFromSidecar(path, text, durationMs);
+        if (ai != null && ai.lrc != null) fixed = ai.lrc;
+      }
       if (fixed != null && fixed.trim() != text.trim()) {
         keepOriginalLrcBakSync(lrc.path);
         await lrc.writeAsString(fixed);
@@ -277,17 +286,54 @@ class MasterTrack {
         final int? start = firstVerseMs(fixed);
         if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
         await _mark(path, 'GMX_LYR_CHECK', 'FIXED');
-        await _mark(path, 'GMX_RESCUE_LYR', 'LYRIC_FIXED');
+        await _mark(
+          path,
+          'GMX_RESCUE_LYR',
+          ai?.lrc != null ? 'LYRIC_FIXED:ai_${ai!.kind.name}' : 'LYRIC_FIXED',
+        );
         return (mark: 'FIXED', reason: v.reason);
       }
     }
+    final String aiFail = lrcIsManual(text)
+        ? ''
+        : (aiAlignFromSidecar(path, text, durationMs)?.failReason ?? '');
     await _mark(path, 'GMX_LYR_CHECK', 'REVIEW');
     // Etapa 2 sin éxito: queda marcado para el Laboratorio con el motivo.
     final String fail = lrcIsManual(text)
         ? 'FAIL:manual_lyric_untouched'
-        : lyricRescueFailReason(v, durationMs: durationMs);
+        : (aiFail.isNotEmpty
+              ? aiFail
+              : lyricRescueFailReason(v, durationMs: durationMs));
     if (fail.isNotEmpty) await _mark(path, 'GMX_RESCUE_LYR', fail);
-    return (mark: 'REVIEW', reason: fail.isEmpty ? v.reason : '${v.reason} · $fail');
+    return (
+      mark: 'REVIEW',
+      reason: fail.isEmpty ? v.reason : '${v.reason} · $fail',
+    );
+  }
+
+  /// Lee `<canción>.gmx_words.json` si existe (null si no hay o no sirve).
+  @visibleForTesting
+  static LyricAiResult? aiAlignFromSidecar(
+    String path,
+    String lrc,
+    int durationMs,
+  ) {
+    final File f = File(
+      path.replaceAll(
+        RegExp(r'\.mp3$', caseSensitive: false),
+        '.gmx_words.json',
+      ),
+    );
+    if (!f.existsSync()) return null;
+    try {
+      return alignLyricToWords(
+        lrc: lrc,
+        words: parseTimedWordsJson(f.readAsStringSync()),
+        durationMs: durationMs,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Si el `_K` tiene su propio `.lrc`, recibe la misma letra (con su `.bak`).
