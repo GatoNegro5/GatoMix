@@ -1895,6 +1895,7 @@ const KEY_TYPE: &str = "GMX_TYPE";
 const KEY_NAME_OK: &str = "GMX_NAME_OK";
 const KEY_LYR: &str = "GMX_LYR";
 const KEY_LYR_START: &str = "GMX_LYR_START_MS";
+const KEY_LYR_CHECK: &str = "GMX_LYR_CHECK";
 const KEY_TRIM: &str = "GMX_TRIM_MS";
 const KEY_TRIM_TAIL: &str = "GMX_TRIM_TAIL_MS";
 const KEY_LRC_SHIFT: &str = "GMX_LRC_SHIFT";
@@ -2721,6 +2722,7 @@ fn gmx_key_ok(key: &str) -> bool {
             | KEY_NAME_OK
             | KEY_LYR
             | KEY_LYR_START
+            | KEY_LYR_CHECK
             | KEY_TRIM
             | KEY_TRIM_TAIL
             | KEY_LRC_SHIFT

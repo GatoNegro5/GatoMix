@@ -550,6 +550,10 @@ class NlpWorker {
   }
 
   /// Energía y onset de la voz en los primeros 40 s. Null si no se puede medir.
+  /// Inicio de voz (primeros 40 s). Público para el chequeo de Masterizar.
+  Future<int?> probeVoiceOnsetMs(String audioPath) =>
+      _probeVoiceOnsetMs(audioPath);
+
   Future<int?> _probeVoiceOnsetMs(String audioPath) async {
     if (audioPath.isEmpty) return null;
     try {

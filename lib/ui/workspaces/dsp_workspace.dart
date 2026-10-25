@@ -428,6 +428,8 @@ class DspNlpWorkspace extends ConsumerWidget {
     }
 
     int consecutiveErrors = 0;
+    final List<String> lyricReview = <String>[];
+    int lyricFixed = 0;
     String? criticalFailureMessage;
     bool isThermalThrottling = false;
 
@@ -627,6 +629,13 @@ class DspNlpWorkspace extends ConsumerWidget {
                   },
                 );
                 currentPath = outcome.path;
+                if (outcome.lyricCheck == 'REVIEW') {
+                  lyricReview.add(
+                    '${File(outcome.path).uri.pathSegments.last} — ${outcome.lyricCheckReason}',
+                  );
+                } else if (outcome.lyricCheck == 'FIXED') {
+                  lyricFixed++;
+                }
                 if (outcome.detail.contains('decode_errors')) {
                   pipe.updateProgress(
                     finished + 1,
@@ -887,6 +896,9 @@ class DspNlpWorkspace extends ConsumerWidget {
             isAborted: state.isAborted,
             current: state.current,
           );
+        }
+        if (lyricReview.isNotEmpty || lyricFixed > 0) {
+          _showLyricReviewDialog(context, lyricReview, lyricFixed);
         }
         ref.read(directoryProvider.notifier).scanPath(targetPath);
       }
@@ -2273,6 +2285,44 @@ bool _batchHasPending(
   return false;
 }
 
+/// Fin de Masterizar: letras corregidas y las que quedan para el LAB.
+void _showLyricReviewDialog(
+  BuildContext context,
+  List<String> review,
+  int fixed,
+) {
+  showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('Revisar en Laboratorio (${review.length})'),
+      content: SizedBox(
+        width: 520,
+        height: review.isEmpty ? 60 : 360,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '⏱️ Letras corregidas solas: $fixed · Para revisar: ${review.length}',
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView(
+                children: [for (final String r in review) SelectableText(r)],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
+}
+
 String _masterStageLabel(String stage) {
   switch (stage) {
     case 'METADATA_CLEANUP':
@@ -2285,6 +2335,8 @@ String _masterStageLabel(String stage) {
       return '🔒 Guardando cambios...';
     case 'DB_ISAR':
       return '🎧 Calculando la mezcla...';
+    case 'LYRIC_CHECK':
+      return '⏱️ Revisando tiempo de la letra...';
     default:
       return stage;
   }

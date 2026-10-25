@@ -6,6 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/lrc_timeline.dart';
+import '../core/lyric_files.dart';
+import '../core/lyric_match.dart';
+import '../core/lyric_timing_check.dart';
 import '../providers/db_provider.dart';
 import '../providers/metadata_provider.dart';
 import '../providers/nlp_provider.dart';
@@ -19,12 +22,18 @@ class MasterOutcome {
   final String detail;
   final bool stopped;
 
+  /// GMX_LYR_CHECK: 'OK', 'FIXED', 'REVIEW' o null (sin letra / megamix).
+  final String? lyricCheck;
+  final String lyricCheckReason;
+
   const MasterOutcome({
     required this.path,
     required this.trimHeadMs,
     required this.lyric,
     required this.detail,
     this.stopped = false,
+    this.lyricCheck,
+    this.lyricCheckReason = '',
   });
 }
 
@@ -144,6 +153,19 @@ class MasterTrack {
     }
     if (stop()) return abortedAt(current);
 
+    // Chequeo de tiempo de la letra contra el audio ya final. Corre también
+    // en canciones ya masterizadas (el audio no se vuelve a procesar).
+    ({String? mark, String reason}) check = (mark: null, reason: '');
+    if (!mega && withLyrics) {
+      onStage?.call('LYRIC_CHECK');
+      try {
+        check = await _checkLyricTiming(ref, current);
+      } catch (e) {
+        debugPrint('🔴 [GMX_LYR_CHECK] $e');
+      }
+    }
+    if (stop()) return abortedAt(current);
+
     final String karaokeTwin = current.replaceAll(
       RegExp(r'\.mp3$', caseSensitive: false),
       '_K.mp3',
@@ -178,7 +200,75 @@ class MasterTrack {
       trimHeadMs: trimHead,
       lyric: lyric,
       detail: detail,
+      lyricCheck: check.mark,
+      lyricCheckReason: check.reason,
     );
+  }
+
+  /// OK / FIXED / REVIEW. Nunca toca una letra manual ([gmx_manual]): si
+  /// falla, queda en REVIEW. Al reemplazar guarda `.lrc.bak` una sola vez.
+  static Future<({String? mark, String reason})> _checkLyricTiming(
+    WidgetRef ref,
+    String path,
+  ) async {
+    final File lrc = File(_lrcPath(path));
+    if (!lrc.existsSync()) return (mark: null, reason: '');
+    final String text = await lrc.readAsString();
+    if (lrcIsPlain(text)) return (mark: null, reason: '');
+    final int durationMs =
+        (await rust_dsp.getAudioDurationMs(inputPath: path)).toInt();
+    final worker = ref.read(nlpWorkerProvider);
+    final int? voice = await worker.probeVoiceOnsetMs(path);
+    final LyricTimingVerdict v = checkLyricTiming(
+      lrc: text,
+      durationMs: durationMs,
+      voiceOnsetMs: voice,
+    );
+    if (v.ok) {
+      await _mark(path, 'GMX_LYR_CHECK', 'OK');
+      return (mark: 'OK', reason: '');
+    }
+    if (!lrcIsManual(text)) {
+      final choice = await worker.lookupSafeLyric(path);
+      if (choice.hasText && choice.kind != LyricKind.plain) {
+        String fresh = choice.fileText;
+        // LRCLIB viene con los tiempos del audio original: aplica el mismo
+        // recorte que ya tiene el archivo.
+        final marks = await rust_dsp.readGmxMarks(inputPath: path);
+        if (marks.trimMs > 0) {
+          fresh = shiftLrcText(fresh, marks.trimMs).text;
+        }
+        final LyricTimingVerdict nv = checkLyricTiming(
+          lrc: fresh,
+          durationMs: durationMs,
+          voiceOnsetMs: voice,
+        );
+        if (nv.ok && fresh.trim() != text.trim()) {
+          keepOriginalLrcBakSync(lrc.path);
+          await lrc.writeAsString(fresh);
+          await _syncKaraokeLrc(path, fresh);
+          final int? start = firstVerseMs(fresh);
+          if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
+          await _mark(path, 'GMX_LYR_CHECK', 'FIXED');
+          return (mark: 'FIXED', reason: v.reason);
+        }
+      }
+    }
+    await _mark(path, 'GMX_LYR_CHECK', 'REVIEW');
+    return (mark: 'REVIEW', reason: v.reason);
+  }
+
+  /// Si el `_K` tiene su propio `.lrc`, recibe la misma letra (con su `.bak`).
+  static Future<void> _syncKaraokeLrc(String path, String text) async {
+    final String kLrc = path.replaceAll(
+      RegExp(r'\.mp3$', caseSensitive: false),
+      '_K.lrc',
+    );
+    final File f = File(kLrc);
+    if (!f.existsSync()) return;
+    if (lrcIsManual(f.readAsStringSync())) return;
+    keepOriginalLrcBakSync(kLrc);
+    await f.writeAsString(text);
   }
 
   static Future<List<File>> backupsIn(String folder) async {
