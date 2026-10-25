@@ -152,6 +152,9 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
   bool _loading = true;
   bool _unavailable = false;
 
+  /// 'Resultados para: …' si hubo respaldo; vacío si no.
+  String _fallbackNote = '';
+
   /// -1 = ningún resultado elegido: Aplicar queda apagado.
   int _selected = -1;
   String _preview = '';
@@ -177,6 +180,7 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
     setState(() {
       _loading = true;
       _unavailable = false;
+      _fallbackNote = '';
     });
     final got = await ref
         .read(nlpWorkerProvider)
@@ -192,6 +196,9 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
     setState(() {
       _rows = got.rows;
       _unavailable = got.unavailable;
+      _fallbackNote = got.fallback == null
+          ? ''
+          : lyricFallbackLabel(got.fallback!);
       _loading = false;
       _selected = -1;
       _preview = '';
@@ -300,6 +307,18 @@ class _LabLyricSearchState extends ConsumerState<LabLyricSearch> {
                 ),
               ],
             ),
+            if (_fallbackNote.isNotEmpty && !_loading)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _fallbackNote,
+                    key: const Key('lab_lyric_fallback_note'),
+                    style: const TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ),
+              ),
             const SizedBox(height: 8),
             SizedBox(
               height: mobile ? 150 : 260,

@@ -572,6 +572,31 @@ List<LyricIdentity> lyricFallbackIdentities(LyricIdentity id) {
   return out;
 }
 
+/// Búsqueda con respaldo: si [id] da 0 filas, prueba
+/// [lyricFallbackIdentities] en orden y para en la primera con filas.
+/// [fallback] es null si bastó la búsqueda original.
+Future<({List<Map<String, dynamic>> pool, LyricIdentity? fallback})>
+lyricPoolWithFallback(
+  LyricIdentity id,
+  Future<List<Map<String, dynamic>>> Function(LyricIdentity id, bool primary)
+  fetch,
+) async {
+  final List<Map<String, dynamic>> pool = await fetch(id, true);
+  if (pool.isNotEmpty) return (pool: pool, fallback: null);
+  for (final LyricIdentity fb in lyricFallbackIdentities(id)) {
+    final List<Map<String, dynamic>> got = await fetch(fb, false);
+    if (got.isNotEmpty) return (pool: got, fallback: fb);
+  }
+  return (pool: pool, fallback: null);
+}
+
+/// Línea discreta del diálogo cuando se usó un respaldo.
+String lyricFallbackLabel(LyricIdentity id) {
+  final String a = id.artist.trim();
+  final String t = id.title.trim();
+  return 'Resultados para: ${a.isEmpty ? t : '$a – $t'}';
+}
+
 /// Sin artista (nombre sin ` - `): búsqueda libre `q=` con el título
 /// completo. Null si hay artista o no hay título.
 Uri? lrclibTitleOnlyUri(LyricIdentity id) {

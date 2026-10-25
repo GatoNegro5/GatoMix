@@ -446,7 +446,10 @@ class NlpWorker {
 
   /// Búsqueda manual del Laboratorio: /api/get, /api/search y /api/search?q=.
   /// Si las tres siguen en 503 o 429, [unavailable] queda en true.
-  Future<({List<LyricCandidate> rows, bool unavailable})> searchManualLyrics({
+  Future<
+    ({List<LyricCandidate> rows, bool unavailable, LyricIdentity? fallback})
+  >
+  searchManualLyrics({
     required String artist,
     required String title,
     required int durationSec,
@@ -461,10 +464,42 @@ class NlpWorker {
       durationSec: durationSec,
       medley: medley,
     );
+    var hits = 0;
+    var transient = 0;
+    var asked = 0;
+    // Primero los campos tal cual; con 0 filas, los respaldos (sin año,
+    // intercambiado, ambos). Los campos del usuario no se tocan.
+    final found = await lyricPoolWithFallback(id, (
+      LyricIdentity one,
+      bool primary,
+    ) async {
+      final r = await _manualPool(one, primary ? query : '');
+      hits += r.hits;
+      transient += r.transient;
+      asked += r.asked;
+      return r.pool;
+    });
+    final bool unavailable = hits == 0 && transient == asked;
+    final int? onset = await onsetFuture;
+    return (
+      rows: rankLyricCandidates(
+        id: found.fallback ?? id,
+        rows: found.pool,
+        voiceOnsetMs: onset,
+      ),
+      unavailable: unavailable,
+      fallback: found.fallback,
+    );
+  }
+
+  Future<
+    ({List<Map<String, dynamic>> pool, int hits, int transient, int asked})
+  >
+  _manualPool(LyricIdentity id, String query) async {
     final List<Uri> uris = lrclibManualUris(
-      artist: artist,
-      title: title,
-      durationSec: durationSec,
+      artist: id.artist,
+      title: id.title,
+      durationSec: id.durationSec,
       query: query,
     );
     final List<({String? body, int status, bool down})> got = await Future.wait(
@@ -511,12 +546,7 @@ class NlpWorker {
         }
       }
     }
-    final bool unavailable = hits == 0 && transient == uris.length;
-    final int? onset = await onsetFuture;
-    return (
-      rows: rankLyricCandidates(id: id, rows: pool, voiceOnsetMs: onset),
-      unavailable: unavailable,
-    );
+    return (pool: pool, hits: hits, transient: transient, asked: uris.length);
   }
 
   /// Energía y onset de la voz en los primeros 40 s. Null si no se puede medir.
