@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:gatomix/core/yt_chunked_download.dart';
 import 'package:gatomix/core/master_profile.dart';
 import 'package:gatomix/services/karaoke_engine.dart';
 import 'package:gatomix/services/master_track.dart';
@@ -407,6 +408,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
     }
   }
 
+  int _ytRefresh = 0;
+
   Future<void> _executeDirectDownload(String targetUrl) async {
     // 🛠️ FIX ARQUITECTÓNICO: Detener preview de forma segura antes del I/O
     if (_previewingVideoId != null) {
@@ -475,8 +478,39 @@ class _YoutubeSearchAndDownloadWorkspaceState
         }
         m4a.sort((a, b) => b.bitrate.compareTo(a.bitrate));
         sourceKbps = (m4a.first.bitrate.bitsPerSecond / 1000).round();
-        final sink = File(tempRawPath).openWrite();
-        await _yt.videos.streamsClient.get(m4a.first).pipe(sink);
+        // 1.0.14: por trozos en paralelo (como yt-dlp) con timeout y
+        // reintentos; la petición única de youtube_explode la estrangula
+        // YouTube y en Android tardaba >10 min sin progreso.
+        final best = m4a.first;
+        final total = best.size.totalBytes;
+        await ytChunkedDownload(
+          url: best.url,
+          deadline: const Duration(minutes: 3),
+          totalBytes: total,
+          outPath: tempRawPath,
+          refreshUrl: () async {
+            // Tras un 403 (YouTube corta las URL sin PO token pasado ~1 MB)
+            // se pide una URL nueva, rotando clientes.
+            final clients = [
+              [YoutubeApiClient.androidSdkless],
+              [YoutubeApiClient.android],
+              [YoutubeApiClient.ios],
+            ];
+            final fresh = await _yt.videos.streamsClient.getManifest(videoId,
+                ytClients: clients[(_ytRefresh++) % clients.length]);
+            for (final s in fresh.audioOnly) {
+              if (s.tag == best.tag) return s.url;
+            }
+            return null;
+          },
+          onProgress: (done, t) {
+            if (!mounted) return;
+            setState(() => _statusText =
+                "Descargando audio... ${(done * 100 / t).floor()}% "
+                "(${(done / 1048576).toStringAsFixed(1)} de "
+                "${(t / 1048576).toStringAsFixed(1)} MB)");
+          },
+        );
         if (!File(tempRawPath).existsSync() ||
             File(tempRawPath).lengthSync() == 0) {
           throw Exception("Fallo al bajar el audio (archivo vacío).");
@@ -610,7 +644,11 @@ class _YoutubeSearchAndDownloadWorkspaceState
       debugPrint("🔴 Error en Pipeline Híbrido: $e");
       setState(
         () => _statusText =
-            "🔴 ERROR FATAL: ${e.toString().replaceAll('Exception: ', '')}",
+            ytIsRateLimit(e)
+                ? "🟠 $ytRateLimitMsg"
+                : e is YtDownloadStalled
+                    ? "🟠 ${e.toString()}"
+                    : "🔴 ERROR FATAL: ${e.toString().replaceAll('Exception: ', '')}",
       );
     } finally {
       setState(() => _isProcessing = false);
