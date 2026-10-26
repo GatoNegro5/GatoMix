@@ -261,29 +261,34 @@ class MasterTrack {
       return (mark: 'OK', reason: '');
     }
     if (!lrcIsManual(text)) {
+      // 1.0.18 (regla de Gabriel): si la letra es la correcta y solo no calza
+      // al inicio, se mueve ENTERA a la entrada de la voz; no se baja otra.
+      final String? realigned = realignLrcToVoice(
+        lrc: text,
+        durationMs: durationMs,
+        voiceOnsetMs: voice,
+      );
       final marks = await rust_dsp.readGmxMarks(inputPath: path);
       // 1) La búsqueda de Automix y luego TODOS los candidatos (con respaldos
       //    sin año / intercambiado). LRCLIB trae tiempos del audio original:
       //    se aplica el mismo recorte que ya tiene el archivo.
       final List<String> candidates = <String>[];
-      final choice = await worker.lookupSafeLyric(path);
-      if (choice.hasText && choice.kind != LyricKind.plain) {
-        candidates.add(choice.fileText);
+      if (realigned == null) {
+        final choice = await worker.lookupSafeLyric(path);
+        if (choice.hasText && choice.kind != LyricKind.plain) {
+          candidates.add(choice.fileText);
+        }
+        candidates.addAll(await worker.syncedLyricCandidates(path));
       }
-      candidates.addAll(await worker.syncedLyricCandidates(path));
-      String? fixed = firstPassingLyric(
-        candidates: candidates,
-        current: text,
-        trimMs: marks.trimMs,
-        durationMs: durationMs,
-        voiceOnsetMs: voice,
-      );
-      // 2) Letra completa pero corrida: se mueve entera a donde entra la voz.
-      fixed ??= realignLrcToVoice(
-        lrc: text,
-        durationMs: durationMs,
-        voiceOnsetMs: voice,
-      );
+      String? fixed =
+          realigned ??
+          firstPassingLyric(
+            candidates: candidates,
+            current: text,
+            trimMs: marks.trimMs,
+            durationMs: durationMs,
+            voiceOnsetMs: voice,
+          );
       // 3) 1.0.13: palabras con tiempo (transcriptor offline de escritorio,
       //    `<canción>.gmx_words.json`). Desfase constante o por bloques,
       //    solo con confianza; si la letra es de otra canción, lo dice.
@@ -479,14 +484,16 @@ class MasterTrack {
     final File lrc = File(_lrcPath(path));
     if (lrc.existsSync()) {
       final String text = await lrc.readAsString();
-      final bool manual = lrcIsManual(text) || !_lrcIsAuto(lrc.path);
-      if (!manual) {
+      // 1.0.18: toda letra no manual se desplaza igual que el audio (antes
+      // solo las registradas en _lyrics_auto.json: en 80s Ingles 6 de ~95).
+      if (shouldShiftLrcOnTrim(text)) {
         final LrcShift shifted = shiftLrcText(
           text,
           trimMs,
           extraDelayMs: extraDelayMs,
         );
         if (shifted.changed) {
+          keepOriginalLrcBakSync(lrc.path);
           await lrc.writeAsString(shifted.text);
           await _mark(path, 'GMX_LRC_SHIFT', '1');
         }
@@ -503,7 +510,7 @@ class MasterTrack {
     }
     if (mix != null) {
       final int next = mix - net;
-      mix = next < 0 ? 0 : mix;
+      mix = next < 0 ? 0 : next;
     }
     await db.saveTrackMetadata(
       path: path,

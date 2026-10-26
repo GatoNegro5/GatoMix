@@ -215,3 +215,10 @@ String lyricRescueFailReason(LyricTimingVerdict v, {required int durationMs}) {
       return '';
   }
 }
+
+/// 1.0.18: al recortar silencio inicial, toda letra sincronizada que no sea
+/// manual se desplaza los mismos ms (con `.lrc.bak`).
+bool shouldShiftLrcOnTrim(String lrc) =>
+    RegExp(r'\[\d{1,3}:\d{2}\.\d{2,3}\]').hasMatch(lrc) &&
+    !lrcIsManual(lrc) &&
+    !lrcIsPlain(lrc);
