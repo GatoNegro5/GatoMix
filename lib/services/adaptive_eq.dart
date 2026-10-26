@@ -49,10 +49,27 @@ class AdaptiveEq {
   /// Interruptor global (por defecto activo).
   static bool enabled = true;
 
-  /// Sonoridad objetivo (LUFS). La mide este módulo (K-weighting, 30 s) y la
-  /// aplica como desplazamiento de equalizer. No lee etiquetas ReplayGain:
-  /// el −16 LUFS de aquí es independiente del −14 del archivo.
-  static const double targetLufs = -16.0;
+  /// 1.0.19 tipo Sound Check: sonoridad integrada BS.1770 de la pista
+  /// COMPLETA, objetivo −14 LUFS (el mismo de Masterizar). Antes: −16 LUFS
+  /// medido solo en 30 s, por eso canciones masterizadas y no masterizadas
+  /// sonaban distinto.
+  static const double targetLufs = -14.0;
+
+  /// Ganancia (dB) hacia [targetLufs] sin clipping: nunca más arriba que
+  /// pico −1,5 dB (no hay limitador en todos los reproductores), tope
+  /// +9 / −12. Con GMX_LUFS_DONE y medida dentro de ±1 LU: 0 (ya está).
+  @visibleForTesting
+  static double soundCheckGainDb({
+    required double lufs,
+    required double peakDb,
+    bool lufsDone = false,
+  }) {
+    double level = targetLufs - lufs;
+    if (lufsDone && level.abs() <= 1.0) return 0;
+    final double maxUp = -peakDb - 1.5;
+    if (level > maxUp) level = maxUp;
+    return level.clamp(-12.0, 9.0).toDouble();
+  }
 
   static const List<int> bands = [
     31,
@@ -198,7 +215,7 @@ class AdaptiveEq {
   static String _key(String path) {
     try {
       final f = File(path);
-      return '$path|${f.lengthSync()}|${f.lastModifiedSync().millisecondsSinceEpoch}';
+      return 'v2|$path|${f.lengthSync()}|${f.lastModifiedSync().millisecondsSinceEpoch}';
     } catch (_) {
       return path;
     }
@@ -259,6 +276,10 @@ class AdaptiveEq {
       // REGLA (CONTEXTO): solo existen 2 decks. Se decodifica en proceso con
       // Rust/symphonia: sin reproductor, sin FFmpeg, igual en las 4 plataformas.
       Uint8List? bytes;
+      bool lufsDone = false;
+      try {
+        lufsDone = (await rust_dsp.readGmxMarks(inputPath: path)).lufsDone;
+      } catch (_) {}
       for (final start in const [30, 0]) {
         try {
           final b = await rust_dsp.decodeMonoPcm(
@@ -275,7 +296,47 @@ class AdaptiveEq {
       }
       if (bytes == null) return null;
       final Uint8List data = bytes;
-      final AdaptiveProfile? p = await Isolate.run(() => _analyze(data));
+      AdaptiveProfile? p = await Isolate.run(
+        () => _analyze(data, lufsDone: lufsDone),
+      );
+      // 1.0.19 Sound Check: sonoridad integrada de la pista COMPLETA, por
+      // tramos de 30 s (memoria acotada en el celular). El espectro sigue
+      // saliendo de la ventana de 30 s.
+      if (p != null) {
+        final List<double> blocks = <double>[];
+        double peak = 0;
+        for (int start = 0; start < 1200; start += 30) {
+          Uint8List chunk;
+          try {
+            chunk = await rust_dsp.decodeMonoPcm(
+              inputPath: path,
+              startSecs: start,
+              lengthSecs: 30,
+              targetRate: _sr,
+            );
+          } catch (_) {
+            break;
+          }
+          if (chunk.length < _sr * 2) break;
+          final (List<double>, double) r = await Isolate.run(
+            () => loudnessBlocks(chunk),
+          );
+          blocks.addAll(r.$1);
+          if (r.$2 > peak) peak = r.$2;
+          if (chunk.length < _sr * 2 * 29) break;
+        }
+        final double? lufs = gatedLufs(blocks);
+        if (lufs != null && peak > 1e-4) {
+          p = AdaptiveProfile(
+            p.gains,
+            soundCheckGainDb(
+              lufs: lufs,
+              peakDb: 20 * log(peak) / ln10,
+              lufsDone: lufsDone,
+            ),
+          );
+        }
+      }
       _mem[k] = p;
       if (p != null) {
         _loadDisk();
@@ -289,11 +350,61 @@ class AdaptiveEq {
     }
   }
 
+  /// Energías K-weighted de bloques de 400 ms (75 % solape) y pico de un
+  /// tramo PCM16 mono a [_sr].
+  @visibleForTesting
+  static (List<double>, double) loudnessBlocks(Uint8List b) {
+    final int n = b.length ~/ 2;
+    final ByteData bd = ByteData.sublistView(b);
+    final Float64List k = Float64List(n);
+    double peak = 0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0, u1 = 0, u2 = 0, v1 = 0, v2 = 0;
+    const b0 = 1.53512485958697, b1 = -2.69169618940638, b2 = 1.19839281085285;
+    const a1 = -1.69065929318241, a2 = 0.73248077421585;
+    const c1 = -1.99004745483398, c2 = 0.99007225036621;
+    for (int i = 0; i < n; i++) {
+      final double x = bd.getInt16(i * 2, Endian.little) / 32768.0;
+      if (x.abs() > peak) peak = x.abs();
+      final double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = y;
+      final double z = y - 2 * u1 + u2 - c1 * v1 - c2 * v2;
+      u2 = u1;
+      u1 = y;
+      v2 = v1;
+      v1 = z;
+      k[i] = z;
+    }
+    final int blk = (_sr * 0.4).round();
+    final List<double> out = <double>[];
+    for (int s = 0; s + blk <= n; s += blk ~/ 4) {
+      double e = 0;
+      for (int i = s; i < s + blk; i++) {
+        e += k[i] * k[i];
+      }
+      out.add(e / blk);
+    }
+    return (out, peak);
+  }
+
+  /// BS.1770: compuerta absoluta −70 LUFS y relativa −10 LU. Null si no hay.
+  @visibleForTesting
+  static double? gatedLufs(List<double> blocks) {
+    final List<double> abs = blocks.where((e) => e > 1.2e-7).toList();
+    if (abs.isEmpty) return null;
+    final double m1 = abs.reduce((a, c) => a + c) / abs.length;
+    final List<double> rel = abs.where((e) => e > m1 * 0.1).toList();
+    final List<double> g = rel.isEmpty ? abs : rel;
+    return -0.691 + 10 * log(g.reduce((a, c) => a + c) / g.length) / ln10;
+  }
+
   // -------------------------------------------------------------- análisis
   // Nivel típico de música comercial por banda octava (dB, relativo a 1 kHz).
   static const List<double> _target = [-1, 4, 6, 3, 1, 0, -3, -6, -11, -18];
 
-  static AdaptiveProfile? _analyze(Uint8List b) {
+  static AdaptiveProfile? _analyze(Uint8List b, {bool lufsDone = false}) {
     final n = b.length ~/ 2;
     const int fft = 4096;
     if (n < fft * 8) return null;
@@ -354,10 +465,11 @@ class AdaptiveEq {
     final peakDb = 20 * log(peak) / ln10;
     // Sube/baja hacia el objetivo, nunca más allá del pico medido (-1.5 dB
     // de margen: no hay limitador) ni más de +9 / -12 dB.
-    double level = targetLufs - lufs;
-    final maxUp = -peakDb - 1.5;
-    if (level > maxUp) level = maxUp;
-    level = level.clamp(-12.0, 9.0).toDouble();
+    final double level = soundCheckGainDb(
+      lufs: lufs,
+      peakDb: peakDb,
+      lufsDone: lufsDone,
+    );
 
     // ---- Espectro por bandas octava (FFT 4096, Hann, ~1 trama/0.5 s)
     final win = List<double>.generate(
