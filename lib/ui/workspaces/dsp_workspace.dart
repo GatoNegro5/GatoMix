@@ -10,6 +10,7 @@ import '../../core/brand_paths.dart';
 import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/master_cool.dart';
+import '../../core/master_skip.dart';
 import '../../core/thermal_status.dart';
 import '../../core/master_pause.dart';
 import '../../core/master_profile.dart';
@@ -515,6 +516,10 @@ class DspNlpWorkspace extends ConsumerWidget {
       checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
 
       final MasterProfile profile = MasterProfile.current();
+      // 1.0.20: índice por carpeta para saltar en milisegundos las pistas
+      // ya completas (sin decodificar ni buscar letra).
+      final MasterSkipIndex skipIndex = MasterSkipIndex.load(targetPath);
+      int skipped = 0;
       int cursor = 0;
       int finished = 0;
       bool stopAll = false;
@@ -545,6 +550,28 @@ class DspNlpWorkspace extends ConsumerWidget {
             );
             await Future.delayed(const Duration(milliseconds: 10));
             continue;
+          }
+
+          if (originalName.toLowerCase().endsWith('.mp3')) {
+            final SkipDecision quick = skipIndex.decide(currentPath);
+            if (quick.skip) {
+              skipped++;
+              finished++;
+              (checkpoint['processed'] as List).add(originalName);
+              pipe.updateProgress(
+                finished,
+                total,
+                originalName,
+                '⏭️ Ya masterizada (${quick.reason}). Saltando...',
+              );
+              if (skipped % 25 == 0) {
+                skipIndex.save();
+                checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+              }
+              await Future<void>.delayed(Duration.zero);
+              continue;
+            }
+            debugPrint('MASTER pendiente (${quick.reason}) $originalName');
           }
 
           final Stopwatch trackClock = Stopwatch()..start();
@@ -663,6 +690,8 @@ class DspNlpWorkspace extends ConsumerWidget {
                 if (outcome.lyric != LyricStatus.retry) {
                   (checkpoint['processed'] as List).add(originalName);
                 }
+                skipIndex.record(outcome.path);
+                skipIndex.save();
               } finally {
                 tick.cancel();
               }
@@ -809,6 +838,7 @@ class DspNlpWorkspace extends ConsumerWidget {
       }
 
       await lane();
+      skipIndex.save();
 
       if (checkAbort()) {
         pipe.confirmCancelled();

@@ -496,6 +496,12 @@ class MasterTrack {
           keepOriginalLrcBakSync(lrc.path);
           await lrc.writeAsString(shifted.text);
           await _mark(path, 'GMX_LRC_SHIFT', '1');
+          // 1.0.20: el inicio de letra se mueve con el .lrc (Devo: 25450
+          // quedaba viejo frente a 25370 tras el corte de 80 ms).
+          final int? start = firstVerseMs(shifted.text);
+          if (start != null) {
+            await _mark(path, 'GMX_LYR_START_MS', '$start');
+          }
         }
       }
     }
