@@ -539,7 +539,19 @@ class DspNlpWorkspace extends ConsumerWidget {
           String currentPath = file.path;
           String currentStage = "INIT";
 
-          if ((checkpoint['processed'] as List).contains(originalName) ||
+          // 1.0.20: un 'processed' de una corrida vieja (1.0.19) se vuelve a
+          // validar por tags: si faltan marcas (Indeep) no se salta.
+          final bool inProcessed = (checkpoint['processed'] as List).contains(
+            originalName,
+          );
+          final bool staleProcessed =
+              inProcessed &&
+              originalName.toLowerCase().endsWith('.mp3') &&
+              !skipIndex.decide(currentPath).skip;
+          if (staleProcessed) {
+            (checkpoint['processed'] as List).remove(originalName);
+          }
+          if ((inProcessed && !staleProcessed) ||
               (checkpoint['failed'] as List).contains(originalName)) {
             finished++;
             pipe.updateProgress(
@@ -687,11 +699,24 @@ class DspNlpWorkspace extends ConsumerWidget {
                   await logSong(0);
                   return;
                 }
-                if (outcome.lyric != LyricStatus.retry) {
-                  (checkpoint['processed'] as List).add(originalName);
-                }
-                skipIndex.record(outcome.path);
+                final String? miss = skipIndex.record(outcome.path);
                 skipIndex.save();
+                final String? bucket = checkpointBucket(
+                  lyricRetry: outcome.lyric == LyricStatus.retry,
+                  miss: miss,
+                );
+                if (bucket == 'processed') {
+                  (checkpoint['processed'] as List).add(originalName);
+                } else if (bucket == 'incomplete') {
+                  final Map<String, dynamic> inc =
+                      (checkpoint['incomplete'] as Map<String, dynamic>?) ??
+                      <String, dynamic>{};
+                  inc[originalName] = outcome.detail.isEmpty
+                      ? miss
+                      : '$miss · ${outcome.detail}';
+                  checkpoint['incomplete'] = inc;
+                  debugPrint('MASTER incompleta ($miss) $originalName');
+                }
               } finally {
                 tick.cancel();
               }

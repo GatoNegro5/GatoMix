@@ -148,4 +148,41 @@ void main() {
     File('${dir.path}/l.lrc').writeAsStringSync('[00:01.00]hola');
     expect(idx.decide(p).skip, isFalse);
   });
+
+  group('1.0.20 Indeep (decode_errors) no queda como procesada', () {
+    const Map<String, String> indeep = <String, String>{
+      'GMX_NAME_OK': '1',
+      'GMX_TYPE': 'SONG',
+      'GMX_BACKUP': '1',
+      'GMX_LYR': 'NONE',
+      'GMX_LYR_CHECK': 'SKIP',
+      'GMX_BPM_OK': '1',
+      'GMX_REASON': 'decode_errors=200',
+      'GMX_V': '2',
+    };
+    test('record devuelve trim, el índice la deja PENDING y no se salta', () {
+      final Directory d = Directory.systemTemp.createTempSync('gmx_indeep');
+      try {
+        final String p = '${d.path}${Platform.pathSeparator}Indeep.mp3';
+        File(p).writeAsBytesSync(_mp3(indeep, seal: false));
+        final MasterSkipIndex idx = MasterSkipIndex(d.path);
+        expect(idx.record(p), 'trim');
+        expect(idx.entries['Indeep.mp3']!['state'], 'PENDING');
+        final SkipDecision s = idx.decide(p);
+        expect(s.skip, isFalse);
+        expect(s.reason, 'index:trim');
+        expect(
+          checkpointBucket(lyricRetry: false, miss: idx.record(p)),
+          'incomplete',
+        );
+      } finally {
+        d.deleteSync(recursive: true);
+      }
+    });
+    test('checkpointBucket', () {
+      expect(checkpointBucket(lyricRetry: false, miss: null), 'processed');
+      expect(checkpointBucket(lyricRetry: false, miss: 'lufs'), 'incomplete');
+      expect(checkpointBucket(lyricRetry: true, miss: null), isNull);
+    });
+  });
 }

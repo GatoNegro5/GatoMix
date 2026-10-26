@@ -266,9 +266,10 @@ class MasterSkipIndex {
     };
   }
 
-  /// Guarda el estado al terminar una pista (re-lee solo el tag).
-  void record(String path) {
-    if (!File(path).existsSync()) return;
+  /// Guarda el estado al terminar una pista (re-lee solo el tag). Devuelve
+  /// lo que falta (null = completa; 'missing' si el archivo no está).
+  String? record(String path) {
+    if (!File(path).existsSync()) return 'missing';
     final Map<String, dynamic> s = _stat(path);
     final String? miss = missingWork(
       readGmxTagsFromFile(path),
@@ -278,6 +279,7 @@ class MasterSkipIndex {
     s['state'] = miss == null ? 'OK' : 'PENDING';
     if (miss != null) s['miss'] = miss;
     entries[key(path)] = s;
+    return miss;
   }
 
   SkipDecision decide(String path) {
@@ -312,4 +314,13 @@ class MasterSkipIndex {
     entries[key(path)] = s;
     return const SkipDecision(true, 'tags');
   }
+}
+
+/// 1.0.20: a qué lista del checkpoint va una pista tras MasterTrack.run.
+/// Solo 'processed' si las marcas quedaron completas; si falta algo
+/// (Indeep: decode_errors=200, audio intacto sin TRIM/LUFS) va a
+/// 'incomplete' y la próxima corrida la vuelve a intentar. RETRY = ninguna.
+String? checkpointBucket({required bool lyricRetry, required String? miss}) {
+  if (lyricRetry) return null;
+  return miss == null ? 'processed' : 'incomplete';
 }

@@ -80,6 +80,10 @@ class MasterTrack {
 
     LyricStatus? lyric;
     String detail = '';
+    final File lrcSnap = File(_lrcPath(current));
+    final String? lrcBefore = lrcSnap.existsSync()
+        ? await lrcSnap.readAsString()
+        : null;
     if (mega) {
       await _mark(current, 'GMX_LYR', 'NA');
     } else if (withLyrics) {
@@ -121,6 +125,7 @@ class MasterTrack {
     final bool needLufs = !before.lufsDone;
     final bool needBpm = !before.bpmOk;
     var trimHead = 0;
+    var trimmedThisPass = false;
     if (needTrim || needLufs || needBpm) {
       final rust_dsp.MasterRewrite rw;
       try {
@@ -137,6 +142,7 @@ class MasterTrack {
         rethrow;
       }
       trimHead = rw.trimHeadMs;
+      trimmedThisPass = rw.rewritten && trimHead > 0;
       final int residual = rw.residualMs;
       // Solo el corte medido en esta pasada. Un GMX_TRIM de antes (Take On
       // Me, 1010 ms) no mueve una letra que ya coincide con el archivo.
@@ -156,6 +162,14 @@ class MasterTrack {
       if (trimHead > 0) {
         await _trimKaraokeTwin(current, trimHead, rw.trimTailMs);
       }
+    }
+    if (withLyrics && !mega) {
+      await _shiftFreshLyric(
+        current,
+        lrcBefore: lrcBefore,
+        storedTrimMs: before.trimMs,
+        trimmedThisPass: trimmedThisPass,
+      );
     }
     if (stop()) return abortedAt(current);
 
@@ -472,6 +486,33 @@ class MasterTrack {
     );
     if (dest.existsSync()) return;
     await src.copy(dest.path);
+  }
+
+  /// Letra nueva de esta pasada sobre audio ya recortado: se mueve el
+  /// GMX_TRIM guardado una sola vez (marca `[gmx_shift]`, `.lrc.bak`).
+  static Future<void> _shiftFreshLyric(
+    String path, {
+    required String? lrcBefore,
+    required int storedTrimMs,
+    required bool trimmedThisPass,
+  }) async {
+    final File lrc = File(_lrcPath(path));
+    if (!lrc.existsSync()) return;
+    final String text = await lrc.readAsString();
+    final int? by = freshLyricShiftMs(
+      lrcBefore: lrcBefore,
+      lrcAfter: text,
+      storedTrimMs: storedTrimMs,
+      trimmedThisPass: trimmedThisPass,
+    );
+    if (by == null) return;
+    final LrcShift shifted = shiftLrcText(text, by);
+    if (!shifted.changed) return;
+    keepOriginalLrcBakSync(lrc.path);
+    await lrc.writeAsString(shifted.text);
+    await _mark(path, 'GMX_LRC_SHIFT', '1');
+    final int? start = firstVerseMs(shifted.text);
+    if (start != null) await _mark(path, 'GMX_LYR_START_MS', '$start');
   }
 
   static Future<void> _shiftLyricsAndCues(

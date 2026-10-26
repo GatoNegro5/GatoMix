@@ -222,3 +222,24 @@ bool shouldShiftLrcOnTrim(String lrc) =>
     RegExp(r'\[\d{1,3}:\d{2}\.\d{2,3}\]').hasMatch(lrc) &&
     !lrcIsManual(lrc) &&
     !lrcIsPlain(lrc);
+
+/// 1.0.20: letra sincronizada bajada EN ESTA pasada sobre un audio que ya
+/// se recortó antes (GMX_TRIM guardado > 0, sin corte nuevo). LRCLIB trae
+/// los tiempos del audio original, así que se mueve el GMX_TRIM guardado,
+/// igual que el rescate ([firstPassingLyric]). Kim Wilde (970) y Jermaine
+/// Jackson – Rain (300) quedaban sin mover. Null si no aplica: sin cambio
+/// de `.lrc`, corte de esta pasada (ya lo mueve el otro camino), manual,
+/// plana o ya con `[gmx_shift]` (idempotente).
+int? freshLyricShiftMs({
+  required String? lrcBefore,
+  required String? lrcAfter,
+  required int storedTrimMs,
+  required bool trimmedThisPass,
+}) {
+  if (trimmedThisPass || storedTrimMs <= 0) return null;
+  if (lrcAfter == null || lrcAfter.trim().isEmpty) return null;
+  if (lrcBefore != null && lrcBefore.trim() == lrcAfter.trim()) return null;
+  if (!shouldShiftLrcOnTrim(lrcAfter)) return null;
+  if (lrcShiftMs(lrcAfter) != null) return null;
+  return storedTrimMs;
+}
