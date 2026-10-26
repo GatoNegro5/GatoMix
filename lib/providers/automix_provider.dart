@@ -351,9 +351,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       final autoMixArmed = data['autoMixArmed'] as bool? ?? true;
       final wasPlaying = data['wasPlaying'] as bool? ?? false;
 
-      if (playlist.isNotEmpty &&
-          index != null &&
-          index >= 0) {
+      if (playlist.isNotEmpty && index != null && index >= 0) {
         state = state.copyWith(
           playlist: playlist,
           currentIndex: index,
@@ -1013,6 +1011,26 @@ class AutomixNotifier extends Notifier<AutomixState> {
     List<String> newPlaylist,
     int startIndex,
   ) async {
+    // Las pistas _K de Karaoke nunca suenan en Automix (solo TV).
+    final kFile = RegExp(r'_k\.[a-z0-9]+$', caseSensitive: false);
+    if (startIndex >= 0 &&
+        startIndex < newPlaylist.length &&
+        newPlaylist.any((t) => kFile.hasMatch(t))) {
+      final String picked = newPlaylist[startIndex];
+      final List<String> clean = newPlaylist
+          .where((t) => !kFile.hasMatch(t))
+          .toList();
+      int idx = clean.indexOf(picked);
+      if (idx < 0) {
+        final int before = newPlaylist
+            .take(startIndex)
+            .where((t) => !kFile.hasMatch(t))
+            .length;
+        idx = before < clean.length ? before : 0;
+      }
+      newPlaylist = clean;
+      startIndex = idx;
+    }
     if (startIndex < 0 || startIndex >= newPlaylist.length) return;
     _freezePersist = false;
 
