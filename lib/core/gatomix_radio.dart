@@ -6,20 +6,96 @@ import 'audio_path.dart';
 import 'gatomix_store.dart';
 import 'livedj_order.dart';
 
-/// Nombre del archivo viejo, junto a la sesión de Live DJ.
-const String legacyRadioFileName = '_livedj_radio.json';
+/// Estado de la Radio, en un solo archivo en la raíz de Música.
+/// No es una sección de `.gatomix.json`.
+const String gatomixRadioName = '.gatomix_radio.json';
 
-/// El archivo aparte que ya no se usa. Su historial se muda a la sección.
-const String retiredRadioFileName = '.gatomix_radio.json';
+/// Tope de parejas iguales con la vuelta anterior. Por encima se rearma.
+const double radioPairOverlapMax = 0.20;
 
-const int radioWaveLength = 20;
+const int radioRebuildAttempts = 5;
 
-/// Estado de la radio: historial, parejas, ola y BPM anterior.
-/// Vive en la sección `radio` del `.gatomix.json` de la raíz de Música.
-/// No guarda una lista de canciones por sonar.
+/// Clave de una opción: géneros marcados, ordenados, o `todo`.
+String radioGenreKey(Iterable<String> genres) {
+  final List<String> list = genres
+      .map((String g) => g.trim())
+      .where((String g) => g.isNotEmpty)
+      .toSet()
+      .toList()
+    ..sort();
+  if (list.isEmpty) return 'todo';
+  return list.join('+');
+}
+
+/// Lista ya armada de una opción y por dónde va.
+class RadioPlan {
+  final List<String> order;
+  final int position;
+
+  /// Parejas A→B de esta lista.
+  final List<String> pairs;
+
+  /// Parejas de la vuelta anterior, para no repetirlas al rearmar.
+  final List<String> previousPairs;
+
+  const RadioPlan({
+    this.order = const <String>[],
+    this.position = 0,
+    this.pairs = const <String>[],
+    this.previousPairs = const <String>[],
+  });
+
+  bool get finished => order.isEmpty || position >= order.length;
+
+  RadioPlan copy({
+    List<String>? order,
+    int? position,
+    List<String>? pairs,
+    List<String>? previousPairs,
+  }) {
+    return RadioPlan(
+      order: order ?? this.order,
+      position: position ?? this.position,
+      pairs: pairs ?? this.pairs,
+      previousPairs: previousPairs ?? this.previousPairs,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'order': order,
+    'position': position,
+    'pairs': pairs,
+    'previousPairs': previousPairs,
+  };
+
+  static RadioPlan fromJson(dynamic raw) {
+    if (raw is! Map) return const RadioPlan();
+    final dynamic pos = raw['position'];
+    return RadioPlan(
+      order: <String>[
+        for (final dynamic p in (raw['order'] as List?) ?? const <dynamic>[])
+          p.toString(),
+      ],
+      position: pos is num ? pos.toInt() : 0,
+      pairs: <String>[
+        for (final dynamic p in (raw['pairs'] as List?) ?? const <dynamic>[])
+          p.toString(),
+      ],
+      previousPairs: <String>[
+        for (final dynamic p
+            in (raw['previousPairs'] as List?) ?? const <dynamic>[])
+          p.toString(),
+      ],
+    );
+  }
+}
+
 class RadioMemory {
   final List<String> history;
-  final List<String> pairs;
+  final Map<String, RadioPlan> plans;
+
+  /// Parejas que venían en la sección `radio` antes de mudarla.
+  final List<String> carriedPairs;
   final bool waveUp;
   final int inWave;
   final double previousBpm;
@@ -28,7 +104,8 @@ class RadioMemory {
 
   const RadioMemory({
     this.history = const <String>[],
-    this.pairs = const <String>[],
+    this.plans = const <String, RadioPlan>{},
+    this.carriedPairs = const <String>[],
     this.waveUp = true,
     this.inWave = 0,
     this.previousBpm = 0,
@@ -38,342 +115,51 @@ class RadioMemory {
 
   static const RadioMemory empty = RadioMemory();
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'history': history,
-    'pairs': pairs,
-    'waveUp': waveUp,
-    'inWave': inWave,
-    'previousBpm': previousBpm,
-    'lastArtist': lastArtist,
-    'lastPath': lastPath,
-  };
+  RadioPlan? planOf(String key) => plans[key];
 
-  static RadioMemory fromJson(dynamic raw) {
-    if (raw is! Map) return RadioMemory.empty;
-    final dynamic bpm = raw['previousBpm'];
-    final dynamic wave = raw['inWave'];
-    final String? last = raw['lastPath']?.toString();
+  RadioMemory putPlan(String key, RadioPlan plan) {
     return RadioMemory(
-      history: _strings(raw['history']),
-      pairs: _strings(raw['pairs']),
-      waveUp: raw['waveUp'] as bool? ?? true,
-      inWave: wave is num ? wave.toInt() : 0,
-      previousBpm: bpm is num ? bpm.toDouble() : 0,
-      lastArtist: raw['lastArtist']?.toString() ?? '',
-      lastPath: last == null || last.isEmpty ? null : last,
+      history: history,
+      plans: <String, RadioPlan>{...plans, key: plan},
+      carriedPairs: carriedPairs,
+      waveUp: waveUp,
+      inWave: inWave,
+      previousBpm: previousBpm,
+      lastArtist: lastArtist,
+      lastPath: lastPath,
     );
   }
 
-  RadioMemory copy({
-    List<String>? history,
-    List<String>? pairs,
-    bool? waveUp,
-    int? inWave,
-    double? previousBpm,
-    String? lastArtist,
-    String? lastPath,
-    bool clearLastPath = false,
-  }) {
-    return RadioMemory(
-      history: history ?? this.history,
-      pairs: pairs ?? this.pairs,
-      waveUp: waveUp ?? this.waveUp,
-      inWave: inWave ?? this.inWave,
-      previousBpm: previousBpm ?? this.previousBpm,
-      lastArtist: lastArtist ?? this.lastArtist,
-      lastPath: clearLastPath ? null : (lastPath ?? this.lastPath),
-    );
+  Map<String, dynamic> toJson({String? activeKey}) {
+    final RadioPlan? active = activeKey == null ? null : plans[activeKey];
+    final List<String> prev = active != null && active.previousPairs.isNotEmpty
+        ? active.previousPairs
+        : carriedPairs;
+    return <String, dynamic>{
+      'schema': 1,
+      'history': history,
+      'pairs': carriedPairs,
+      'previousPairs': prev,
+      'waveUp': waveUp,
+      'inWave': inWave,
+      'previousBpm': previousBpm,
+      'lastArtist': lastArtist,
+      'lastPath': lastPath,
+      'plans': <String, dynamic>{
+        for (final MapEntry<String, RadioPlan> e in plans.entries)
+          e.key: e.value.toJson(),
+      },
+    };
   }
 }
 
-List<String> _strings(dynamic raw) {
-  if (raw is! List) return const <String>[];
-  return <String>[for (final dynamic p in raw) p.toString()];
-}
+class RadioSync {
+  final RadioPlan plan;
 
-bool _has(Iterable<String> xs, String p) =>
-    xs.any((String e) => sameAudioPath(e, p));
+  /// Cierto solo cuando la lista se armó ahora (no existía o se terminó).
+  final bool rebuilt;
 
-/// Carpetas de los géneros marcados, juntas, como una sola cola.
-/// Sin géneros marcados entra todo. Si los marcados no existen, también todo.
-List<String> radioPool({
-  required Map<String, List<String>> byFolder,
-  required Map<String, String> folderGenre,
-  required Set<String> genres,
-}) {
-  List<String> take(bool Function(String folder) ok) {
-    final List<String> out = <String>[];
-    final Set<String> seen = <String>{};
-    for (final MapEntry<String, List<String>> e in byFolder.entries) {
-      if (!ok(e.key)) continue;
-      for (final String p in e.value) {
-        if (p.isEmpty || isKaraokeAudioPath(p)) continue;
-        if (seen.add(audioPathKey(p))) out.add(p);
-      }
-    }
-    return out;
-  }
-
-  final List<String> filtered = take((String folder) {
-    final String? g = folderGenre[folder];
-    return genres.isEmpty || (g != null && genres.contains(g));
-  });
-  if (filtered.isNotEmpty || genres.isEmpty) return filtered;
-  return take((String _) => true);
-}
-
-bool radioOutsideExplorer(String path, String? prefix, {bool foldCase = false}) {
-  if (prefix == null || prefix.isEmpty) return true;
-  final String p = foldCase ? path.toLowerCase() : path;
-  final String pre = foldCase ? prefix.toLowerCase() : prefix;
-  return !p.startsWith(pre);
-}
-
-class RadioChoice {
-  final String? path;
-  final RadioMemory memory;
-
-  /// Cierto si el nivel 2 vació el historial para poder seguir.
-  final bool historyReset;
-
-  const RadioChoice(this.path, this.memory, {this.historyReset = false});
-}
-
-Map<String, int> _recentAge(List<String> history) {
-  final Map<String, int> age = <String, int>{};
-  final int n = history.length;
-  final int start = n > 8 ? n - 8 : 0;
-  for (var i = start; i < n; i++) {
-    age[audioPathKey(history[i])] = n - i;
-  }
-  return age;
-}
-
-/// Siguiente pista del fondo único.
-///
-/// Nivel 0: fuera del Explorador, sin historial y sin repetir artista.
-/// Nivel 1: el artista ya puede repetirse. Nivel 2: el historial se vacía.
-/// Nivel 3: también vale la carpeta del Explorador.
-/// Dentro del nivel, el Shuffle armónico (±4/8/12, Camelot, ola, top 3).
-RadioChoice chooseRadioTrack({
-  required List<String> pool,
-  required RadioMemory memory,
-  required double Function(String path) bpmOf,
-  String? Function(String path)? keyOf,
-  required String Function(String path) artistOf,
-  String? anchorPath,
-  double anchorBpm = 0,
-  String? explorerPrefix,
-  bool explorerFoldCase = false,
-  String? playing,
-  Random? rng,
-}) {
-  final Random random = rng ?? Random();
-  final String? anchor = (anchorPath != null && anchorPath.isNotEmpty)
-      ? anchorPath
-      : memory.lastPath;
-  final double bpm = anchorBpm > 0 ? anchorBpm : memory.previousBpm;
-  RadioMemory mem = memory;
-  var reset = false;
-  for (var level = 0; level < 4; level++) {
-    final bool relaxExplorer = level >= 3;
-    if (level == 2 && mem.history.isNotEmpty) {
-      mem = mem.copy(history: const <String>[]);
-      reset = true;
-    }
-    final List<String> cands = <String>[
-      for (final String p in pool)
-        if (!_blocked(
-          p,
-          level: level,
-          history: mem.history,
-          lastArtist: mem.lastArtist,
-          artistOf: artistOf,
-          explorerPrefix: relaxExplorer ? null : explorerPrefix,
-          explorerFoldCase: explorerFoldCase,
-          playing: playing,
-          anchor: anchor,
-        ))
-          p,
-    ];
-    if (cands.isEmpty) continue;
-    final String? pick = pickHarmonicNext(
-      cands,
-      bpmOf,
-      keyOf: keyOf,
-      anchor: anchor,
-      anchorBpm: bpm,
-      waveUp: mem.waveUp,
-      usedPairs: mem.pairs.toSet(),
-      recentAge: _recentAge(mem.history),
-      rng: random,
-    );
-    if (pick == null) continue;
-    return RadioChoice(pick, mem, historyReset: reset);
-  }
-  return RadioChoice(null, mem, historyReset: reset);
-}
-
-bool _blocked(
-  String path, {
-  required int level,
-  required List<String> history,
-  required String lastArtist,
-  required String Function(String path) artistOf,
-  required String? explorerPrefix,
-  required bool explorerFoldCase,
-  required String? playing,
-  required String? anchor,
-}) {
-  if (playing != null && sameAudioPath(path, playing)) return true;
-  if (anchor != null && sameAudioPath(path, anchor)) return true;
-  if (!radioOutsideExplorer(
-    path,
-    explorerPrefix,
-    foldCase: explorerFoldCase,
-  )) {
-    return true;
-  }
-  if (level < 2 && _has(history, path)) return true;
-  if (level < 1 && lastArtist.isNotEmpty) {
-    final String artist = artistOf(path);
-    if (artist.isNotEmpty && artist == lastArtist) return true;
-  }
-  return false;
-}
-
-/// Anota la pista que sonó: historial, pareja A→B, ola y BPM anterior.
-RadioMemory noteRadioPlayed(
-  RadioMemory memory,
-  String path, {
-  required double bpm,
-  required String artist,
-}) {
-  final List<String> history = <String>[
-    for (final String p in memory.history)
-      if (!sameAudioPath(p, path)) p,
-    path,
-  ];
-  final List<String> pairs = List<String>.from(memory.pairs);
-  final String? prev = memory.lastPath;
-  if (prev != null && !sameAudioPath(prev, path)) {
-    final String pair = shufflePairKey(prev, path);
-    if (!pairs.contains(pair)) pairs.add(pair);
-  }
-  final List<String> kept = pairs.length > shufflePairCap
-      ? pairs.sublist(pairs.length - shufflePairCap)
-      : pairs;
-  var inWave = memory.inWave + 1;
-  var up = memory.waveUp;
-  if (inWave >= radioWaveLength) {
-    up = !up;
-    inWave = 0;
-  }
-  return RadioMemory(
-    history: history,
-    pairs: kept,
-    waveUp: up,
-    inWave: inWave,
-    previousBpm: bpm > 0 ? bpm : memory.previousBpm,
-    lastArtist: artist,
-    lastPath: path,
-  );
-}
-
-class GatomixRadio {
-  /// Lee la sección `radio`. Si no está, muda el historial viejo, verifica
-  /// y solo entonces borra esos json.
-  static RadioMemory load(
-    String musicRoot, {
-    List<String> legacyPaths = const <String>[],
-  }) {
-    if (musicRoot.isEmpty) return RadioMemory.empty;
-    final RadioMemory? section = _section(musicRoot);
-    final List<File> old = <File>[
-      for (final String p in legacyPaths) File(p),
-      File('$musicRoot${Platform.pathSeparator}$retiredRadioFileName'),
-    ];
-    final List<File> present = <File>[
-      for (final File f in old)
-        if (f.existsSync()) f,
-    ];
-    if (section != null && present.isEmpty) return section;
-    final RadioMemory merged = _merge(section ?? RadioMemory.empty, present);
-    if (present.isEmpty) return merged;
-    save(musicRoot, merged);
-    final RadioMemory? back = _section(musicRoot);
-    if (back == null || !_sameHistory(back.history, merged.history)) {
-      return section ?? merged;
-    }
-    for (final File f in present) {
-      try {
-        if (f.existsSync()) f.deleteSync();
-      } catch (_) {}
-    }
-    return back;
-  }
-
-  static void save(String musicRoot, RadioMemory mem) {
-    if (musicRoot.isEmpty) return;
-    try {
-      final Directory dir = Directory(musicRoot);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      GatomixStore.putSection(musicRoot, 'radio', mem.toJson());
-    } catch (_) {}
-  }
-
-  static RadioMemory? _section(String musicRoot) {
-    final dynamic raw = GatomixStore.section(musicRoot, 'radio');
-    if (raw is! Map) return null;
-    return RadioMemory.fromJson(raw);
-  }
-
-  static RadioMemory _merge(RadioMemory base, List<File> files) {
-    final List<String> history = List<String>.from(base.history);
-    final List<String> pairs = List<String>.from(base.pairs);
-    for (final File f in files) {
-      final Object? data = _decode(f);
-      if (data is! Map) continue;
-      for (final String p in _strings(data['history'])) {
-        if (!_has(history, p)) history.add(p);
-      }
-      for (final String p in _strings(data['pairs'])) {
-        if (!pairs.contains(p)) pairs.add(p);
-      }
-      for (final String p in _strings(data['previousPairs'])) {
-        if (!pairs.contains(p)) pairs.add(p);
-      }
-      final dynamic plans = data['plans'];
-      if (plans is Map) {
-        for (final dynamic plan in plans.values) {
-          if (plan is! Map) continue;
-          for (final String p in _strings(plan['pairs'])) {
-            if (!pairs.contains(p)) pairs.add(p);
-          }
-          for (final String p in _strings(plan['previousPairs'])) {
-            if (!pairs.contains(p)) pairs.add(p);
-          }
-        }
-      }
-    }
-    return base.copy(history: history, pairs: pairs);
-  }
-
-  static Object? _decode(File f) {
-    try {
-      return jsonDecode(f.readAsStringSync());
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static bool _sameHistory(List<String> a, List<String> b) {
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
-  }
+  const RadioSync(this.plan, {required this.rebuilt});
 }
 
 /// Cola de Live DJ congelada al encender la radio.
@@ -427,4 +213,395 @@ LiveQueueFreeze resumeLiveQueue(LiveQueueFreeze freeze) {
     positionMs: freeze.positionMs,
     wasPlaying: freeze.wasPlaying,
   );
+}
+
+bool _has(Iterable<String> xs, String p) =>
+    xs.any((String e) => sameAudioPath(e, p));
+
+List<String> _cleanPool(List<String> pool) {
+  final List<String> out = <String>[];
+  for (final String p in pool) {
+    if (p.isEmpty || isKaraokeAudioPath(p)) continue;
+    if (_has(out, p)) continue;
+    out.add(p);
+  }
+  return out;
+}
+
+List<String> radioPairsOf(List<String> order) {
+  final List<String> out = <String>[];
+  for (var i = 1; i < order.length; i++) {
+    if (sameAudioPath(order[i - 1], order[i])) continue;
+    out.add(shufflePairKey(order[i - 1], order[i]));
+  }
+  return out;
+}
+
+/// Fracción de parejas A→B de [order] que ya estaban en [previous].
+double radioPairOverlap(List<String> order, Iterable<String> previous) {
+  if (order.length < 2) return 0;
+  final Set<String> prev = previous.toSet();
+  var steps = 0;
+  var hit = 0;
+  for (var i = 1; i < order.length; i++) {
+    if (sameAudioPath(order[i - 1], order[i])) continue;
+    steps++;
+    if (prev.contains(shufflePairKey(order[i - 1], order[i]))) hit++;
+  }
+  if (steps == 0) return 0;
+  return hit / steps;
+}
+
+bool sameRadioOrder(List<String> a, List<String> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!sameAudioPath(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+void _displaceFirst(List<String> order, String? banned, Random rng) {
+  if (banned == null || order.length < 2) return;
+  if (!sameAudioPath(order.first, banned)) return;
+  final List<int> rest = <int>[for (var i = 1; i < order.length; i++) i]
+    ..shuffle(rng);
+  final int i = rest.first;
+  final String swap = order[i];
+  order[i] = order[0];
+  order[0] = swap;
+}
+
+/// Arma una vuelta completa. Si hay vuelta anterior, otra semilla, otra
+/// primera canción y las menos parejas A→B posible (hasta 5 intentos).
+List<String> buildDifferentRound({
+  required List<String> pool,
+  required double Function(String path) bpmOf,
+  String? Function(String path)? keyOf,
+  List<String> previousOrder = const <String>[],
+  List<String> previousPairs = const <String>[],
+  Random? rng,
+  int maxAttempts = radioRebuildAttempts,
+}) {
+  final List<String> songs = _cleanPool(pool);
+  if (songs.length <= 1) return songs;
+  final Random random = rng ?? Random();
+  final String? banned = previousOrder.isEmpty ? null : previousOrder.first;
+  final Set<String> used = <String>{
+    ...previousPairs,
+    if (previousPairs.isEmpty) ...radioPairsOf(previousOrder),
+  };
+  final int tries = maxAttempts < 1 ? 1 : maxAttempts;
+  List<String>? best;
+  var bestScore = double.infinity;
+  for (var n = 0; n < tries; n++) {
+    final Random spin = Random(random.nextInt(1 << 31));
+    final List<String> built = List<String>.from(
+      buildHarmonicShuffle(
+        songs,
+        bpmOf,
+        keyOf: keyOf,
+        usedPairs: used,
+        rng: spin,
+      ).tracks,
+    );
+    _displaceFirst(built, banned, spin);
+    final bool sameFirst =
+        banned != null &&
+        built.isNotEmpty &&
+        sameAudioPath(built.first, banned);
+    final bool sameList = previousOrder.isNotEmpty &&
+        sameRadioOrder(built, previousOrder);
+    final double overlap = radioPairOverlap(built, used);
+    final double score = overlap + (sameFirst ? 1 : 0) + (sameList ? 1 : 0);
+    if (score < bestScore) {
+      best = built;
+      bestScore = score;
+    }
+    if (!sameFirst && !sameList && overlap <= radioPairOverlapMax) {
+      return built;
+    }
+  }
+  final List<String> out = List<String>.from(best ?? songs);
+  _displaceFirst(out, banned, random);
+  return out;
+}
+
+RadioPlan _freshPlan(
+  List<String> pool,
+  double Function(String path) bpmOf,
+  String? Function(String path)? keyOf,
+  List<String> previousOrder,
+  List<String> previousPairs,
+  Random rng,
+) {
+  final List<String> order = buildDifferentRound(
+    pool: pool,
+    bpmOf: bpmOf,
+    keyOf: keyOf,
+    previousOrder: previousOrder,
+    previousPairs: previousPairs,
+    rng: rng,
+  );
+  return RadioPlan(
+    order: order,
+    position: 0,
+    pairs: radioPairsOf(order),
+    previousPairs: previousPairs.isNotEmpty
+        ? previousPairs
+        : radioPairsOf(previousOrder),
+  );
+}
+
+/// Conserva la lista guardada. La rearma solo si no existe o ya se terminó.
+/// Lo nuevo entra en lo que falta por sonar; lo que ya no está se quita.
+RadioSync syncRadioPlan({
+  required RadioPlan? saved,
+  required List<String> pool,
+  required double Function(String path) bpmOf,
+  String? Function(String path)? keyOf,
+  String? pinned,
+  Random? rng,
+}) {
+  final Random random = rng ?? Random();
+  final List<String> songs = _cleanPool(pool);
+  if (songs.isEmpty) {
+    return RadioSync(
+      const RadioPlan(),
+      rebuilt: saved == null,
+    );
+  }
+  if (saved == null || saved.order.isEmpty) {
+    return RadioSync(
+      _freshPlan(songs, bpmOf, keyOf, const <String>[], const <String>[], random),
+      rebuilt: true,
+    );
+  }
+  final List<String> kept = <String>[];
+  var removedBefore = 0;
+  for (var i = 0; i < saved.order.length; i++) {
+    if (_has(songs, saved.order[i])) {
+      kept.add(saved.order[i]);
+    } else if (i < saved.position) {
+      removedBefore++;
+    }
+  }
+  var position = saved.position - removedBefore;
+  if (position < 0) position = 0;
+  if (position > kept.length) position = kept.length;
+  if (position >= kept.length) {
+    final List<String> prevPairs = saved.pairs.isNotEmpty
+        ? saved.pairs
+        : radioPairsOf(saved.order);
+    return RadioSync(
+      _freshPlan(songs, bpmOf, keyOf, saved.order, prevPairs, random),
+      rebuilt: true,
+    );
+  }
+  final List<String> prefix = kept.sublist(0, position);
+  List<String> tail = kept.sublist(position);
+  final List<String> fresh = <String>[
+    for (final String p in songs)
+      if (!_has(kept, p)) p,
+  ];
+  if (fresh.isNotEmpty) {
+    var lock = 0;
+    if (pinned != null &&
+        tail.isNotEmpty &&
+        sameAudioPath(tail.first, pinned)) {
+      lock = 1;
+    }
+    tail = insertHarmonicTracks(
+      queue: tail,
+      incoming: fresh,
+      bpmOf: bpmOf,
+      keyOf: keyOf,
+      lockedPrefix: lock,
+      playing: prefix.isEmpty ? null : prefix.last,
+    );
+  }
+  final List<String> order = <String>[...prefix, ...tail];
+  return RadioSync(
+    RadioPlan(
+      order: order,
+      position: position,
+      pairs: radioPairsOf(order),
+      previousPairs: saved.previousPairs,
+    ),
+    rebuilt: false,
+  );
+}
+
+/// Avanza la posición al consumir [path]. No rearma.
+RadioPlan advanceRadioPlan(RadioPlan plan, String path) {
+  if (plan.order.isEmpty) return plan;
+  if (plan.position < plan.order.length &&
+      sameAudioPath(plan.order[plan.position], path)) {
+    return plan.copy(position: plan.position + 1);
+  }
+  for (var i = 0; i < plan.order.length; i++) {
+    if (sameAudioPath(plan.order[i], path)) {
+      return plan.copy(position: i + 1);
+    }
+  }
+  return plan;
+}
+
+class GatomixRadio {
+  static File fileIn(String musicRoot) =>
+      File('$musicRoot${Platform.pathSeparator}$gatomixRadioName');
+
+  static RadioMemory load(
+    String musicRoot, {
+    List<String> legacyPaths = const <String>[],
+  }) {
+    if (musicRoot.isEmpty) return RadioMemory.empty;
+    final File f = fileIn(musicRoot);
+    RadioMemory mem = RadioMemory.empty;
+    if (f.existsSync()) {
+      mem = _read(f) ?? RadioMemory.empty;
+    }
+    final List<String> history = List<String>.from(mem.history);
+    final List<String> pairs = List<String>.from(mem.carriedPairs);
+    bool waveUp = mem.waveUp;
+    var inWave = mem.inWave;
+    var previousBpm = mem.previousBpm;
+    var lastArtist = mem.lastArtist;
+    String? lastPath = mem.lastPath;
+    final dynamic section = GatomixStore.section(musicRoot, 'radio');
+    final bool hasSection = section is Map;
+    if (hasSection) {
+      for (final String p in _stringList(section['history'])) {
+        if (!_listed(history, p)) history.add(p);
+      }
+      for (final String p in _stringList(section['pairs'])) {
+        if (!pairs.contains(p)) pairs.add(p);
+      }
+      if (section['waveUp'] is bool) waveUp = section['waveUp'] as bool;
+      if (section['inWave'] is num) inWave = (section['inWave'] as num).toInt();
+      if (section['previousBpm'] is num) {
+        previousBpm = (section['previousBpm'] as num).toDouble();
+      }
+      final String artist = section['lastArtist']?.toString() ?? '';
+      if (artist.isNotEmpty) lastArtist = artist;
+      final String? last = section['lastPath']?.toString();
+      if (last != null && last.isNotEmpty) lastPath = last;
+    }
+    final List<File> legacy = <File>[];
+    for (final String path in legacyPaths) {
+      final File old = File(path);
+      if (!old.existsSync()) continue;
+      for (final String p in _legacyHistory(old)) {
+        if (!_listed(history, p)) history.add(p);
+      }
+      legacy.add(old);
+    }
+    mem = RadioMemory(
+      history: history,
+      plans: mem.plans,
+      carriedPairs: pairs,
+      waveUp: waveUp,
+      inWave: inWave,
+      previousBpm: previousBpm,
+      lastArtist: lastArtist,
+      lastPath: lastPath,
+    );
+    if (!hasSection && legacy.isEmpty) {
+      return f.existsSync() ? mem : RadioMemory.empty;
+    }
+    save(musicRoot, mem);
+    final RadioMemory? back = _read(fileIn(musicRoot));
+    if (back == null || !_listedSame(back.history, mem.history)) return mem;
+    if (!_listedSame(back.carriedPairs, mem.carriedPairs)) return mem;
+    if (back.plans.length != mem.plans.length) return mem;
+    if (hasSection) {
+      GatomixStore.putSection(musicRoot, 'radio', null);
+      final dynamic left = GatomixStore.section(musicRoot, 'radio');
+      if (left != null) return back;
+    }
+    for (final File old in legacy) {
+      try {
+        if (old.existsSync()) old.deleteSync();
+      } catch (_) {}
+    }
+    return back;
+  }
+
+  static void save(String musicRoot, RadioMemory mem, {String? activeKey}) {
+    if (musicRoot.isEmpty) return;
+    try {
+      final Directory dir = Directory(musicRoot);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final File dest = fileIn(musicRoot);
+      final String text = jsonEncode(mem.toJson(activeKey: activeKey));
+      final File tmp = File('${dest.path}.tmp');
+      tmp.writeAsStringSync(text, flush: true);
+      if (jsonDecode(tmp.readAsStringSync()) is! Map) {
+        try {
+          tmp.deleteSync();
+        } catch (_) {}
+        return;
+      }
+      if (dest.existsSync()) dest.deleteSync();
+      tmp.renameSync(dest.path);
+      hideOnWindows(dest.path);
+    } catch (_) {}
+  }
+
+  static RadioMemory? _read(File f) {
+    try {
+      final Object? data = jsonDecode(f.readAsStringSync());
+      if (data is! Map) return null;
+      final Map<String, RadioPlan> plans = <String, RadioPlan>{};
+      final dynamic raw = data['plans'];
+      if (raw is Map) {
+        for (final MapEntry<dynamic, dynamic> e in raw.entries) {
+          plans[e.key.toString()] = RadioPlan.fromJson(e.value);
+        }
+      }
+      final dynamic bpm = data['previousBpm'];
+      final dynamic wave = data['inWave'];
+      final String? last = data['lastPath']?.toString();
+      final List<String> pairs = _stringList(data['pairs']);
+      return RadioMemory(
+        history: _stringList(data['history']),
+        plans: plans,
+        carriedPairs: pairs.isNotEmpty ? pairs : _stringList(data['previousPairs']),
+        waveUp: data['waveUp'] as bool? ?? true,
+        inWave: wave is num ? wave.toInt() : 0,
+        previousBpm: bpm is num ? bpm.toDouble() : 0,
+        lastArtist: data['lastArtist']?.toString() ?? '',
+        lastPath: last == null || last.isEmpty ? null : last,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static List<String> _stringList(dynamic raw) {
+    if (raw is! List) return const <String>[];
+    return <String>[for (final dynamic p in raw) p.toString()];
+  }
+
+  static bool _listed(List<String> xs, String p) =>
+      xs.any((String e) => e == p || sameAudioPath(e, p));
+
+  static bool _listedSame(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static List<String> _legacyHistory(File f) {
+    try {
+      final Object? data = jsonDecode(f.readAsStringSync());
+      if (data is! Map) return const <String>[];
+      final dynamic list = data['history'];
+      if (list is! List) return const <String>[];
+      return <String>[for (final dynamic p in list) p.toString()];
+    } catch (_) {
+      return const <String>[];
+    }
+  }
 }

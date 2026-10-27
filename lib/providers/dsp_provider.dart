@@ -85,7 +85,11 @@ class DspWorker {
 
     try {
       readDjMetadata(directoryPath).forEach((k, v) {
-        if (v is num) cacheData[k] = v.toDouble();
+        if (v is num) {
+          cacheData[k] = v.toDouble();
+        } else if (v is Map && v['bpm'] is num) {
+          cacheData[k] = (v['bpm'] as num).toDouble();
+        }
       });
     } catch (_) {}
 
@@ -208,10 +212,10 @@ class DspWorker {
 
     // Solo guardamos si hubo cambios Y el proceso no fue abortado a la mitad
     if (hasChanges && !ref.read(pipelineProvider).isAborted) {
-      writeDjMetadata(directoryPath, <String, dynamic>{
-        for (final MapEntry<String, double> e in cacheData.entries)
-          e.key: e.value,
-      });
+      writeDjMetadata(
+        directoryPath,
+        bpmIndexPreservingKeys(readDjMetadata(directoryPath), cacheData),
+      );
       writeDjTimestamps(directoryPath, <String, dynamic>{
         for (final MapEntry<String, int> e in timestamps.entries)
           e.key: e.value,

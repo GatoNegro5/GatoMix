@@ -432,6 +432,57 @@ void saveTrackMusic(String path, {required double bpm, String? camelot}) {
   writeDjMetadata(dir, map);
 }
 
+/// Lo que escribe el índice de BPM. No borra una tonalidad `{bpm, key}`
+/// ni pisa un BPM ya guardado con 0. Lo que no se volvió a medir se queda.
+Map<String, dynamic> bpmIndexPreservingKeys(
+  Map<String, dynamic> existing,
+  Map<String, double> measured,
+) {
+  final Map<String, dynamic> out = <String, dynamic>{
+    for (final MapEntry<String, dynamic> e in existing.entries) e.key: e.value,
+  };
+  String? slotFor(String key) {
+    if (out.containsKey(key)) return key;
+    final String want = audioPathKey(key);
+    for (final String k in out.keys) {
+      if (audioPathKey(k) == want) return k;
+    }
+    return null;
+  }
+
+  for (final MapEntry<String, double> e in measured.entries) {
+    final String? slot = slotFor(e.key);
+    final dynamic prev = slot == null ? null : out[slot];
+    String? camelot;
+    var prevBpm = 0.0;
+    if (prev is Map) {
+      if (prev['key'] is String && (prev['key'] as String).trim().isNotEmpty) {
+        camelot = (prev['key'] as String).trim();
+      }
+      if (prev['bpm'] is num) prevBpm = (prev['bpm'] as num).toDouble();
+    } else if (prev is num) {
+      prevBpm = prev.toDouble();
+    }
+    final double bpm = e.value > 0 ? e.value : prevBpm;
+    final Object value;
+    if (camelot != null) {
+      value = <String, dynamic>{
+        if (bpm > 0) 'bpm': bpm,
+        'key': camelot,
+      };
+    } else if (bpm > 0) {
+      value = bpm;
+    } else if (prev != null) {
+      continue;
+    } else {
+      value = 0.0;
+    }
+    if (slot != null && slot != e.key) out.remove(slot);
+    out[e.key] = value;
+  }
+  return out;
+}
+
 Map<String, dynamic> readDjTimestamps(String dir) =>
     GatomixStore.readMap(dir, 'djTimestamps');
 

@@ -358,4 +358,20 @@ void main() {
     expect(harmonicKeyOf(path), '8A');
     dir.deleteSync(recursive: true);
   });
+
+  test('el índice de BPM no borra la tonalidad guardada', () {
+    const String tema = '/musica/Tema.mp3';
+    const String otra = '/musica/Otra.mp3';
+    final Map<String, dynamic> kept = bpmIndexPreservingKeys(
+      <String, dynamic>{
+        tema: <String, dynamic>{'bpm': 100, 'key': '8A'},
+        otra: <String, dynamic>{'bpm': 90, 'key': '5B'},
+        '/musica/solo.mp3': 110,
+      },
+      <String, double>{tema: 118, '/musica/solo.mp3': 0},
+    );
+    expect(kept[tema], <String, dynamic>{'bpm': 118, 'key': '8A'});
+    expect(kept[otra], <String, dynamic>{'bpm': 90, 'key': '5B'});
+    expect(kept['/musica/solo.mp3'], 110);
+  });
 }
