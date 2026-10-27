@@ -1,6 +1,8 @@
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/audio_path.dart';
+
 /// DNA 60–80 % · Phrase 8 · Stealth (entra 5–10 %, cruza ~60 % sin voz).
 /// Prohibido: fade suelto, corte seco, cambio al final de la pista.
 enum MixFormula { dnaEnergy, phraseGrid, stealthGap }
@@ -131,7 +133,9 @@ int pickStealthNextIndex({
   int best = -1;
   double bestDiff = double.infinity;
   for (int i = 0; i < remaining.length; i++) {
-    if (currentPath != null && remaining[i] == currentPath) continue;
+    if (currentPath != null && sameAudioPath(remaining[i], currentPath)) {
+      continue;
+    }
     final double b = bpmOf(remaining[i]);
     final double diff = (currentBpm >= 60 && b >= 60)
         ? (currentBpm - b).abs()

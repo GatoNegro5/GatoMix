@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/audio_path.dart';
 import '../../core/bpm_range.dart';
 import '../../core/brand_paths.dart';
 import '../../djiphone/iphone_library.dart';
@@ -725,7 +726,8 @@ class AutomixPanel extends ConsumerWidget {
     List<File> displayFiles = List.from(automixQueue);
     displayFiles.removeWhere(
       (file) =>
-          playedTracks.contains(file.path) && file.path != currentTrackPath,
+          playedTracks.any((p) => sameAudioPath(p, file.path)) &&
+          !sameAudioPath(file.path, currentTrackPath),
     );
 
     double getTrackBpm(String filename) {

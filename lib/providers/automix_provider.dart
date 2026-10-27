@@ -17,7 +17,9 @@ import '../core/audio/tempo_drift.dart';
 import '../djiphone/iphone_library.dart';
 import '../core/audio/dj_audio_handler.dart';
 
-import '../core/lyric_files.dart';
+import '../core/audio_path.dart';
+import '../core/lyric_files.dart' hide sameAudioPath;
+import '../core/session_restore.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_approx.dart';
 import '../ui/widgets/approx_lyric_icon.dart' show approxLyricRevision;
@@ -328,30 +330,37 @@ class AutomixNotifier extends Notifier<AutomixState> {
       final rawList = ((data['playlist'] as List?) ?? const [])
           .map((e) => e.toString())
           .toList();
-      final rawIndex = data['currentIndex'] as int?;
-      // Pistas renombradas por Masterizar se reencuentran; el índice sigue a
-      // la pista actual aunque cambie la lista.
-      final playlist = <String>[];
-      int? index;
-      for (var i = 0; i < rawList.length; i++) {
-        final hit = resolvePlayableSessionPaths([rawList[i]]);
-        if (hit.isEmpty || playlist.contains(hit.first)) continue;
-        if (i == rawIndex) index = playlist.length;
-        playlist.add(hit.first);
-      }
-      final bool sameTrack = index != null;
-      if (index == null && playlist.isNotEmpty && rawIndex != null) {
-        index = rawIndex.clamp(0, playlist.length - 1);
-      }
-      final positionMs = sameTrack ? data['positionMs'] as int? : null;
-      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
-        0,
-        MixStrategy.values.length - 1,
+      // Pistas renombradas por Masterizar se reencuentran. Rutas equivalentes
+      // (mayúsculas, separadores, junctions) cuentan como una sola.
+      final AutomixSessionRestore restored = restoreAutomixSession(
+        data,
+        strategyCount: MixStrategy.values.length,
       );
+      final List<String> playlist = <String>[];
+      final Map<String, int> at = <String, int>{};
+      int? index;
+      for (var i = 0; i < restored.playlist.length; i++) {
+        final String c = canonicalAudioPath(restored.playlist[i]);
+        final String key = audioPathKey(c);
+        final int? prev = at[key];
+        if (prev != null) {
+          if (i == restored.index) index = prev;
+          continue;
+        }
+        if (i == restored.index) index = playlist.length;
+        at[key] = playlist.length;
+        playlist.add(c);
+      }
+      if (index == null && playlist.isNotEmpty && restored.index != null) {
+        index = restored.index!.clamp(0, playlist.length - 1);
+      }
+      final bool sameTrack = restored.positionMs != null && index != null;
+      final positionMs = sameTrack ? restored.positionMs : null;
+      final mixStrategyIdx = restored.mixStrategyIndex;
       // El modo (Shuffle/Secuencial) se respeta aunque no haya pista actual.
       state = state.copyWith(mixStrategy: MixStrategy.values[mixStrategyIdx]);
-      final autoMixArmed = data['autoMixArmed'] as bool? ?? true;
-      final wasPlaying = data['wasPlaying'] as bool? ?? false;
+      final autoMixArmed = restored.autoMixArmed;
+      final wasPlaying = restored.wasPlaying;
 
       if (playlist.isNotEmpty && index != null && index >= 0) {
         state = state.copyWith(
@@ -361,6 +370,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
           mixStrategy: MixStrategy.values[mixStrategyIdx],
           autoMixArmed: autoMixArmed,
         );
+        if (rawList.length != playlist.length ||
+            rawList.join('\n') != playlist.join('\n')) {
+          _sessionPositionMs = positionMs ?? 0;
+          _sessionWasPlaying = wasPlaying;
+          _freezePersist = true;
+          unawaited(_saveSnapshot());
+          _freezePersist = false;
+        }
 
         await _loadLyrics(playlist[index]);
         await _loadTrackMetadata(playlist[index]);
@@ -452,13 +469,24 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void _applyShuffleBank({required bool advance}) {
-    if (state.playlist.length <= 2) {
-      state = state.copyWith(mixStrategy: MixStrategy.random);
+    final paths = dedupeAudioPaths(
+      state.playlist.where((p) => !isKaraokeAudioPath(p)).toList(),
+    );
+    if (paths.length <= 2) {
+      state = state.copyWith(
+        playlist: paths,
+        mixStrategy: MixStrategy.random,
+        currentIndex: paths.isEmpty
+            ? -1
+            : (state.currentTrackPath == null
+                  ? state.currentIndex
+                  : paths.indexWhere(
+                      (p) => sameAudioPath(p, state.currentTrackPath),
+                    )),
+      );
       _saveSnapshot();
       return;
     }
-
-    final paths = List<String>.from(state.playlist);
     _shuffleKnown.addAll(paths);
     final key = _shuffleListKey(paths);
     final all = _readShuffleBankFile();
@@ -500,18 +528,24 @@ class AutomixNotifier extends Notifier<AutomixState> {
     final List<String> order = List<String>.from(banks[use]);
 
     final String? playing = state.currentTrackPath;
-    final String head;
-    if (playing != null && order.contains(playing)) {
-      head = playing;
-    } else {
-      head = order.first;
+    String head = order.first;
+    if (playing != null) {
+      for (final String path in order) {
+        if (sameAudioPath(path, playing)) {
+          head = path;
+          break;
+        }
+      }
     }
     final List<String> rest = <String>[
       for (final path in order)
-        if (path != head) path,
+        if (!sameAudioPath(path, head)) path,
     ];
     for (final path in paths) {
-      if (path != head && !rest.contains(path)) rest.add(path);
+      if (!sameAudioPath(path, head) &&
+          !rest.any((r) => sameAudioPath(r, path))) {
+        rest.add(path);
+      }
     }
 
     entry['cursor'] = use;
@@ -548,13 +582,15 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void syncDynamicPlaylist(List<String> newPlaylistOrdered) {
-    newPlaylistOrdered = newPlaylistOrdered
-        .where((p) => !isKaraokeSessionPath(p))
-        .toList();
-    final currentSet = state.playlist.toSet();
+    newPlaylistOrdered = dedupeAudioPaths(
+      newPlaylistOrdered.where((p) => !isKaraokeAudioPath(p)).toList(),
+    );
+    bool hasPath(Iterable<String> xs, String p) =>
+        xs.any((e) => sameAudioPath(e, p));
     final added = <String>[
       for (final path in newPlaylistOrdered)
-        if (!currentSet.contains(path) && !_shuffleKnown.contains(path)) path,
+        if (!hasPath(state.playlist, path) && !hasPath(_shuffleKnown, path))
+          path,
     ];
     // Cola estable: añadir pistas ya no re-mezcla todo ni cambia el modo.
     // El banco solo se aplica con lista vacía; con lista viva, las pistas
@@ -573,25 +609,26 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
     var ordered = newPlaylistOrdered;
     if (state.mixStrategy == MixStrategy.random) {
-      final incoming = newPlaylistOrdered.toSet();
       final kept = <String>[
         for (final path in state.playlist)
-          if (incoming.contains(path)) path,
+          if (hasPath(newPlaylistOrdered, path)) path,
       ];
-      final keptSet = kept.toSet();
       final added = <String>[
         for (final path in newPlaylistOrdered)
-          if (!keptSet.contains(path)) path,
+          if (!hasPath(kept, path)) path,
       ];
       if (added.length > 1) {
         added.shuffle(Random(DateTime.now().millisecondsSinceEpoch));
       }
-      ordered = [...kept, ...added];
+      ordered = dedupeAudioPaths([...kept, ...added]);
     }
+    ordered = dedupeAudioPaths(ordered);
     if (listEquals(state.playlist, ordered)) return;
     int newCurrentIndex = -1;
     if (state.currentTrackPath != null) {
-      newCurrentIndex = ordered.indexOf(state.currentTrackPath!);
+      newCurrentIndex = ordered.indexWhere(
+        (p) => sameAudioPath(p, state.currentTrackPath),
+      );
     }
     state = state.copyWith(playlist: ordered, currentIndex: newCurrentIndex);
     _saveSnapshot();
@@ -962,11 +999,11 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   int _calculateNextIndex() {
-    if (state.playlist.length <= 1) return -1;
-    if (state.currentIndex + 1 < state.playlist.length) {
-      return state.currentIndex + 1;
-    }
-    return 0;
+    return nextDifferentAudioIndex(
+      state.playlist,
+      state.currentIndex,
+      state.currentTrackPath,
+    );
   }
 
   Future<void> _stopWhenNoNext() async {
@@ -1017,19 +1054,23 @@ class AutomixNotifier extends Notifier<AutomixState> {
     int startIndex,
   ) async {
     // Las pistas _K de Karaoke nunca suenan en Automix (solo TV).
-    final kFile = RegExp(r'_k\.[a-z0-9]+$', caseSensitive: false);
-    if (startIndex >= 0 &&
-        startIndex < newPlaylist.length &&
-        newPlaylist.any((t) => kFile.hasMatch(t))) {
+    // Dos grafías de la misma ruta cuentan como una.
+    if (startIndex >= 0 && startIndex < newPlaylist.length) {
       final String picked = newPlaylist[startIndex];
-      final List<String> clean = newPlaylist
-          .where((t) => !kFile.hasMatch(t))
-          .toList();
-      int idx = clean.indexOf(picked);
+      final List<String> clean = dedupeAudioPaths(
+        newPlaylist.where((t) => !isKaraokeAudioPath(t)).toList(),
+      );
+      var idx = -1;
+      for (var i = 0; i < clean.length; i++) {
+        if (sameAudioPath(clean[i], picked)) {
+          idx = i;
+          break;
+        }
+      }
       if (idx < 0) {
         final int before = newPlaylist
             .take(startIndex)
-            .where((t) => !kFile.hasMatch(t))
+            .where((t) => !isKaraokeAudioPath(t))
             .length;
         idx = before < clean.length ? before : 0;
       }
@@ -1063,7 +1104,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return;
     }
 
-    if (state.currentTrackPath == nextTrack) {
+    if (sameAudioPath(state.currentTrackPath, nextTrack)) {
       state = state.copyWith(playlist: newPlaylist, currentIndex: startIndex);
       if (!state.isPlaying) {
         await _activeAutomix.setVolume(100.0);
@@ -2340,7 +2381,7 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
   }
 
   void addTrack(String track) {
-    if (!state.contains(track)) {
+    if (!state.any((p) => sameAudioPath(p, track))) {
       final newState = {...state, track};
       state = newState;
       _saveSession(newState);
@@ -2348,9 +2389,8 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
   }
 
   void removeTrack(String track) {
-    if (state.contains(track)) {
-      final newState = Set<String>.from(state);
-      newState.remove(track);
+    final newState = state.where((p) => !sameAudioPath(p, track)).toSet();
+    if (newState.length != state.length) {
       state = newState;
       _saveSession(newState);
     }
@@ -2392,9 +2432,16 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
       final data = SessionStore.readJson(_getSessionFilePath());
       if (data is List && state.isEmpty) {
         // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-        state = resolvePlayableSessionPaths(
-          data.map((e) => e.toString()).toList(),
-        ).map((p) => File(p)).toList();
+        // Duplicados guardados (otra grafía de la misma ruta) se limpian.
+        final List<String> raw = data.map((e) => e.toString()).toList();
+        final List<File> files = dedupeAudioFiles(
+          resolvePlayableSessionPaths(raw).map(File.new).toList(),
+        );
+        state = files;
+        if (raw.length != files.length ||
+            raw.join('\n') != files.map((f) => f.path).join('\n')) {
+          unawaited(_saveSession(files));
+        }
       }
     } catch (_) {}
   }
@@ -2407,24 +2454,30 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   }
 
   void addTrack(File file) {
-    final newState = state.where((f) => f.path != file.path).toList();
-    newState.add(file);
+    if (isKaraokeAudioPath(file.path)) return;
+    final File kept = File(canonicalAudioPath(file.path));
+    final newState = state
+        .where((f) => !sameAudioPath(f.path, kept.path))
+        .toList();
+    newState.add(kept);
     state = newState;
     _saveSession(newState);
   }
 
   void addAll(List<File> files) {
     var newState = List<File>.from(state);
-    for (var f in files.where((f) => !isKaraokeSessionPath(f.path))) {
-      newState.removeWhere((existing) => existing.path == f.path);
-      newState.add(f);
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      final File kept = File(canonicalAudioPath(f.path));
+      newState.removeWhere((existing) => sameAudioPath(existing.path, kept.path));
+      newState.add(kept);
     }
     state = newState;
     _saveSession(newState);
   }
 
   void removeTrack(String path) {
-    final newState = state.where((f) => f.path != path).toList();
+    final newState = state.where((f) => !sameAudioPath(f.path, path)).toList();
     state = newState;
     _saveSession(newState);
   }
@@ -2435,11 +2488,12 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   }
 
   void restoreQueue(List<String> paths) {
-    List<File> files = [];
-    for (String p in paths) {
-      if (isKaraokeSessionPath(p)) continue;
-      if (File(p).existsSync()) files.add(File(p));
-    }
+    final List<File> files = dedupeAudioFiles(
+      paths
+          .where((p) => !isKaraokeAudioPath(p) && File(p).existsSync())
+          .map(File.new)
+          .toList(),
+    );
     state = files;
     _saveSession(files);
   }

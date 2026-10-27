@@ -5,6 +5,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 
 // 🛠️ INYECCIÓN: Uso estricto de la capa HAL
+import '../core/audio_path.dart';
 import '../core/hal/platform_strategy.dart';
 
 class DirectoryState {
@@ -165,10 +166,19 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
         }
       }
 
-      targetFiles.sort(
+      // Una sola fila por archivo: junctions, mayúsculas y separadores
+      // distintos colapsan a la ruta real. El .lrc (icono tomate) queda
+      // junto a esa ruta. Los _K siguen en el explorador.
+      final Map<String, File> uniq = <String, File>{};
+      for (final File f in targetFiles) {
+        final String canon = canonicalAudioPath(f.path);
+        uniq.putIfAbsent(audioPathKey(canon), () => File(canon));
+      }
+      final List<File> uniqueFiles = uniq.values.toList();
+      uniqueFiles.sort(
         (a, b) => a.uri.pathSegments.last.compareTo(b.uri.pathSegments.last),
       );
-      state = state.copyWith(files: targetFiles, isProcessing: false);
+      state = state.copyWith(files: uniqueFiles, isProcessing: false);
     } catch (e) {
       debugPrint("🔴 [SCAN FATAL ERROR]: $e");
       state = state.copyWith(isProcessing: false, files: []);

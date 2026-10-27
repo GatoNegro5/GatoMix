@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'audio_path.dart';
+
 /// 1.0.20: salto rápido del Masterizar. Antes de decodificar nada decide si
 /// una pista ya está completa con lecturas baratas:
 ///  1) índice por carpeta `.gatomix_master_index.json` (ruta relativa +
@@ -254,7 +256,13 @@ class MasterSkipIndex {
         final dynamic d = jsonDecode(idx.file.readAsStringSync());
         if (d is Map && d['schema'] == 1 && d['entries'] is Map) {
           (d['entries'] as Map).forEach((k, v) {
-            if (v is Map) idx.entries['$k'] = Map<String, dynamic>.from(v);
+            if (v is Map) {
+              final String nk = audioPathKey(
+                '$k'.replaceAll('\\', '/'),
+                absolute: false,
+              );
+              idx.entries[nk] = Map<String, dynamic>.from(v);
+            }
           });
         }
       }
@@ -276,7 +284,7 @@ class MasterSkipIndex {
     if (p.toLowerCase().startsWith('${r.toLowerCase()}/')) {
       p = p.substring(r.length + 1);
     }
-    return p;
+    return audioPathKey(p, absolute: false);
   }
 
   Map<String, dynamic> _stat(String path) {

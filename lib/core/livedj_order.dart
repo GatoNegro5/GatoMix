@@ -1,5 +1,7 @@
 import 'dart:math';
 
+import 'audio_path.dart';
+
 /// Orden de la cola de Live DJ en modo Secuencial.
 enum LiveDjSortMode { manual, alphabetical, bpmAsc, bpmDesc }
 
@@ -58,12 +60,14 @@ List<List<String>> buildShuffleGroups(
   double Function(String path) bpmOf,
   int seed, {
   int groupSize = 20,
+  bool? foldCase,
 }) {
   final Random rng = Random(seed);
   final List<String> uniq = <String>[];
   final Set<String> seen = <String>{};
   for (final String p in paths) {
-    if (seen.add(p)) uniq.add(p);
+    if (isKaraokeAudioPath(p)) continue;
+    if (seen.add(audioPathKey(p, foldCase: foldCase))) uniq.add(p);
   }
   final List<String> known = uniq.where((p) => bpmOf(p) > 0).toList();
   final List<String> unknown = uniq.where((p) => bpmOf(p) <= 0).toList();
@@ -119,6 +123,7 @@ List<List<String>> buildShuffleGroups(
   Random rng, {
   int tries = 60,
   int groupSize = 20,
+  bool? foldCase,
 }) {
   List<List<String>>? best;
   int bestSeed = 0;
@@ -130,6 +135,7 @@ List<List<String>> buildShuffleGroups(
       bpmOf,
       seed,
       groupSize: groupSize,
+      foldCase: foldCase,
     );
     // Si toda la cola cabe en un grupo, la composición no puede cambiar.
     final int rep = g.length <= 1

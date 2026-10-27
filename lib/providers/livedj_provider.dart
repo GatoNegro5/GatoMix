@@ -8,8 +8,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_selector/file_selector.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+import '../core/audio_path.dart';
 import '../core/hal/platform_strategy.dart';
 import '../core/livedj_order.dart';
+import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
@@ -472,14 +474,21 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   static const int _shuffleHistoryCap = 3000;
 
   void _applyLiveShuffleBank({required bool advance}) {
-    if (state.queue.length <= 1) {
+    final List<String> paths = dedupeAudioPaths(
+      state.queue
+          .map((f) => f.path)
+          .where((p) => !isKaraokeAudioPath(p))
+          .toList(),
+    );
+    if (paths.length <= 1) {
       debugPrint("⚠️ [TRACKER] Cola muy pequeña. Forzando solo UI.");
-      state = state.copyWith(mixStrategy: LiveDjMixStrategy.random);
+      state = state.copyWith(
+        queue: paths.map(File.new).toList(),
+        mixStrategy: LiveDjMixStrategy.random,
+      );
       _saveSnapshot();
       return;
     }
-
-    final paths = state.queue.map((f) => f.path).toList();
     final all = _readLiveShuffleBankFile();
     final List<String> hist = ((all['history'] as List?) ?? const [])
         .map((e) => e.toString())
@@ -559,23 +568,27 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final queuePaths = ((data['queue'] as List?) ?? const [])
           .map((e) => e.toString())
           .toList();
-      // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-      final queueFiles = resolvePlayableSessionPaths(
-        queuePaths,
-      ).map((p) => File(p)).toList();
-      String? currentTrackPath = data['currentTrackPath'] as String?;
+      // Pistas renombradas por Masterizar se reencuentran. Duplicados de
+      // la misma ruta (mayúsculas, separadores) y las _K se quitan al abrir.
+      final LiveDjSessionRestore restored = restoreLiveDjSession(
+        data,
+        strategyCount: LiveDjMixStrategy.values.length,
+        modeCount: LiveDjMixMode.values.length,
+      );
+      final List<File> queueFiles = dedupeAudioFiles(
+        restored.queue.map(File.new).toList(),
+      );
+      String? currentTrackPath = restored.currentTrackPath == null
+          ? null
+          : canonicalAudioPath(restored.currentTrackPath!);
       if (currentTrackPath != null) {
-        final hit = resolvePlayableSessionPaths([currentTrackPath]);
-        currentTrackPath = hit.isEmpty ? null : hit.first;
-      }
-      if (currentTrackPath != null) {
-        queueFiles.removeWhere((f) => f.path == currentTrackPath);
+        queueFiles.removeWhere((f) => sameAudioPath(f.path, currentTrackPath));
       }
       final LiveDjSortMode savedSort = LiveDjSortMode.values.firstWhere(
         (m) => m.name == data['sortMode'],
         orElse: () => LiveDjSortMode.manual,
       );
-      bool currentFromQueue = false;
+      var currentFromQueue = restored.currentFromQueue;
       if (currentTrackPath == null && queueFiles.isNotEmpty) {
         // La pista que pasa a "actual" sale de la cola (cartridge destructiva);
         // si no, volvería a sonar al terminar.
@@ -583,18 +596,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         currentFromQueue = true;
       }
       // La posición guardada era de otra pista: no se aplica a la nueva.
-      final int? positionMs = currentFromQueue
-          ? null
-          : data['positionMs'] as int?;
+      final int? positionMs = currentFromQueue ? null : restored.positionMs;
 
-      final mixModeIdx = (data['mixMode'] as int? ?? 0).clamp(
-        0,
-        LiveDjMixMode.values.length - 1,
-      );
-      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
-        0,
-        LiveDjMixStrategy.values.length - 1,
-      );
+      final mixModeIdx = restored.mixModeIndex;
+      final mixStrategyIdx = restored.mixStrategyIndex;
       final mixFormulaIdx = data['mixFormula'] as int? ?? 0;
       if (mixFormulaIdx >= 0 && mixFormulaIdx < MixFormula.values.length) {
         ref.read(mixFormulaProvider.notifier).state =
@@ -622,6 +627,17 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         mixStrategy: LiveDjMixStrategy.values[mixStrategyIdx],
         sortMode: savedSort,
       );
+      final bool queueDirty =
+          queuePaths.length != queueFiles.length ||
+          queuePaths.join('\n') != queueFiles.map((f) => f.path).join('\n') ||
+          (data['currentTrackPath'] as String?) != currentTrackPath;
+      if (queueDirty) {
+        _sessionPositionMs = positionMs ?? 0;
+        _sessionWasPlaying = data['wasPlaying'] as bool? ?? false;
+        _freezePersist = true;
+        unawaited(_saveSnapshot());
+        _freezePersist = false;
+      }
       if (savedRadioOn) unawaited(_radioEnsureIndex());
 
       _freezePersist = false;
@@ -656,20 +672,27 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void addTrack(File file) {
-    if (!state.queue.any((f) => f.path == file.path)) {
+    if (isKaraokeAudioPath(file.path)) return;
+    final File kept = File(canonicalAudioPath(file.path));
+    if (!state.queue.any((f) => sameAudioPath(f.path, kept.path))) {
       // Cola estable: la pista nueva va al final; lo ya cargado no se mueve
       // ni cambia de modo (secuencial/shuffle solo lo cambia el botón).
-      state = state.copyWith(queue: [...state.queue, file]);
+      state = state.copyWith(queue: [...state.queue, kept]);
       if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
       _saveSnapshot();
     }
   }
 
   void addAllTracks(List<File> files) {
-    final currentPaths = state.queue.map((f) => f.path).toSet();
-    final newFiles = files
-        .where((f) => !currentPaths.contains(f.path))
-        .toList();
+    final Set<String> currentPaths = <String>{
+      for (final File f in state.queue) audioPathKey(f.path),
+    };
+    final List<File> newFiles = <File>[];
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      final File kept = File(canonicalAudioPath(f.path));
+      if (currentPaths.add(audioPathKey(kept.path))) newFiles.add(kept);
+    }
     if (newFiles.isNotEmpty) {
       // Cola estable: solo se mezcla el lote nuevo (y solo en modo shuffle);
       // lo ya cargado conserva su orden.
@@ -698,7 +721,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void removeTrack(String path) {
-    final newQueue = state.queue.where((f) => f.path != path).toList();
+    final newQueue = state.queue
+        .where((f) => !sameAudioPath(f.path, path))
+        .toList();
     state = state.copyWith(queue: newQueue);
     _saveSnapshot();
   }
@@ -738,15 +763,19 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         final file = File(result.path);
         final content = await file.readAsString();
         final List<dynamic> paths = jsonDecode(content);
-        final List<File> newFiles = paths
-            .map((p) => File(p.toString()))
-            .where((f) => f.existsSync())
-            .toList();
+        final List<File> newFiles = dedupeAudioFiles(
+          paths
+              .map((p) => File(p.toString()))
+              .where((f) => f.existsSync())
+              .toList(),
+        );
 
         if (newFiles.isNotEmpty) {
-          final currentPaths = state.queue.map((f) => f.path).toSet();
-          final fresh = newFiles
-              .where((f) => !currentPaths.contains(f.path))
+          final Set<String> currentPaths = <String>{
+            for (final File f in state.queue) audioPathKey(f.path),
+          };
+          final List<File> fresh = newFiles
+              .where((f) => currentPaths.add(audioPathKey(f.path)))
               .toList();
           if (state.mixStrategy == LiveDjMixStrategy.random) {
             final ordered = _bpmGroupOrder(
@@ -1507,7 +1536,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (state.queue.isEmpty) return -1;
     if (ref.read(mixFormulaProvider) != MixFormula.stealthGap ||
         state.currentTrackPath == null) {
-      return 0;
+      for (var i = 0; i < state.queue.length; i++) {
+        if (state.currentTrackPath == null ||
+            !sameAudioPath(state.queue[i].path, state.currentTrackPath)) {
+          return i;
+        }
+      }
+      return -1;
     }
     final int picked = pickStealthNextIndex(
       remaining: state.queue.map((f) => f.path).toList(),
@@ -1545,7 +1580,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           _nextFromCompletion &&
           _standbyArmedPath != null) {
         final int ai = state.queue.indexWhere(
-          (f) => f.path == _standbyArmedPath,
+          (f) => sameAudioPath(f.path, _standbyArmedPath),
         );
         if (ai >= 0) nextIdx = ai;
       }
@@ -1562,7 +1597,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     if (!radioPick &&
         state.currentTrackPath != null &&
-        nextTrack == state.currentTrackPath) {
+        sameAudioPath(nextTrack, state.currentTrackPath)) {
       _djTrace('ABORT mezcla contra la misma pista $nextTrack');
       _isCrossfading = false;
       _isStandbyArmed = false;
