@@ -7,8 +7,10 @@ void main() {
     expect(parseMasterFolderArg(const ['--otro']), isNull);
   });
   test('forma con espacio', () {
-    expect(parseMasterFolderArg(const ['--master-folder', r'C:\M\80s Ingles']),
-        r'C:\M\80s Ingles');
+    expect(
+      parseMasterFolderArg(const ['--master-folder', r'C:\M\80s Ingles']),
+      r'C:\M\80s Ingles',
+    );
   });
   test('forma con igual', () {
     expect(parseMasterFolderArg(const ['--master-folder=/x/y']), '/x/y');

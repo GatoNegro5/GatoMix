@@ -2312,6 +2312,10 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
                     fontSize: isMobileLandscape ? 12 : 14,
                   ),
                 ),
+                if (ref.watch(automixLyricApproxProvider)) ...[
+                  const SizedBox(width: 10),
+                  const ApproxLyricBadge(),
+                ],
                 const SizedBox(width: 15),
                 IconButton(
                   icon: Icon(
@@ -2731,5 +2735,34 @@ class SemanticDeckPainter extends CustomPainter {
       if (lyrics[i].timestamp != oldDelegate.lyrics[i].timestamp) return true;
     }
     return false;
+  }
+}
+
+/// Aviso de letra aproximada (GMX_LYR=APPROX): ajustar con SYNC.
+class ApproxLyricBadge extends StatelessWidget {
+  const ApproxLyricBadge({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message:
+          'Letra de estudio en una versión DJ. Ajusta con SYNC; al guardar pasa a MANUAL.',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.amber.withValues(alpha: 0.2),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: Colors.amber),
+        ),
+        child: const Text(
+          'Letra aproximada – ajustar',
+          style: TextStyle(
+            color: Colors.amber,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
   }
 }

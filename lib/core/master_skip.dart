@@ -11,7 +11,14 @@ import 'dart:io';
 const String masterIndexName = '.gatomix_master_index.json';
 const String _sealText = 'ReGenial Master';
 
-const Set<String> _lyrOk = <String>{'SYNC', 'PLAIN', 'MANUAL', 'NA', 'NONE'};
+const Set<String> _lyrOk = <String>{
+  'SYNC',
+  'PLAIN',
+  'MANUAL',
+  'APPROX',
+  'NA',
+  'NONE',
+};
 
 int _syncsafe(List<int> b, int o) =>
     (b[o] << 21) | (b[o + 1] << 14) | (b[o + 2] << 7) | b[o + 3];

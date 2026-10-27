@@ -65,16 +65,19 @@ void main() {
     expect(shifted.text.contains('[00:07.58]Hola'), isTrue);
   });
 
-  test('una letra manual no se mueve aunque haya retardo y el corte sea cero', () {
-    const String manual = '[gmx_manual:1]\n[00:10.00]Hola\n';
-    final LrcShift shifted = shiftLrcText(manual, 0, extraDelayMs: 80);
-    expect(shifted.skippedManual, isTrue);
-    expect(shifted.changed, isFalse);
-    expect(shifted.text, manual);
-    expect(lrcIsProtected(manual), isTrue);
-    expect(lrcIsProtected('[gmx_shift:-80]\n[00:10.08]Hola\n'), isTrue);
-    expect(lrcIsProtected(sample), isFalse);
-  });
+  test(
+    'una letra manual no se mueve aunque haya retardo y el corte sea cero',
+    () {
+      const String manual = '[gmx_manual:1]\n[00:10.00]Hola\n';
+      final LrcShift shifted = shiftLrcText(manual, 0, extraDelayMs: 80);
+      expect(shifted.skippedManual, isTrue);
+      expect(shifted.changed, isFalse);
+      expect(shifted.text, manual);
+      expect(lrcIsProtected(manual), isTrue);
+      expect(lrcIsProtected('[gmx_shift:-80]\n[00:10.08]Hola\n'), isTrue);
+      expect(lrcIsProtected(sample), isFalse);
+    },
+  );
 
   test('Take On Me: 1010 ms sin corte medido no mueve la letra', () {
     expect(

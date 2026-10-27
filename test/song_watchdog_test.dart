@@ -11,8 +11,11 @@ void main() {
   });
   test('custom limit', () {
     expect(
-      headlessStalled(t0, t0.add(const Duration(seconds: 5)),
-          limit: const Duration(seconds: 5)),
+      headlessStalled(
+        t0,
+        t0.add(const Duration(seconds: 5)),
+        limit: const Duration(seconds: 5),
+      ),
       isTrue,
     );
   });

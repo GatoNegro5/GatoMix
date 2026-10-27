@@ -138,7 +138,7 @@ SongAudit auditSong(String path, String fileName, GmxSnapshot s) {
     lyrics = AuditCell.na;
   } else {
     final String lyr = s.lyr.toUpperCase();
-    if (lyr == 'SYNC' || lyr == 'PLAIN' || lyr == 'MANUAL') {
+    if (lyr == 'SYNC' || lyr == 'PLAIN' || lyr == 'MANUAL' || lyr == 'APPROX') {
       lyrics = AuditCell.ok;
     } else if (lyr == 'RETRY' || lyr == 'NONE') {
       lyrics = AuditCell.bad;

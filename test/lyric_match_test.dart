@@ -63,12 +63,14 @@ void main() {
     );
     final LyricChoice soloMal = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Diana Ross',
-        title: 'Thank You',
-        duration: 254,
-        synced: _lrc(<(int, String)>[(11, 'Thank You'), (219, 'Thank You')]),
-      )],
+      searched: [
+        _hit(
+          artist: 'Diana Ross',
+          title: 'Thank You',
+          duration: 254,
+          synced: _lrc(<(int, String)>[(11, 'Thank You'), (219, 'Thank You')]),
+        ),
+      ],
     );
     expect(soloMal.kind, LyricKind.none);
 
@@ -85,7 +87,10 @@ void main() {
           artist: 'Diana Ross',
           title: 'Upside Down',
           duration: 254,
-          synced: _lrc(<(int, String)>[(17, 'Upside Down'), (240, 'Upside Down')]),
+          synced: _lrc(<(int, String)>[
+            (17, 'Upside Down'),
+            (240, 'Upside Down'),
+          ]),
         ),
       ],
     );
@@ -104,12 +109,14 @@ void main() {
     final String forever = _stamp(30, 'Forever') + _stamp(263, 'Forever');
     final LyricChoice mal = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Samantha Fox',
-        title: 'Forever feat Samantha Fox',
-        duration: 263,
-        synced: forever,
-      )],
+      searched: [
+        _hit(
+          artist: 'Samantha Fox',
+          title: 'Forever feat Samantha Fox',
+          duration: 263,
+          synced: forever,
+        ),
+      ],
     );
     expect(mal.kind, LyricKind.none);
     expect(mal.body, isNot(contains('Forever')));
@@ -146,13 +153,15 @@ void main() {
     final String radio = _stamp(15, 'Call me') + _stamp(206, 'RADIO');
     final LyricChoice soloRadio = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Blondie',
-        title: 'Call Me',
-        duration: 208,
-        synced: radio,
-        plain: 'Call me on the line',
-      )],
+      searched: [
+        _hit(
+          artist: 'Blondie',
+          title: 'Call Me',
+          duration: 208,
+          synced: radio,
+          plain: 'Call me on the line',
+        ),
+      ],
     );
     expect(soloRadio.kind, isNot(LyricKind.synced));
     expect(soloRadio.fileText, isNot(contains('RADIO')));
@@ -161,12 +170,9 @@ void main() {
 
     final LyricChoice sinPlana = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Blondie',
-        title: 'Call Me',
-        duration: 208,
-        synced: radio,
-      )],
+      searched: [
+        _hit(artist: 'Blondie', title: 'Call Me', duration: 208, synced: radio),
+      ],
     );
     expect(sinPlana.kind, LyricKind.none);
   });
@@ -180,24 +186,28 @@ void main() {
     final String radio = _stamp(21, 'The heat') + _stamp(220, 'RADIO');
     final LyricChoice honesta = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Glenn Frey',
-        title: 'The Heat Is On',
-        duration: 220,
-        synced: radio,
-        plain: 'The heat is on',
-      )],
+      searched: [
+        _hit(
+          artist: 'Glenn Frey',
+          title: 'The Heat Is On',
+          duration: 220,
+          synced: radio,
+          plain: 'The heat is on',
+        ),
+      ],
     );
     expect(honesta.kind, LyricKind.none);
 
     final LyricChoice duracionMiente = chooseLrclibLyric(
       id,
-      searched: [_hit(
-        artist: 'Glenn Frey',
-        title: 'The Heat Is On',
-        duration: 363,
-        synced: radio,
-      )],
+      searched: [
+        _hit(
+          artist: 'Glenn Frey',
+          title: 'The Heat Is On',
+          duration: 363,
+          synced: radio,
+        ),
+      ],
     );
     expect(duracionMiente.kind, LyricKind.none);
     expect(duracionMiente.body, isNot(contains('RADIO')));
@@ -227,12 +237,14 @@ void main() {
     );
     final LyricChoice tomaHit = chooseLrclibLyric(
       toma,
-      searched: [_hit(
-        artist: 'a-ha',
-        title: 'Take On Me',
-        duration: 223,
-        synced: _stamp(34, 'Take on me') + _stamp(220, 'Take on me'),
-      )],
+      searched: [
+        _hit(
+          artist: 'a-ha',
+          title: 'Take On Me',
+          duration: 223,
+          synced: _stamp(34, 'Take on me') + _stamp(220, 'Take on me'),
+        ),
+      ],
     );
     expect(tomaHit.kind, LyricKind.synced);
     expect(tomaHit.body, contains('Take on me'));
@@ -303,10 +315,7 @@ void main() {
       ).kind,
       LyricKind.none,
     );
-    expect(
-      lrcEndsWithAudio(_stamp(30, 'a') + _stamp(263, 'b'), 226),
-      isFalse,
-    );
+    expect(lrcEndsWithAudio(_stamp(30, 'a') + _stamp(263, 'b'), 226), isFalse);
   });
 
   test('un .lrc que ya existe no se vuelve a bajar', () {
@@ -356,10 +365,7 @@ void main() {
       id3Title: 'Cumbia',
       durationSec: 180,
     );
-    expect(
-      lyricArtistsMatch('Medardo', 'Don Medardo y Sus Players'),
-      isTrue,
-    );
+    expect(lyricArtistsMatch('Medardo', 'Don Medardo y Sus Players'), isTrue);
     final LyricChoice cumbia = chooseLrclibLyric(
       medardo,
       searched: [
@@ -397,7 +403,10 @@ void main() {
           artist: 'Diana Ross',
           title: 'Upside Down',
           duration: 254,
-          synced: _lrc(<(int, String)>[(17, 'Upside Down'), (240, 'Upside Down')]),
+          synced: _lrc(<(int, String)>[
+            (17, 'Upside Down'),
+            (240, 'Upside Down'),
+          ]),
         ),
       ],
     );
@@ -521,11 +530,7 @@ void main() {
     );
     expect(ok.fits, isTrue);
     expect(
-      decideLabLyric(
-        verdict: ok,
-        serverDown: false,
-        hasBetter: true,
-      ),
+      decideLabLyric(verdict: ok, serverDown: false, hasBetter: true),
       LabLyricAction.keep,
     );
 
@@ -539,19 +544,11 @@ void main() {
     );
     expect(copied.gap, LyricGap.duplicate);
     expect(
-      decideLabLyric(
-        verdict: copied,
-        serverDown: false,
-        hasBetter: true,
-      ),
+      decideLabLyric(verdict: copied, serverDown: false, hasBetter: true),
       LabLyricAction.replace,
     );
     expect(
-      decideLabLyric(
-        verdict: copied,
-        serverDown: true,
-        hasBetter: false,
-      ),
+      decideLabLyric(verdict: copied, serverDown: true, hasBetter: false),
       LabLyricAction.retry,
     );
     expect(
@@ -583,7 +580,10 @@ void main() {
     expect(lyricEditionPenalty('Hello (Karaoke)', 'Hello (Karaoke)'), 0);
     expect(lyricEditionPenalty('Hello (Live)', 'Hello (En Vivo)'), 0);
     expect(lyricEditionPenalty('Hello (Acústico)', 'Hello (Acoustic)'), 0);
-    expect(lyricEditionPenalty('Hello (Live)', 'Hello (Karaoke)'), kLyricEditionPenalty);
+    expect(
+      lyricEditionPenalty('Hello (Live)', 'Hello (Karaoke)'),
+      kLyricEditionPenalty,
+    );
     for (final String bad in <String>[
       'Hello - (Karaoke)',
       'Hello (Instrumental)',
@@ -595,11 +595,19 @@ void main() {
       'Hello (Live)',
       'Hello (Acústico)',
     ]) {
-      expect(lyricEditionPenalty(audio, bad), kLyricEditionPenalty, reason: bad);
+      expect(
+        lyricEditionPenalty(audio, bad),
+        kLyricEditionPenalty,
+        reason: bad,
+      );
     }
 
     final List<LyricCandidate> ranked = rankLyricCandidates(
-      id: const LyricIdentity(artist: 'Lionel Richie', title: 'Hello', durationSec: 242),
+      id: const LyricIdentity(
+        artist: 'Lionel Richie',
+        title: 'Hello',
+        durationSec: 242,
+      ),
       voiceOnsetMs: 18000,
       rows: <Map<String, dynamic>>[
         _hit(
@@ -655,7 +663,11 @@ void main() {
     expect(porDuracion.first.deltaSec, lessThan(porDuracion[1].deltaSec));
 
     final List<LyricCandidate> porVoz = rankLyricCandidates(
-      id: const LyricIdentity(artist: 'a-ha', title: 'Take On Me', durationSec: 225),
+      id: const LyricIdentity(
+        artist: 'a-ha',
+        title: 'Take On Me',
+        durationSec: 225,
+      ),
       voiceOnsetMs: 12000,
       rows: <Map<String, dynamic>>[
         _hit(
@@ -679,7 +691,11 @@ void main() {
     expect((porVoz.first.firstStampMs! - 12000).abs(), lessThan(500));
 
     final List<LyricCandidate> porGet = rankLyricCandidates(
-      id: const LyricIdentity(artist: 'a-ha', title: 'Take On Me', durationSec: 225),
+      id: const LyricIdentity(
+        artist: 'a-ha',
+        title: 'Take On Me',
+        durationSec: 225,
+      ),
       rows: <Map<String, dynamic>>[
         _hit(
           artist: 'a-ha',
@@ -708,51 +724,62 @@ void main() {
     expect(lyricVoiceOnsetMs(_noise(8000), 8000), isNull);
   });
 
-  test('entre varias de ±3 s manda la primera línea, no la duración exacta', () {
-    const LyricIdentity hello = LyricIdentity(
-      artist: 'Lionel Richie',
-      title: 'Hello',
-      durationSec: 242,
-    );
-    final List<Map<String, dynamic>> rows = <Map<String, dynamic>>[
-      _hit(
+  test(
+    'entre varias de ±3 s manda la primera línea, no la duración exacta',
+    () {
+      const LyricIdentity hello = LyricIdentity(
         artist: 'Lionel Richie',
         title: 'Hello',
-        duration: 242,
-        synced: _lrc(<(int, String)>[(15, 'get'), (230, 'fin')]),
-        id: 20,
-        fromGet: true,
-      ),
-      _hit(
-        artist: 'Lionel Richie',
-        title: 'Hello',
-        duration: 240,
-        synced: _lrc(<(int, String)>[(18, 'mejor'), (228, 'fin')]),
-        id: 21,
-      ),
-    ];
-    final List<LyricCandidate> sinMedir = rankLyricCandidates(id: hello, rows: rows);
-    expect(sinMedir.first.fromGet, isTrue);
-    expect(sinMedir.first.durationSec, 242);
+        durationSec: 242,
+      );
+      final List<Map<String, dynamic>> rows = <Map<String, dynamic>>[
+        _hit(
+          artist: 'Lionel Richie',
+          title: 'Hello',
+          duration: 242,
+          synced: _lrc(<(int, String)>[(15, 'get'), (230, 'fin')]),
+          id: 20,
+          fromGet: true,
+        ),
+        _hit(
+          artist: 'Lionel Richie',
+          title: 'Hello',
+          duration: 240,
+          synced: _lrc(<(int, String)>[(18, 'mejor'), (228, 'fin')]),
+          id: 21,
+        ),
+      ];
+      final List<LyricCandidate> sinMedir = rankLyricCandidates(
+        id: hello,
+        rows: rows,
+      );
+      expect(sinMedir.first.fromGet, isTrue);
+      expect(sinMedir.first.durationSec, 242);
 
-    final List<LyricCandidate> medidas = rankLyricCandidates(
-      id: hello,
-      voiceOnsetMs: 18000,
-      rows: rows,
-    );
-    expect(medidas.first.lrclibId, 21);
-    expect(medidas.first.deltaSec, lessThanOrEqualTo(3));
-    expect(
-      (medidas.first.firstStampMs! - 18000).abs(),
-      lessThan((medidas[1].firstStampMs! - 18000).abs()),
-    );
-  });
+      final List<LyricCandidate> medidas = rankLyricCandidates(
+        id: hello,
+        voiceOnsetMs: 18000,
+        rows: rows,
+      );
+      expect(medidas.first.lrclibId, 21);
+      expect(medidas.first.deltaSec, lessThanOrEqualTo(3));
+      expect(
+        (medidas.first.firstStampMs! - 18000).abs(),
+        lessThan((medidas[1].firstStampMs! - 18000).abs()),
+      );
+    },
+  );
 
   test('Deshacer borra el .lrc si antes no había', () async {
-    final Directory dir = await Directory.systemTemp.createTemp('gmx_lrc_nuevo');
+    final Directory dir = await Directory.systemTemp.createTemp(
+      'gmx_lrc_nuevo',
+    );
     final File lrc = File('${dir.path}${Platform.pathSeparator}nuevo.lrc');
     await writeLrcKeepingBak(lrc.path, 'nueva');
-    expect(File('${lrc.path}.bak').readAsStringSync().trim(), kLrcNoOriginalMark);
+    expect(
+      File('${lrc.path}.bak').readAsStringSync().trim(),
+      kLrcNoOriginalMark,
+    );
     expect(lrc.readAsStringSync(), 'nueva');
     expect(await undoAppliedLrc(lrc.path), isTrue);
     expect(lrc.existsSync(), isFalse);

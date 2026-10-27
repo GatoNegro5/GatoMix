@@ -496,8 +496,10 @@ class _YoutubeSearchAndDownloadWorkspaceState
               [YoutubeApiClient.android],
               [YoutubeApiClient.ios],
             ];
-            final fresh = await _yt.videos.streamsClient.getManifest(videoId,
-                ytClients: clients[(_ytRefresh++) % clients.length]);
+            final fresh = await _yt.videos.streamsClient.getManifest(
+              videoId,
+              ytClients: clients[(_ytRefresh++) % clients.length],
+            );
             for (final s in fresh.audioOnly) {
               if (s.tag == best.tag) return s.url;
             }
@@ -505,10 +507,12 @@ class _YoutubeSearchAndDownloadWorkspaceState
           },
           onProgress: (done, t) {
             if (!mounted) return;
-            setState(() => _statusText =
-                "Descargando audio... ${(done * 100 / t).floor()}% "
-                "(${(done / 1048576).toStringAsFixed(1)} de "
-                "${(t / 1048576).toStringAsFixed(1)} MB)");
+            setState(
+              () => _statusText =
+                  "Descargando audio... ${(done * 100 / t).floor()}% "
+                  "(${(done / 1048576).toStringAsFixed(1)} de "
+                  "${(t / 1048576).toStringAsFixed(1)} MB)",
+            );
           },
         );
         if (!File(tempRawPath).existsSync() ||
@@ -643,12 +647,11 @@ class _YoutubeSearchAndDownloadWorkspaceState
     } catch (e) {
       debugPrint("🔴 Error en Pipeline Híbrido: $e");
       setState(
-        () => _statusText =
-            ytIsRateLimit(e)
-                ? "🟠 $ytRateLimitMsg"
-                : e is YtDownloadStalled
-                    ? "🟠 ${e.toString()}"
-                    : "🔴 ERROR FATAL: ${e.toString().replaceAll('Exception: ', '')}",
+        () => _statusText = ytIsRateLimit(e)
+            ? "🟠 $ytRateLimitMsg"
+            : e is YtDownloadStalled
+            ? "🟠 ${e.toString()}"
+            : "🔴 ERROR FATAL: ${e.toString().replaceAll('Exception: ', '')}",
       );
     } finally {
       setState(() => _isProcessing = false);
@@ -789,6 +792,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
           marks.lyr == 'SYNC' ||
           marks.lyr == 'PLAIN' ||
           marks.lyr == 'MANUAL' ||
+          marks.lyr == 'APPROX' ||
           marks.lyr == 'NA' ||
           marks.lyr == 'NONE';
       if (marks.trimMs >= 0 && marks.lufsDone && marks.bpmOk && lyricsOk) {

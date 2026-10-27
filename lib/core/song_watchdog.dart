@@ -8,5 +8,4 @@ bool headlessStalled(
   DateTime lastProgress,
   DateTime now, {
   Duration limit = headlessStallLimit,
-}) =>
-    now.difference(lastProgress) >= limit;
+}) => now.difference(lastProgress) >= limit;

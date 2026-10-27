@@ -43,7 +43,8 @@ void main() {
     required bool compact,
     String? nextPath,
   }) async {
-    _nextPath = nextPath ??
+    _nextPath =
+        nextPath ??
         r'C:\Music\ReGenial\80s Ingles\Céline Dion - The Power Of Love.mp3';
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -51,16 +52,18 @@ void main() {
       ProviderScope(
         overrides: [liveDjProvider.overrideWith(_FakeLiveDj.new)],
         child: MaterialApp(
-          home: Scaffold(
-            body: LiveDjPlayerPanel(compactOverride: compact),
-          ),
+          home: Scaffold(body: LiveDjPlayerPanel(compactOverride: compact)),
         ),
       ),
     );
     await tester.pump();
   }
 
-  void expectStripVisible(WidgetTester tester, Size size, {bool aboveMixBar = false}) {
+  void expectStripVisible(
+    WidgetTester tester,
+    Size size, {
+    bool aboveMixBar = false,
+  }) {
     expect(tester.takeException(), isNull);
     final Finder strip = find.byKey(const Key('live-dj-next-strip'));
     expect(strip, findsOneWidget);
@@ -116,9 +119,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('teléfono horizontal: la franja no se recorta', (
-    tester,
-  ) async {
+  testWidgets('teléfono horizontal: la franja no se recorta', (tester) async {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     const Size size = Size(844, 390);

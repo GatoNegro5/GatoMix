@@ -83,7 +83,8 @@ Future<void> ytChunkedDownload({
     for (var attempt = 0; attempt <= retries; attempt++) {
       if (clock.elapsed > deadline) {
         throw YtDownloadStalled(
-            'YouTube no entrega el audio en móvil (tiempo agotado). Prueba otro resultado.');
+          'YouTube no entrega el audio en móvil (tiempo agotado). Prueba otro resultado.',
+        );
       }
       try {
         final resp = await c
@@ -93,7 +94,8 @@ Future<void> ytChunkedDownload({
           await resp.stream.drain<void>();
           if (refreshUrl == null || refreshes >= maxRefreshes) {
             throw YtDownloadStalled(
-                'YouTube rechazó la descarga en móvil (HTTP ${resp.statusCode}). Reintenta en unos minutos.');
+              'YouTube rechazó la descarga en móvil (HTTP ${resp.statusCode}). Reintenta en unos minutos.',
+            );
           }
           final mine = current;
           // Un solo refresco compartido entre conexiones paralelas.
@@ -120,7 +122,8 @@ Future<void> ytChunkedDownload({
         final bytes = b.takeBytes();
         if (bytes.length != to - from + 1) {
           throw HttpException(
-              'trozo incompleto ${bytes.length}/${to - from + 1}');
+            'trozo incompleto ${bytes.length}/${to - from + 1}',
+          );
         }
         return bytes;
       } on YtDownloadStalled {
@@ -146,8 +149,12 @@ Future<void> ytChunkedDownload({
   }
 
   try {
-    await Future.wait(List.generate(
-        parallel < ranges.length ? parallel : ranges.length, (_) => worker()));
+    await Future.wait(
+      List.generate(
+        parallel < ranges.length ? parallel : ranges.length,
+        (_) => worker(),
+      ),
+    );
     final sink = File(outPath).openWrite();
     for (final p in parts) {
       sink.add(p!);
@@ -157,7 +164,6 @@ Future<void> ytChunkedDownload({
     if (client == null) c.close();
   }
 }
-
 
 const ytRateLimitMsg =
     'YouTube limitó temporalmente las descargas desde esta red. Reintenta en unos minutos.';

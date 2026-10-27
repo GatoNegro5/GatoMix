@@ -19,6 +19,7 @@ import '../core/audio/dj_audio_handler.dart';
 
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
+import '../core/lyric_approx.dart';
 import 'db_provider.dart';
 import 'nlp_provider.dart';
 import 'equalizer_provider.dart';
@@ -1749,6 +1750,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       _lyricPrime[audioPath] = parsed;
     }
     if (state.currentTrackPath != audioPath) return;
+    _refreshApproxFlag(audioPath);
     if (parsed.isNotEmpty) {
       _shownLyricsPath = audioPath;
       state = state.copyWith(lyrics: parsed, activeLyricIndex: -1);
@@ -1764,6 +1766,20 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await _recalculateMixWindow();
     } catch (_) {}
+  }
+
+  void _refreshApproxFlag(String audioPath) {
+    var approx = false;
+    try {
+      final File f = File(
+        audioPath.replaceAll(
+          RegExp(r'\.mp3$|\.webm$', caseSensitive: false),
+          '.lrc',
+        ),
+      );
+      if (f.existsSync()) approx = lrcIsApprox(f.readAsStringSync());
+    } catch (_) {}
+    ref.read(automixLyricApproxProvider.notifier).state = approx;
   }
 
   Future<void> _fetchLyricsAsync(String audioPath, String lrcPath) async {
@@ -2173,6 +2189,17 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     await file.writeAsString(buffer.toString());
     _lyricPrime.remove(audioPath);
+    if (ref.read(automixLyricApproxProvider)) {
+      // El ajuste del usuario convierte la letra aproximada en MANUAL.
+      ref.read(automixLyricApproxProvider.notifier).state = false;
+      try {
+        await rust_dsp.setGmxMark(
+          inputPath: audioPath,
+          key: 'GMX_LYR',
+          value: 'MANUAL',
+        );
+      } catch (_) {}
+    }
   }
 
   Future<void> shiftLyrics(int offsetMs) async {
@@ -2649,6 +2676,9 @@ class WasapiRecordNotifier extends Notifier<bool> {
 }
 
 // 🛡️ DECLARACIÓN DE LOS PROVIDERS SEPARADOS:
+/// La letra en pantalla es aproximada ([gmx_approx] / GMX_LYR=APPROX).
+final automixLyricApproxProvider = StateProvider<bool>((ref) => false);
+
 final automixProvider = NotifierProvider<AutomixNotifier, AutomixState>(
   AutomixNotifier.new,
 );

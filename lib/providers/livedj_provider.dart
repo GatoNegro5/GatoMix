@@ -484,12 +484,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final List<String> hist = ((all['history'] as List?) ?? const [])
         .map((e) => e.toString())
         .toList();
-    final picked = pickFreshShuffle(
-      paths,
-      _extractBpm,
-      hist.toSet(),
-      Random(),
-    );
+    final picked = pickFreshShuffle(paths, _extractBpm, hist.toSet(), Random());
     final queued = <File>[
       for (final g in picked.groups)
         for (final p in g) File(p),
@@ -501,7 +496,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     all['history'] = over > 0 ? hist.sublist(over) : hist;
     all['algo'] = 4;
     all['lastSeed'] = picked.seed;
-    all.remove('lists'); // bancos fijos de la versión anterior (se repetían cada 10)
+    all.remove(
+      'lists',
+    ); // bancos fijos de la versión anterior (se repetían cada 10)
     _writeLiveShuffleBankFile(all);
 
     state = state.copyWith(
@@ -559,12 +556,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final data = SessionStore.readJson(_resolveSessionFile().path);
       if (data is! Map) return;
 
-      final queuePaths =
-          ((data['queue'] as List?) ?? const []).map((e) => e.toString()).toList();
-      // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-      final queueFiles = resolveSessionPaths(queuePaths)
-          .map((p) => File(p))
+      final queuePaths = ((data['queue'] as List?) ?? const [])
+          .map((e) => e.toString())
           .toList();
+      // Pistas renombradas por Masterizar se reencuentran en su carpeta.
+      final queueFiles = resolveSessionPaths(
+        queuePaths,
+      ).map((p) => File(p)).toList();
       String? currentTrackPath = data['currentTrackPath'] as String?;
       if (currentTrackPath != null) {
         final hit = resolveSessionPaths([currentTrackPath]);

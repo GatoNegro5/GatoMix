@@ -132,7 +132,10 @@ void main() {
     expect(MasterCool.thermalIsHigh(platform: 'ios', status: 2), isTrue);
     expect(MasterCool.thermalIsHigh(platform: 'macos', status: 3), isTrue);
     expect(MasterCool.thermalIsHigh(platform: 'windows', status: 5), isFalse);
-    expect(MasterCool.thermalIsHigh(platform: 'android', status: null), isFalse);
+    expect(
+      MasterCool.thermalIsHigh(platform: 'android', status: null),
+      isFalse,
+    );
     expect(MasterCool.headroomIsHigh(0.7), isFalse);
     expect(MasterCool.headroomIsHigh(0.71), isTrue);
     expect(MasterCool.headroomIsHigh(double.nan), isFalse);
@@ -170,17 +173,10 @@ void main() {
       isFalse,
     );
     expect(
-      MasterCool.shouldExtendPause(
-        platform: 'ios',
-        status: 2,
-        headroom: null,
-      ),
+      MasterCool.shouldExtendPause(platform: 'ios', status: 2, headroom: null),
       isTrue,
     );
-    expect(
-      MasterCool.thermalLabel(platform: 'windows'),
-      'n/a',
-    );
+    expect(MasterCool.thermalLabel(platform: 'windows'), 'n/a');
     expect(
       MasterCool.thermalLabel(platform: 'android', status: 3, headroom: 0.82),
       'status=severe headroom=0.82',

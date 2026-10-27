@@ -10,6 +10,7 @@ import '../core/lyric_ai_align.dart';
 import '../core/lab_quarantine.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
+import '../core/lyric_approx.dart';
 import '../core/lyric_timing_check.dart';
 import '../providers/db_provider.dart';
 import '../providers/metadata_provider.dart';
@@ -75,7 +76,10 @@ class MasterTrack {
     final int durMs = (await rust_dsp.getAudioDurationMs(
       inputPath: current,
     )).toInt();
-    final bool mega = lyricLooksMegamix(current.replaceAll(r"\\", "/").split("/").last, durMs);
+    final bool mega = lyricLooksMegamix(
+      current.replaceAll(r"\\", "/").split("/").last,
+      durMs,
+    );
     await _mark(current, 'GMX_NAME_OK', '1');
     await _mark(current, 'GMX_TYPE', mega ? 'MEGAMIX' : 'SONG');
     await _mark(current, 'GMX_BACKUP', '1');
@@ -103,11 +107,21 @@ class MasterTrack {
         LyricStatus.kept => null,
         LyricStatus.doubt => null,
       };
-      if (lyric != LyricStatus.doubt && lyrMark != null) {
+      if ((lyrMark == 'NONE' || lyrMark == 'RETRY') &&
+          await worker.saveApproxLyric(current, _lrcPath(current))) {
+        detail = worker.lastDetail;
+        await _mark(current, 'GMX_LYR', kLyrApprox);
+      } else if (lyric != LyricStatus.doubt && lyrMark != null) {
         await _mark(current, 'GMX_LYR', lyrMark);
       } else if (lyric != LyricStatus.doubt) {
         final marks = await rust_dsp.readGmxMarks(inputPath: current);
-        if (marks.lyr.isEmpty) {
+        final File cur = File(_lrcPath(current));
+        if (marks.lyr == kLyrApprox &&
+            cur.existsSync() &&
+            !lrcIsApprox(await cur.readAsString())) {
+          // El usuario ajustó la letra aproximada: se respeta.
+          await _mark(current, 'GMX_LYR', 'MANUAL');
+        } else if (marks.lyr.isEmpty) {
           final String lrcPath = _lrcPath(current);
           final bool manual =
               File(lrcPath).existsSync() && !_lrcIsAuto(lrcPath);
@@ -210,6 +224,7 @@ class MasterTrack {
         after.lyr == 'SYNC' ||
         after.lyr == 'PLAIN' ||
         after.lyr == 'MANUAL' ||
+        after.lyr == kLyrApprox ||
         after.lyr == 'NA' ||
         after.lyr == 'NONE';
     if (after.trimMs >= 0 && after.lufsDone && after.bpmOk && lyricsOk) {
@@ -244,7 +259,7 @@ class MasterTrack {
     final String? skip = lyricCheckSkipReason(
       mega: false,
       lrcExists: exists,
-      plain: exists && lrcIsPlain(text),
+      plain: exists && (lrcIsPlain(text) || lrcIsApprox(text)),
     );
     if (skip != null) {
       // Auditable: sin .lrc (NONE / RETRY) o letra plana no se revisan.

@@ -3,7 +3,9 @@ import 'package:gatomix/core/track_name_clean.dart';
 
 void main() {
   test('quita prefijo BPM, Camelot, sufijo y basura de YouTube', () {
-    final CleanTrackName a = cleanTrackFileName('85 Bpm - Artista - Titulo.mp3');
+    final CleanTrackName a = cleanTrackFileName(
+      '85 Bpm - Artista - Titulo.mp3',
+    );
     expect(a.stem, 'Artista - Titulo');
     expect(a.bpmHint, 85);
 
@@ -44,7 +46,9 @@ void main() {
 
   test('quita el sello o el canal entre paréntesis, en cualquier caja', () {
     expect(
-      cleanTrackFileName('Los Mirlos - La Danza de los Mirlos (Infopesa).mp3').stem,
+      cleanTrackFileName(
+        'Los Mirlos - La Danza de los Mirlos (Infopesa).mp3',
+      ).stem,
       'Los Mirlos - La Danza de los Mirlos',
     );
     expect(

@@ -20,7 +20,9 @@ void main() {
     final otherBak = f('LAB/Otro.lrc.bak', 'x');
     final origin = f('Bala/Duncan.lrc');
     final r = await moveLabLrcToOrigin(
-        labLrcPath: lab.path, originLrcPath: origin.path);
+      labLrcPath: lab.path,
+      originLrcPath: origin.path,
+    );
     expect(r, LabLrcRestore.moved);
     expect(origin.readAsStringSync(), '[00:01.00]hola');
     expect(lab.existsSync(), isFalse);
@@ -33,7 +35,9 @@ void main() {
     final bak = f('LAB/D.lrc.bak', 'b');
     final origin = f('Bala/D.lrc', 'original');
     final r = await moveLabLrcToOrigin(
-        labLrcPath: lab.path, originLrcPath: origin.path);
+      labLrcPath: lab.path,
+      originLrcPath: origin.path,
+    );
     expect(r, LabLrcRestore.keptOrigin);
     expect(origin.readAsStringSync(), 'original');
     expect(lab.existsSync(), isTrue);
@@ -43,8 +47,9 @@ void main() {
   test('sin .lrc en LAB: borra .bak huérfano', () async {
     final bak = f('LAB/E.lrc.bak', 'b');
     final r = await moveLabLrcToOrigin(
-        labLrcPath: '${tmp.path}/LAB/E.lrc',
-        originLrcPath: '${tmp.path}/Bala/E.lrc');
+      labLrcPath: '${tmp.path}/LAB/E.lrc',
+      originLrcPath: '${tmp.path}/Bala/E.lrc',
+    );
     expect(r, LabLrcRestore.none);
     expect(bak.existsSync(), isFalse);
   });

@@ -9,6 +9,7 @@ import '../core/brand_paths.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
+import '../core/lyric_approx.dart';
 import '../services/id3_title_artist.dart';
 import 'db_provider.dart'; // 🛠️ Requerido para inyectar Cues a la BD
 
@@ -610,6 +611,64 @@ class NlpWorker {
       return lyricVoiceOnsetMs(samples, 8000);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Letra aproximada (1.0.20+37): sin letra ±2 s, la de estudio más
+  /// cercana con el título limpio, alineada a la voz y marcada [gmx_approx].
+  /// No pisa un `.lrc` existente. True si la escribió.
+  Future<bool> saveApproxLyric(String audioPath, String lrcPath) async {
+    if (File(lrcPath).existsSync()) return false;
+    try {
+      final id3 = await loadId3TitleArtist(audioPath);
+      final int localSec = await _getLocalDurationSec(audioPath);
+      final LyricIdentity id = lyricIdentity(
+        path: audioPath,
+        id3Artist: id3.artist,
+        id3Title: id3.title,
+        id3Album: id3.album,
+        durationSec: localSec,
+      );
+      final String stem = File(
+        audioPath,
+      ).uri.pathSegments.last.replaceAll(RegExp(r'\.[A-Za-z0-9]+$'), '');
+      final q = approxQuery(artist: id.artist, title: id.title, fileStem: stem);
+      if (q.title.isEmpty || localSec <= 0) return false;
+      final List<Map<String, dynamic>> pool = <Map<String, dynamic>>[];
+      for (final Uri u in <Uri>[
+        lrclibSearchUri(
+          LyricIdentity(
+            artist: q.artist,
+            title: q.title,
+            durationSec: localSec,
+          ),
+        ),
+        lrclibQueryUri('${q.artist} ${q.title}'),
+      ]) {
+        final found = await _lrclibSearch(u.toString());
+        for (final dynamic raw in found.items) {
+          if (raw is Map) pool.add(Map<String, dynamic>.from(raw));
+        }
+      }
+      final Map<String, dynamic>? row = pickApproxRow(
+        pool,
+        artist: q.artist,
+        title: q.title,
+        durationSec: localSec,
+      );
+      if (row == null) return false;
+      final int? onset = await _probeVoiceOnsetMs(audioPath);
+      if (File(lrcPath).existsSync()) return false;
+      await File(lrcPath).writeAsString(
+        buildApproxLrc('${row['syncedLyrics']}', voiceOnsetMs: onset),
+      );
+      await _markAuto(lrcPath);
+      lastDetail =
+          'Letra aproximada: ${row['artistName']} – ${row['trackName']} (${row['duration']} s)';
+      return true;
+    } catch (e) {
+      debugPrint('🟡 [NLP] letra aproximada: $e');
+      return false;
     }
   }
 

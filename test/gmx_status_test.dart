@@ -1,7 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/gmx_status.dart';
 
-SongAudit _row(GmxSnapshot snap) => auditSong('/music/Tema.mp3', 'Tema.mp3', snap);
+SongAudit _row(GmxSnapshot snap) =>
+    auditSong('/music/Tema.mp3', 'Tema.mp3', snap);
 
 void main() {
   test('un megamix no cuenta la letra ni el _K', () {
@@ -66,9 +67,7 @@ void main() {
   });
 
   test('el motivo de paquetes rotos queda en el informe', () {
-    final SongAudit row = _row(
-      const GmxSnapshot(reason: 'decode_errors=4'),
-    );
+    final SongAudit row = _row(const GmxSnapshot(reason: 'decode_errors=4'));
     expect(row.reason, 'decode_errors=4');
     expect(row.csvLine(), endsWith(';decode_errors=4'));
   });
