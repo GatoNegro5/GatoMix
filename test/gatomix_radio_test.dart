@@ -4,15 +4,24 @@ import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/gatomix_radio.dart';
+import 'package:gatomix/core/gatomix_store.dart';
+import 'package:gatomix/core/livedj_order.dart';
+import 'package:gatomix/core/queue_bpm.dart';
+import 'package:gatomix/services/track_tags.dart';
 
 double bpmOf(String p) {
   final RegExpMatch? m = RegExp(r'(\d+)bpm').firstMatch(p);
   return m == null ? 0 : double.parse(m.group(1)!);
 }
 
-List<String> poolOf(String dir, int n) => <String>[
-  for (var i = 0; i < n; i++) '$dir/t$i ${100 + i}bpm.mp3',
-];
+String artistOf(String p) {
+  var name = p.replaceAll('\\', '/').split('/').last;
+  final int dot = name.lastIndexOf('.');
+  if (dot > 0) name = name.substring(0, dot);
+  final int i = name.indexOf(' - ');
+  if (i <= 0) return '';
+  return name.substring(0, i).toLowerCase().trim();
+}
 
 void main() {
   test('apagar la radio devuelve la misma cola, orden y posición', () {
@@ -30,143 +39,166 @@ void main() {
     expect(back.queue.contains('/radio/otra.mp3'), isFalse);
   });
 
-  test('cambiar de opción conserva la lista y la posición de cada una', () {
-    final List<String> bailables = poolOf('/b', 8);
-    final List<String> ochentas = poolOf('/o', 8);
-    final RadioSync baila = syncRadioPlan(
-      saved: null,
-      pool: bailables,
-      bpmOf: bpmOf,
-      rng: Random(3),
+  test('bailables junta salsa, cumbia y merengue en un solo fondo', () {
+    const Map<String, List<String>> folders = <String, List<String>>{
+      '/Musica/Salsa': <String>['/Musica/Salsa/a.mp3', '/Musica/Salsa/b.mp3'],
+      '/Musica/Cumbias': <String>['/Musica/Cumbias/c.mp3'],
+      '/Musica/Merengues': <String>['/Musica/Merengues/d.mp3'],
+      '/Musica/Rock': <String>['/Musica/Rock/e.mp3'],
+    };
+    const Map<String, String> genre = <String, String>{
+      '/Musica/Salsa': 'bailable',
+      '/Musica/Cumbias': 'bailable',
+      '/Musica/Merengues': 'bailable',
+      '/Musica/Rock': 'rock',
+    };
+    final List<String> bailables = radioPool(
+      byFolder: folders,
+      folderGenre: genre,
+      genres: <String>{'bailable'},
     );
-    final RadioSync ochenta = syncRadioPlan(
-      saved: null,
-      pool: ochentas,
-      bpmOf: bpmOf,
-      rng: Random(4),
+    expect(bailables, <String>[
+      '/Musica/Salsa/a.mp3',
+      '/Musica/Salsa/b.mp3',
+      '/Musica/Cumbias/c.mp3',
+      '/Musica/Merengues/d.mp3',
+    ]);
+    final List<String> todo = radioPool(
+      byFolder: folders,
+      folderGenre: genre,
+      genres: <String>{},
     );
-    final RadioPlan bailaEn2 = baila.plan.copy(position: 2);
-    final RadioMemory mem = RadioMemory.empty
-        .putPlan('bailable', bailaEn2)
-        .putPlan('ochenteras', ochenta.plan);
-    final RadioSync todo = syncRadioPlan(
-      saved: mem.planOf('todo'),
-      pool: <String>[...bailables, ...ochentas],
-      bpmOf: bpmOf,
-      rng: Random(5),
-    );
-    final RadioMemory withTodo = mem.putPlan('todo', todo.plan);
-    final RadioSync otraVez = syncRadioPlan(
-      saved: withTodo.planOf('ochenteras'),
-      pool: ochentas,
-      bpmOf: bpmOf,
-      rng: Random(99),
-    );
-    expect(otraVez.rebuilt, isFalse);
-    expect(sameRadioOrder(otraVez.plan.order, ochenta.plan.order), isTrue);
-    expect(otraVez.plan.position, ochenta.plan.position);
-    expect(
-      sameRadioOrder(withTodo.planOf('bailable')!.order, bailaEn2.order),
-      isTrue,
-    );
-    expect(withTodo.planOf('bailable')!.position, 2);
-    expect(sameRadioOrder(withTodo.planOf('todo')!.order, todo.plan.order), isTrue);
+    expect(todo.length, 5);
+    expect(todo.contains('/Musica/Rock/e.mp3'), isTrue);
   });
 
-  test('encender y apagar no rearma la lista', () {
-    final List<String> pool = poolOf('/m', 8);
-    final RadioSync built = syncRadioPlan(
-      saved: null,
+  test('la siguiente respeta BPM, Camelot, artista, explorador e historial', () {
+    const String now = '/now/sonando 100bpm 8A.mp3';
+    const String buena = '/bail/una 100bpm 8A.mp3';
+    const String otra = '/bail/dos 102bpm 9A.mp3';
+    const String tercera = '/bail/tres 103bpm 8B.mp3';
+    const String usada = '/bail/usada 101bpm 8A.mp3';
+    const String lejos = '/bail/lejos 104bpm 3A.mp3';
+    final List<String> pool = <String>[buena, otra, tercera, usada, lejos];
+    final RadioChoice pick = chooseRadioTrack(
       pool: pool,
+      memory: RadioMemory(
+        pairs: <String>[shufflePairKey(now, usada)],
+        previousBpm: 100,
+      ),
       bpmOf: bpmOf,
+      keyOf: camelotFromPath,
+      artistOf: artistOf,
+      anchorPath: now,
+      anchorBpm: 100,
+      playing: now,
       rng: Random(1),
     );
-    final RadioPlan mid = built.plan.copy(position: 3);
-    final RadioSync on = syncRadioPlan(
-      saved: mid,
-      pool: pool,
-      bpmOf: bpmOf,
-      rng: Random(8),
-    );
-    final RadioSync off = syncRadioPlan(
-      saved: on.plan,
-      pool: pool,
-      bpmOf: bpmOf,
-      rng: Random(11),
-    );
-    expect(on.rebuilt, isFalse);
-    expect(off.rebuilt, isFalse);
-    expect(sameRadioOrder(off.plan.order, built.plan.order), isTrue);
-    expect(off.plan.position, 3);
-  });
+    expect(<String>[buena, otra, tercera].contains(pick.path), isTrue);
+    expect(pick.path == usada, isFalse);
+    expect(pick.path == lejos, isFalse);
 
-  test('una vuelta cubre el fondo una vez y la siguiente es distinta', () {
-    final List<String> pool = poolOf('/v', 10);
-    final RadioSync first = syncRadioPlan(
-      saved: null,
-      pool: pool,
+    const String mismo = '/bail/Salsa Band - tema 102bpm 8A.mp3';
+    const String cambio = '/bail/Otra Gente - tema 103bpm 8A.mp3';
+    final RadioChoice artista = chooseRadioTrack(
+      pool: <String>[mismo, cambio],
+      memory: const RadioMemory(lastArtist: 'salsa band'),
       bpmOf: bpmOf,
+      keyOf: camelotFromPath,
+      artistOf: artistOf,
+      anchorPath: now,
+      anchorBpm: 100,
+      playing: now,
       rng: Random(2),
     );
-    expect(first.plan.order.toSet().length, pool.length);
-    expect(first.plan.order.length, pool.length);
-    for (final String p in pool) {
-      expect(first.plan.order.any((String q) => q == p), isTrue);
-    }
-    final RadioPlan done = first.plan.copy(position: first.plan.order.length);
-    final RadioSync second = syncRadioPlan(
-      saved: done,
-      pool: pool,
+    expect(artista.path, cambio);
+
+    final RadioChoice explorador = chooseRadioTrack(
+      pool: <String>[
+        '/music/salsa/abierta 102bpm 8A.mp3',
+        '/music/cumbia/libre 103bpm 8A.mp3',
+      ],
+      memory: RadioMemory.empty,
       bpmOf: bpmOf,
-      rng: Random(6),
+      keyOf: camelotFromPath,
+      artistOf: artistOf,
+      anchorPath: now,
+      anchorBpm: 100,
+      explorerPrefix: '/music/salsa/',
+      playing: now,
+      rng: Random(3),
     );
-    expect(second.rebuilt, isTrue);
-    expect(sameRadioOrder(second.plan.order, first.plan.order), isFalse);
-    expect(second.plan.order.first == first.plan.order.first, isFalse);
-    expect(second.plan.position, 0);
-    expect(second.plan.previousPairs, isNotEmpty);
-    expect(second.plan.order.toSet().length, pool.length);
+    expect(explorador.path, '/music/cumbia/libre 103bpm 8A.mp3');
+
+    final RadioChoice historial = chooseRadioTrack(
+      pool: <String>[
+        '/bail/ya 102bpm 8A.mp3',
+        '/bail/nueva 103bpm 8A.mp3',
+      ],
+      memory: const RadioMemory(history: <String>['/bail/ya 102bpm 8A.mp3']),
+      bpmOf: bpmOf,
+      keyOf: camelotFromPath,
+      artistOf: artistOf,
+      anchorPath: now,
+      anchorBpm: 100,
+      playing: now,
+      rng: Random(4),
+    );
+    expect(historial.path, '/bail/nueva 103bpm 8A.mp3');
   });
 
-  test('lo nuevo entra en lo que falta y lo borrado sale', () {
-    final List<String> pool = poolOf('/n', 6);
-    final RadioSync built = syncRadioPlan(
-      saved: null,
-      pool: pool,
-      bpmOf: bpmOf,
-      rng: Random(1),
+  test('una pareja A→B ya usada no vuelve mientras haya otra cerca', () {
+    const String now = '/now/sonando 100bpm 8A.mp3';
+    const String usada = '/bail/usada 101bpm 8A.mp3';
+    const String libre = '/bail/libre 102bpm 8A.mp3';
+    final RadioMemory mem = noteRadioPlayed(
+      const RadioMemory(previousBpm: 100),
+      usada,
+      bpm: 101,
+      artist: '',
     );
-    final RadioPlan mid = built.plan.copy(position: 2);
-    final String extra = '/n/extra 109bpm.mp3';
-    final RadioSync grew = syncRadioPlan(
-      saved: mid,
-      pool: <String>[...pool, extra],
-      bpmOf: bpmOf,
-      rng: Random(1),
+    final RadioMemory conPar = RadioMemory(
+      history: mem.history,
+      pairs: <String>[shufflePairKey(now, usada)],
+      previousBpm: 100,
+      lastPath: now,
     );
-    expect(grew.rebuilt, isFalse);
-    expect(grew.plan.order.sublist(0, 2), mid.order.sublist(0, 2));
-    expect(grew.plan.order.contains(extra), isTrue);
-    expect(grew.plan.position, 2);
-    final String gone = grew.plan.order[4];
-    final List<String> left = <String>[
-      for (final String p in grew.plan.order)
-        if (p != gone) p,
-    ];
-    final RadioSync shrunk = syncRadioPlan(
-      saved: grew.plan,
-      pool: left,
+    final RadioChoice next = chooseRadioTrack(
+      pool: <String>[
+        usada,
+        libre,
+        '/bail/otra 103bpm 9A.mp3',
+        '/bail/mas 100bpm 8A.mp3',
+        '/bail/cuatro 104bpm 8B.mp3',
+      ],
+      memory: conPar,
       bpmOf: bpmOf,
-      rng: Random(1),
+      keyOf: camelotFromPath,
+      artistOf: artistOf,
+      anchorPath: now,
+      anchorBpm: 100,
+      playing: now,
+      rng: Random(7),
     );
-    expect(shrunk.plan.order.contains(gone), isFalse);
-    expect(shrunk.rebuilt, isFalse);
+    expect(next.path == usada, isFalse);
+    final RadioMemory played = noteRadioPlayed(
+      conPar,
+      next.path!,
+      bpm: bpmOf(next.path!),
+      artist: '',
+    );
+    expect(played.pairs.contains(shufflePairKey(now, usada)), isTrue);
+    expect(played.pairs.contains(shufflePairKey(now, next.path!)), isTrue);
   });
 
-  test('la lista, la posición y las parejas quedan en .gatomix_radio.json', () {
-    final Directory dir = Directory.systemTemp.createTempSync('gmx_radio_');
+  test('el historial viejo pasa a la sección radio y el json viejo se borra', () {
+    final Directory root = Directory.systemTemp.createTempSync('gmx_radio_');
     final String s = Platform.pathSeparator;
-    final File legacy = File('${dir.path}${s}DjPlaylists${s}_livedj_radio.json');
+    final Directory salsa = Directory('${root.path}${s}Salsa');
+    salsa.createSync();
+    final String tema = '${salsa.path}${s}Tema.mp3';
+    writeDjMetadata(salsa.path, <String, dynamic>{tema: 110});
+    final File legacy = File('${root.path}${s}DjPlaylists${s}_livedj_radio.json');
     legacy.parent.createSync(recursive: true);
     legacy.writeAsStringSync(
       jsonEncode(<String, dynamic>{
@@ -174,45 +206,43 @@ void main() {
       }),
     );
     final RadioMemory migrated = GatomixRadio.load(
-      dir.path,
+      root.path,
       legacyPaths: <String>[legacy.path],
     );
     expect(migrated.history, <String>['/old/a.mp3', '/old/b.mp3']);
     expect(legacy.existsSync(), isFalse);
-    final RadioSync plan = syncRadioPlan(
-      saved: null,
-      pool: poolOf('/z', 6),
-      bpmOf: bpmOf,
-      rng: Random(4),
-    );
-    final RadioPlan done = plan.plan.copy(position: plan.plan.order.length);
-    final RadioSync next = syncRadioPlan(
-      saved: done,
-      pool: poolOf('/z', 6),
-      bpmOf: bpmOf,
-      rng: Random(9),
-    );
-    GatomixRadio.save(
-      dir.path,
-      migrated.putPlan('bailable', plan.plan).putPlan('ochenteras', next.plan),
-      activeKey: 'ochenteras',
-    );
-    final RadioMemory loaded = GatomixRadio.load(dir.path);
-    expect(loaded.planOf('bailable')!.position, plan.plan.position);
     expect(
-      sameRadioOrder(loaded.planOf('bailable')!.order, plan.plan.order),
-      isTrue,
+      File('${root.path}$s$retiredRadioFileName').existsSync(),
+      isFalse,
     );
-    expect(
-      sameRadioOrder(loaded.planOf('ochenteras')!.order, next.plan.order),
-      isTrue,
-    );
-    expect(loaded.planOf('ochenteras')!.previousPairs, isNotEmpty);
     final Map<String, dynamic> doc =
-        jsonDecode(File('${dir.path}$s.gatomix_radio.json').readAsStringSync())
+        jsonDecode(File('${root.path}$s.gatomix.json').readAsStringSync())
             as Map<String, dynamic>;
-    expect(doc['plans'], isA<Map>());
-    expect(doc.containsKey('djMetadata'), isFalse);
+    final Map<String, dynamic> radio = doc['radio'] as Map<String, dynamic>;
+    expect(radio['history'], <String>['/old/a.mp3', '/old/b.mp3']);
+    expect(radio.containsKey('order'), isFalse);
+    expect(doc.containsKey('plans'), isFalse);
+    expect(readDjMetadata(salsa.path)[tema], 110);
+    final RadioMemory again = GatomixRadio.load(
+      root.path,
+      legacyPaths: <String>[legacy.path],
+    );
+    expect(again.history, migrated.history);
+    root.deleteSync(recursive: true);
+  });
+
+  test('el BPM guardado se lee con la clave canónica', () {
+    final Directory dir = Directory.systemTemp.createTempSync('gmx_bpm_key_');
+    final String s = Platform.pathSeparator;
+    final String real = '${dir.path}${s}Tema.mp3';
+    File(real).writeAsBytesSync(<int>[1]);
+    writeDjMetadata(dir.path, <String, dynamic>{
+      '${dir.path}$s.${s}Tema.mp3': 118,
+    });
+    TrackTags.clear();
+    expect(knownBpm(real), 118);
+    expect(TrackTags.peek('${dir.path}/otra/../Tema.mp3')?.bpm, 118);
     dir.deleteSync(recursive: true);
+    TrackTags.clear();
   });
 }

@@ -107,17 +107,36 @@ double _bpmValue(dynamic value) {
   return 0;
 }
 
-/// BPM ya conocido (nombre del archivo o caché de etiquetas). No decodifica.
-double cachedBpm(String? path) {
+/// BPM ya conocido. No decodifica.
+///
+/// Nombre, caché de etiquetas y `.gatomix.json`. La caché y el metadata se
+/// buscan por [audioPathKey]: otra forma de la misma ruta no cae en 0.
+double knownBpm(String? path) {
   if (path == null || path.isEmpty) return 0;
   final String fileName = path.replaceAll('\\', '/').split('/').last;
   final RegExpMatch? match = RegExp(
     r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
     caseSensitive: false,
   ).firstMatch(fileName);
-  if (match != null) return double.parse(match.group(1)!);
-  return TrackTags.peek(path)?.bpm ?? 0;
+  if (match != null) {
+    final double named = double.tryParse(match.group(1)!) ?? 0;
+    if (named > 0) return named;
+  }
+  final double peeked = TrackTags.peek(path)?.bpm ?? 0;
+  if (peeked > 0) return peeked;
+  final double stored = _fromMetadata(
+    path,
+    <String, List<Map<String, dynamic>>>{},
+  );
+  if (stored > 0) {
+    TrackTags.rememberBpm(path, stored);
+    return stored;
+  }
+  return 0;
 }
+
+/// Igual que [knownBpm]. Lo usan la cola y el Shuffle.
+double cachedBpm(String? path) => knownBpm(path);
 
 /// Tonalidad Camelot guardada en el `.gatomix.json` de la carpeta.
 String? readStoredCamelot(String path) {

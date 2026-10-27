@@ -22,7 +22,6 @@ import '../core/audio_path.dart';
 import '../core/gatomix_store.dart';
 import '../core/livedj_order.dart';
 import '../core/queue_bpm.dart';
-import '../services/track_tags.dart';
 import '../core/lyric_files.dart' hide sameAudioPath;
 import '../core/session_restore.dart';
 import '../core/lyric_match.dart';
@@ -691,16 +690,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     await _activeAutomix.seek(position);
   }
 
-  double _extractBpm(String? path) {
-    if (path == null) return 0.0;
-    final fileName = path.replaceAll('\\', '/').split('/').last;
-    final match = RegExp(
-      r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-      caseSensitive: false,
-    ).firstMatch(fileName);
-    if (match != null) return double.parse(match.group(1)!);
-    return TrackTags.peek(path)?.bpm ?? 0.0;
-  }
+  double _extractBpm(String? path) => knownBpm(path);
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
     final meta = await ref.read(dbServiceProvider).getTrackMetadata(path);

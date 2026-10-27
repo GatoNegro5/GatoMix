@@ -12,6 +12,7 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/audio_path.dart';
 import '../core/gatomix_radio.dart';
+import 'directory_provider.dart';
 import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 import '../core/livedj_order.dart';
@@ -248,18 +249,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return 12000;
   }
 
-  double _extractBpm(String? path) {
-    if (path == null) return 0.0;
-    final fileName = path.replaceAll('\\', '/').split('/').last;
-    final match = RegExp(
-      r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-      caseSensitive: false,
-    ).firstMatch(fileName);
-    if (match != null) return double.parse(match.group(1)!);
-    // Sin BPM en el nombre: el que midió/guardó el masterizado (etiqueta TBPM
-    // o _dj_metadata). La caché va por audioPathKey, no por la ruta cruda.
-    return TrackTags.peek(path)?.bpm ?? 0.0;
-  }
+  double _extractBpm(String? path) => knownBpm(path);
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
     if (_isMixTrack(player.state.duration.inMilliseconds)) return 0;
@@ -587,7 +577,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             MixFormula.values[mixFormulaIdx];
       }
 
-      // Radio: estado y géneros persisten; el historial vive en su propio archivo.
+      // Radio: géneros en la sesión. Historial, parejas y ola en la sección
+      // `radio` del `.gatomix.json` de la raíz de Música.
       final bool savedRadioOn = data['radioOn'] as bool? ?? false;
       final Set<String> savedGenres = ((data['radioGenres'] as List?) ?? [])
           .map((e) => e.toString())
@@ -1201,8 +1192,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   // ───────────────────────── ON AIR Radio ─────────────────────────
-  // La cola de Live DJ se congela al encender. Cada opción de géneros tiene
-  // una lista ya armada en `.gatomix_radio.json` y sigue desde su posición.
+  // La cola de Live DJ se congela al encender. Los géneros marcados forman
+  // un solo fondo y la siguiente sale del Shuffle armónico.
   Map<String, List<String>>? _radioIndex; // carpeta → pistas
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
@@ -1246,7 +1237,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return File(_sessionFilePath()).parent.path;
   }
 
-  /// Raíz de Música, donde vive `.gatomix_radio.json`.
+  /// Raíz de Música. Ahí está la sección `radio` del `.gatomix.json`.
   String _musicRoot() {
     final String base = _musicBase();
     if (base.isEmpty || base == '/') return File(_sessionFilePath()).parent.path;
@@ -1283,16 +1274,37 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   String _radioHistoryPath() =>
-      '${File(_sessionFilePath()).parent.path}${Platform.pathSeparator}_livedj_radio.json';
+      '${File(_sessionFilePath()).parent.path}${Platform.pathSeparator}$legacyRadioFileName';
+
+  String _radioArtist(String path) {
+    var name = path.replaceAll('\\', '/').split('/').last;
+    final int dot = name.lastIndexOf('.');
+    if (dot > 0) name = name.substring(0, dot);
+    final int i = name.indexOf(' - ');
+    if (i <= 0) return '';
+    return _radioFold(name.substring(0, i)).trim();
+  }
 
   RadioMemory _radioMemory() => _radioMem ??= GatomixRadio.load(
     _musicRoot(),
     legacyPaths: <String>[_radioHistoryPath()],
   );
 
-  void _saveRadio(RadioMemory mem, {String? activeKey}) {
+  void _saveRadio(RadioMemory mem) {
     _radioMem = mem;
-    GatomixRadio.save(_musicRoot(), mem, activeKey: activeKey);
+    GatomixRadio.save(_musicRoot(), mem);
+  }
+
+  String? _radioExplorerPrefix() {
+    try {
+      final String sel = ref.read(liveDjDirectoryProvider).currentPath;
+      if (sel.isEmpty) return null;
+      String prefix = sel + Platform.pathSeparator;
+      if (Platform.isWindows) prefix = prefix.toLowerCase();
+      return prefix;
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _radioAccept(String path) {
@@ -1419,8 +1431,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
   }
 
-  /// Siguiente de la lista ya armada de la opción actual. No la rearma
-  /// si todavía quedan canciones.
+  /// Siguiente del fondo único, con el Shuffle armónico.
   Future<String?> _radioNextPath({int depth = 0}) async {
     final String? pending = _radioPending;
     if (pending != null && File(pending).existsSync()) return pending;
@@ -1430,29 +1441,31 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (already != null && File(already).existsSync()) return already;
     final List<String> pool = _radioPoolNow();
     if (pool.isEmpty) return _radioQueueFallback();
-    final String key = radioGenreKey(state.radioGenres);
-    final RadioMemory mem = _radioMemory();
-    final RadioPlan? saved = mem.planOf(key);
     try {
       preloadQueueBpmSync(pool);
     } catch (_) {}
-    final RadioSync synced = syncRadioPlan(
-      saved: saved,
+    final RadioMemory mem = _radioMemory();
+    final RadioChoice choice = chooseRadioTrack(
       pool: pool,
+      memory: mem,
       bpmOf: _extractBpm,
       keyOf: harmonicKeyOf,
-      pinned: pending,
+      artistOf: _radioArtist,
+      anchorPath: state.currentTrackPath,
+      anchorBpm: _extractBpm(state.currentTrackPath),
+      explorerPrefix: _radioExplorerPrefix(),
+      explorerFoldCase: Platform.isWindows,
+      playing: state.currentTrackPath,
       rng: _radioRng,
     );
-    _saveRadio(mem.putPlan(key, synced.plan), activeKey: key);
-    if (synced.plan.finished || synced.plan.order.isEmpty) {
-      return _radioQueueFallback();
-    }
-    final String pick = synced.plan.order[synced.plan.position];
+    if (choice.historyReset) _saveRadio(choice.memory);
+    final String? pick = choice.path;
+    if (pick == null) return _radioQueueFallback();
     if (!File(pick).existsSync()) {
       if (depth >= 8) return _radioQueueFallback();
-      final RadioPlan skipped = advanceRadioPlan(synced.plan, pick);
-      _saveRadio(mem.putPlan(key, skipped), activeKey: key);
+      _saveRadio(
+        noteRadioPlayed(choice.memory, pick, bpm: 0, artist: _radioArtist(pick)),
+      );
       return _radioNextPath(depth: depth + 1);
     }
     saveTrackMusic(pick, bpm: _extractBpm(pick), camelot: harmonicKeyOf(pick));
@@ -1471,12 +1484,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void _radioConsumed(String path) {
-    final String key = radioGenreKey(state.radioGenres);
-    final RadioMemory mem = _radioMemory();
-    final RadioPlan? plan = mem.planOf(key);
-    if (plan != null) {
-      _saveRadio(mem.putPlan(key, advanceRadioPlan(plan, path)), activeKey: key);
-    }
+    final RadioMemory mem = noteRadioPlayed(
+      _radioMemory(),
+      path,
+      bpm: _extractBpm(path),
+      artist: _radioArtist(path),
+    );
+    _saveRadio(mem);
     saveTrackMusic(path, bpm: _extractBpm(path), camelot: harmonicKeyOf(path));
     _radioPending = null;
     state = state.copyWith(clearRadioNextPath: true);
