@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/id3_names.dart';
 import '../../core/livedj_next.dart';
 import '../../core/net/artist_info.dart';
+import '../../core/queue_bpm.dart';
 import '../../core/track_file_name.dart';
 import '../../providers/livedj_provider.dart';
 import 'livedj_sort_button.dart';
@@ -52,6 +53,7 @@ class _PlayerPane extends ConsumerStatefulWidget {
 class _PlayerPaneState extends ConsumerState<_PlayerPane>
     with TickerProviderStateMixin {
   double? _dragPosition;
+  final LiveDjNextLabel _nextLabel = LiveDjNextLabel();
   late final AnimationController _relevo;
   late final AnimationController _beat;
   String? _handoffFrom;
@@ -149,12 +151,15 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
     final int mixOut = ref.watch(
       liveDjProvider.select((s) => s.customMixOutMs),
     );
+    final MixFormula mixFormula = ref.watch(mixFormulaProvider);
     final wide = MediaQuery.sizeOf(context).width >= 800;
-    final String? nextName = liveDjFollowingLabel(
+    final String? nextName = _nextLabel.text(
       radioOn: radioOn,
       radioNextPath: radioNext,
       queuePaths: <String>[for (final File f in queue) f.path],
       currentPath: track,
+      stealth: mixFormula == MixFormula.stealthGap,
+      bpmOf: knownBpm,
     );
     final isShuffle = strategy == LiveDjMixStrategy.random;
     final canToggle = track != null || queue.isNotEmpty;

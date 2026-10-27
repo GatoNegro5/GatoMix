@@ -1018,7 +1018,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           final bool armingRadio = state.radioOn;
           final int armEpoch = _radioEpoch;
           // Radio encendida: la pista sale del universo de géneros, no de la cola.
-          // Apagada: la cabeza de la cola, la misma que muestra la barra.
+          // Apagada: la misma que muestra la barra (cabeza, o BPM en Stealth).
           final String? armPathOrNull = armingRadio
               ? await _radioNextPath()
               : (state.queue.isNotEmpty
@@ -1761,6 +1761,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> flushRadioSave() => _radioSaveChain;
 
   @visibleForTesting
+  void seedOffAirQueue({
+    required List<String> queue,
+    String? playing,
+    bool radioOn = false,
+    String? radioNextPath,
+    List<String> radioUpcoming = const <String>[],
+  }) {
+    state = state.copyWith(
+      queue: <File>[for (final String p in queue) File(p)],
+      currentTrackPath: playing,
+      clearCurrentTrackPath: playing == null || playing.isEmpty,
+      radioOn: radioOn,
+      radioNextPath: radioNextPath,
+      clearRadioNextPath: radioNextPath == null || radioNextPath.isEmpty,
+      radioUpcoming: radioUpcoming,
+    );
+  }
+
+  @visibleForTesting
+  int debugNextQueueIndex() => _nextQueueIndex();
+
+  @visibleForTesting
   void seedRadio({
     required RadioMemory memory,
     required String genre,
@@ -1851,7 +1873,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   /// Apaga la radio sin tocar el deck que suena: ni pausa, ni open, ni seek,
   /// ni setRate. La cola congelada vuelve de memoria. El relevo de radio se
-  /// cancela y la siguiente pasa a ser la cabeza de esa cola.
+  /// cancela y la siguiente vuelve a salir de esa cola (cabeza, o BPM si Stealth).
   void _turnRadioOff() {
     _radioEpoch++;
     _radioPending = null;
@@ -1876,7 +1898,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       queue: sameQueue ? null : effect.queue.map(File.new).toList(),
     );
     if (!_isCrossfading) {
-      final String? head = effect.nextPath;
+      final String? head = _queueHeadPath();
       if (_standbyArmedPath == null ||
           head == null ||
           !sameAudioPath(_standbyArmedPath, head)) {
@@ -1941,9 +1963,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   int _nextQueueIndex() {
-    return queueHeadIndex(
-      <String>[for (final File f in state.queue) f.path],
-      state.currentTrackPath,
+    return offAirNextIndex(
+      paths: <String>[for (final File f in state.queue) f.path],
+      currentPath: state.currentTrackPath,
+      stealth: ref.read(mixFormulaProvider) == MixFormula.stealthGap,
+      bpmOf: (String path) => _extractBpm(path),
     );
   }
 

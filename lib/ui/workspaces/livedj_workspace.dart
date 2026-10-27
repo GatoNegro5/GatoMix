@@ -14,6 +14,7 @@ import 'livedj_artist_card.dart';
 import 'livedj_folder_playlist.dart';
 import '../../core/audio/cue_preview.dart';
 import '../../core/livedj_next.dart';
+import '../../core/queue_bpm.dart';
 
 /// Texto del buscador de la cola (solo filtra la vista; la cola real no cambia).
 final liveDjQueueSearchProvider = StateProvider<String>((ref) => '');
@@ -247,6 +248,7 @@ class LiveDjPlayerPanel extends ConsumerStatefulWidget {
 
 class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
   double? _dragPosition;
+  final LiveDjNextLabel _nextLabel = LiveDjNextLabel();
 
   /// Línea vertical en la barra: punto donde arranca la mezcla (DNA / Phrase 8 /
   /// Stealth). `mixMs` = `customMixOutMs` del provider (mismo valor que dispara).
@@ -293,11 +295,13 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
 
     final isMixBypass = state.currentMixMode == LiveDjMixMode.longBypass;
     final mixFormula = ref.watch(mixFormulaProvider);
-    final String? nextName = liveDjFollowingLabel(
+    final String? nextName = _nextLabel.text(
       radioOn: state.radioOn,
       radioNextPath: state.radioNextPath,
       queuePaths: <String>[for (final File f in state.queue) f.path],
       currentPath: state.currentTrackPath,
+      stealth: mixFormula == MixFormula.stealthGap,
+      bpmOf: knownBpm,
     );
     final engineModeStr = isMixBypass
         ? "BYPASS (MEZCLA PROTEGIDA)"

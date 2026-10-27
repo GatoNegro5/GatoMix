@@ -1,8 +1,12 @@
+import '../providers/mix_formula.dart';
+
 import 'audio_path.dart';
 import 'gatomix_radio.dart';
+import 'gatomix_store.dart';
 
 /// Índice de la cabeza de la cola: la primera pista que no es la que suena.
-/// Con la radio apagada esa cabeza es la siguiente, en DNA, Phrase y Stealth.
+/// Con la radio apagada esa cabeza es la siguiente en DNA y Phrase 8.
+/// Stealth usa [offAirNextIndex].
 int queueHeadIndex(List<String> paths, String? currentPath) {
   for (var i = 0; i < paths.length; i++) {
     if (currentPath == null || currentPath.isEmpty) return i;
@@ -11,16 +15,40 @@ int queueHeadIndex(List<String> paths, String? currentPath) {
   return -1;
 }
 
+/// Siguiente con la radio apagada.
+/// DNA y Phrase 8: cabeza. Stealth: [pickStealthNextIndex] (BPM más cercano
+/// al de la que suena; las que no tienen BPM quedan al final). -1 si no hay cola.
+int offAirNextIndex({
+  required List<String> paths,
+  required String? currentPath,
+  required bool stealth,
+  required double Function(String path) bpmOf,
+}) {
+  if (paths.isEmpty) return -1;
+  if (!stealth || currentPath == null) {
+    return queueHeadIndex(paths, currentPath);
+  }
+  final int picked = pickStealthNextIndex(
+    remaining: paths,
+    currentPath: currentPath,
+    bpmOf: bpmOf,
+  );
+  return picked < 0 ? 0 : picked;
+}
+
 /// Lo que muestra la barra «siguiente».
 ///
-/// Radio encendida: la pista que la radio ya eligió. Radio apagada y con
-/// una canción sonando: la cabeza de la cola. Si todavía no hay canción
-/// sonando, la cola muestra la primera como actual y la barra la segunda.
+/// Radio encendida: la pista que la radio ya eligió. Radio apagada, DNA y
+/// Phrase 8: la cabeza de la cola. Radio apagada y Stealth: el BPM más
+/// cercano. Si todavía no hay canción sonando, la cola muestra la primera
+/// como actual y la barra la segunda.
 String? liveDjFollowingLabel({
   required bool radioOn,
   required String? radioNextPath,
   required List<String> queuePaths,
   required String? currentPath,
+  bool stealth = false,
+  double Function(String path)? bpmOf,
 }) {
   if (radioOn) {
     if (radioNextPath == null || radioNextPath.isEmpty) {
@@ -33,9 +61,56 @@ String? liveDjFollowingLabel({
     if (queuePaths.length < 2) return null;
     return _base(queuePaths[1]);
   }
-  final int i = queueHeadIndex(queuePaths, currentPath);
-  if (i < 0) return null;
+  final int i = (stealth && bpmOf != null)
+      ? offAirNextIndex(
+          paths: queuePaths,
+          currentPath: currentPath,
+          stealth: true,
+          bpmOf: bpmOf,
+        )
+      : queueHeadIndex(queuePaths, currentPath);
+  if (i < 0 || i >= queuePaths.length) return null;
   return _base(queuePaths[i]);
+}
+
+/// Barra «siguiente». En Stealth el BPM se consulta una vez por pista, cola
+/// y generación del JSON: el rebuild del reloj no vuelve a abrir el archivo.
+class LiveDjNextLabel {
+  String? _key;
+  String? _name;
+
+  String? text({
+    required bool radioOn,
+    required String? radioNextPath,
+    required List<String> queuePaths,
+    required String? currentPath,
+    required bool stealth,
+    required double Function(String path) bpmOf,
+  }) {
+    if (radioOn || !stealth || currentPath == null || currentPath.isEmpty) {
+      _key = null;
+      return liveDjFollowingLabel(
+        radioOn: radioOn,
+        radioNextPath: radioNextPath,
+        queuePaths: queuePaths,
+        currentPath: currentPath,
+      );
+    }
+    final String key =
+        '${GatomixStore.generation}|$currentPath|${queuePaths.join('|')}';
+    if (_key != key) {
+      _key = key;
+      _name = liveDjFollowingLabel(
+        radioOn: false,
+        radioNextPath: radioNextPath,
+        queuePaths: queuePaths,
+        currentPath: currentPath,
+        stealth: true,
+        bpmOf: bpmOf,
+      );
+    }
+    return _name;
+  }
 }
 
 /// Panel derecho. Radio encendida: la lista de la opción, ya en memoria.
@@ -71,8 +146,9 @@ bool radioArmStillValid({
   return radioOn && epoch == armEpoch;
 }
 
-/// Efecto de apagar la radio. No toca el deck: la canción que suena sigue,
-/// la cola congelada vuelve a ser la visible y la siguiente es su cabeza.
+/// Efecto de apagar la radio. No toca el deck: la canción que suena sigue
+/// y la cola congelada vuelve a ser la visible. [nextPath] es la cabeza de
+/// esa cola; si el tipo es Stealth el motor vuelve a elegir por BPM.
 class RadioOffEffect {
   final bool touchDeck;
   final List<String> deckCommands;
