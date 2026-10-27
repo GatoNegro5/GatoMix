@@ -2154,7 +2154,7 @@ class DspNlpWorkspace extends ConsumerWidget {
               reason: marks.reason,
               karaokeFile: File(kPath).existsSync() || marks.karaoke,
               allowKaraoke: allowKaraoke,
-              megamixBySize: file.lengthSync() > MasterTrack.megamixBytes,
+              megamixBySize: false,
             ),
           ),
         );

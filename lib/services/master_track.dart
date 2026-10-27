@@ -72,7 +72,10 @@ class MasterTrack {
 
     await _ensureBackup(current);
 
-    final bool mega = File(current).lengthSync() > megamixBytes;
+    final int durMs = (await rust_dsp.getAudioDurationMs(
+      inputPath: current,
+    )).toInt();
+    final bool mega = lyricLooksMegamix(current.replaceAll(r"\\", "/").split("/").last, durMs);
     await _mark(current, 'GMX_NAME_OK', '1');
     await _mark(current, 'GMX_TYPE', mega ? 'MEGAMIX' : 'SONG');
     await _mark(current, 'GMX_BACKUP', '1');

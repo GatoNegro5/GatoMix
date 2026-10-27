@@ -277,7 +277,7 @@ final RegExp _remixMark = RegExp(
 );
 
 final RegExp _medleyMark = RegExp(
-  r'\b(medley|mosaico|mix|enganchado)\b',
+  r'\b(medley|mosaico|mix|enganchado|mashup|mash-up)\b',
   caseSensitive: false,
 );
 
@@ -587,12 +587,27 @@ final RegExp _noiseParen = RegExp(
   caseSensitive: false,
 );
 
+/// Marcas de DJ pool (1.0.20+36): «(Intro)», «(Clean)», «(Dirty)»,
+/// «(Alejandro Dark Intro & Outro)», «(Intro Mashup)», «(Quick Hit)»…
+final RegExp _djParen = RegExp(
+  r'\s*[\(\[][^\)\]]*\b(intro|outro|clean|dirty|explicit|mashup|mash-up|bootleg|redrum|acapella|a capella|quick hit|short|transition|hype|dj|tool)\b[^\)\]]*[\)\]]',
+  caseSensitive: false,
+);
+
+/// «140 Bpm», «- 128 BPM» al final del título.
+final RegExp _bpmTail = RegExp(
+  r'[\s\-–]*\d{2,3}\s*bpm\s*$',
+  caseSensitive: false,
+);
+
 /// Título sin ruido de YouTube / versiones: «(Remix)», «(2)», «_K»,
 /// «- Remastered 2009», «Official Video», «Original Aspect Ratio…».
 String lyricCleanTitle(String title) {
   var t = title.trim();
   t = t.replaceAll(RegExp(r'_K$', caseSensitive: false), '');
   t = t.replaceAll(_noiseParen, '');
+  t = t.replaceAll(_djParen, '');
+  t = t.replaceAll(_bpmTail, '');
   t = t.replaceAll(RegExp(r'\s*\(\d{1,2}\)\s*$'), '');
   t = t.replaceAll(
     RegExp(
@@ -1224,3 +1239,19 @@ LabLyricAction decideLabLyric({
 /// 503 sin candidato no es «sin letra»: se puede intentar más tarde.
 bool lyricFailureIsRetry({required bool serverDown, required bool hasText}) =>
     serverDown && !hasText;
+
+/// Megamix por nombre + duración, no por tamaño (1.0.20+36). Una canción
+/// normal de 5–7 min a 320 kbps pasa de 16 MB y no es MIX.
+/// - más de 12 min: MIX siempre;
+/// - nombre con mix/megamix/medley/mosaico/enganchado (no «remix») y más
+///   de 6 min: MIX;
+/// - duración desconocida (0): solo por nombre.
+bool lyricLooksMegamix(String name, int durationMs) {
+  final bool byName = RegExp(
+    r'\b(megamix|mega mix|medley|mosaico|enganchado|enganchados|mix\s*\d|dj mix|mixtape|nonstop|non-stop)\b|\bmix\b',
+    caseSensitive: false,
+  ).hasMatch(name.replaceAll(RegExp(r'remix', caseSensitive: false), ''));
+  if (durationMs > 12 * 60 * 1000) return true;
+  if (durationMs <= 0) return byName;
+  return byName && durationMs > 6 * 60 * 1000;
+}
