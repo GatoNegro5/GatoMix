@@ -391,6 +391,47 @@ Map<String, dynamic> readDjMetadata(String dir) =>
 void writeDjMetadata(String dir, Map<String, dynamic> data) =>
     GatomixStore.writeMap(dir, 'djMetadata', data);
 
+/// BPM y tonalidad de una pista, ya, en el `.gatomix.json` de su carpeta.
+/// No toca el audio. Un BPM 0 no pisa uno que ya estaba.
+void saveTrackMusic(String path, {required double bpm, String? camelot}) {
+  if (path.isEmpty) return;
+  final String? key = camelot?.trim();
+  final bool hasKey = key != null && key.isNotEmpty;
+  if (bpm <= 0 && !hasKey) return;
+  final String dir = File(path).parent.path;
+  final Map<String, dynamic> map = readDjMetadata(dir);
+  String? slot;
+  dynamic prev;
+  final String want = audioPathKey(path);
+  for (final MapEntry<String, dynamic> e in map.entries) {
+    if (audioPathKey(e.key) != want) continue;
+    slot = e.key;
+    prev = e.value;
+    break;
+  }
+  var stored = bpm;
+  if (stored <= 0 && prev is num) stored = prev.toDouble();
+  if (stored <= 0 && prev is Map && prev['bpm'] is num) {
+    stored = (prev['bpm'] as num).toDouble();
+  }
+  String? storedKey = hasKey ? key : null;
+  if ((storedKey == null || storedKey.isEmpty) &&
+      prev is Map &&
+      prev['key'] is String) {
+    storedKey = (prev['key'] as String).trim();
+  }
+  if (stored <= 0 && (storedKey == null || storedKey.isEmpty)) return;
+  final Object value = (storedKey == null || storedKey.isEmpty)
+      ? stored
+      : <String, dynamic>{
+          if (stored > 0) 'bpm': stored,
+          'key': storedKey,
+        };
+  if (slot != null && slot != path) map.remove(slot);
+  map[path] = value;
+  writeDjMetadata(dir, map);
+}
+
 Map<String, dynamic> readDjTimestamps(String dir) =>
     GatomixStore.readMap(dir, 'djTimestamps');
 

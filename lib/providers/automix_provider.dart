@@ -159,6 +159,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
   StreamSubscription? _completedSub;
 
   bool _isCrossfading = false;
+  bool get nextTrackLocked => _isCrossfading;
   bool _parking = false;
   bool _isPrepModeBypass = false;
   int _lastSavedPositionMs = 0;
@@ -533,9 +534,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
         if (!hasPath(state.playlist, path) && !hasPath(_shuffleKnown, path))
           path,
     ];
-    // Cola estable: añadir pistas ya no re-mezcla todo ni cambia el modo.
-    // El banco solo se aplica con lista vacía; con lista viva, las pistas
-    // nuevas se anexan abajo (rama siguiente) y el orden previo se conserva.
+    // Cola estable en secuencial. Con Shuffle, lo nuevo entra en el hueco
+    // armónico de lo que aún no suena. El banco solo se arma con lista vacía.
     if (added.isNotEmpty &&
         state.playlist.isEmpty &&
         state.mixStrategy == MixStrategy.random &&
@@ -558,28 +558,41 @@ class AutomixNotifier extends Notifier<AutomixState> {
         for (final path in newPlaylistOrdered)
           if (!hasPath(kept, path)) path,
       ];
-      if (added.length > 1) {
+      if (added.isNotEmpty) {
         preloadQueueBpmSync(added);
-        final String? anchor = kept.isNotEmpty ? kept.last : null;
-        final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
-          ...added,
-          if (anchor != null) anchor,
-        ]);
-        final HarmonicOrder built = buildHarmonicShuffle(
-          added,
-          _extractBpm,
-          keyOf: camelotFromPath,
-          usedPairs: mem.pairs,
-          recentAge: mem.age,
+        for (final String path in added) {
+          saveTrackMusic(
+            path,
+            bpm: _extractBpm(path),
+            camelot: harmonicKeyOf(path),
+          );
+        }
+        var lock = 0;
+        if (state.currentTrackPath != null) {
+          final int i = kept.indexWhere(
+            (String p) => sameAudioPath(p, state.currentTrackPath),
+          );
+          if (i >= 0) lock = i + 1;
+        }
+        if (_isCrossfading && state.nextTrackPath != null) {
+          final int i = kept.indexWhere(
+            (String p) => sameAudioPath(p, state.nextTrackPath),
+          );
+          if (i >= 0 && i + 1 > lock) lock = i + 1;
+        }
+        final List<String> merged = insertHarmonicTracks(
+          queue: kept,
+          incoming: added,
+          bpmOf: _extractBpm,
+          keyOf: harmonicKeyOf,
+          lockedPrefix: lock,
           playing: state.currentTrackPath,
-          continueFrom: anchor,
+          pinned: _isCrossfading ? state.nextTrackPath : null,
         );
-        added
-          ..clear()
-          ..addAll(built.tracks);
-        GatomixStore.commitShuffleMemory(built.tracks, anchor: anchor);
+        ordered = dedupeAudioPaths(merged);
+      } else {
+        ordered = dedupeAudioPaths(kept);
       }
-      ordered = dedupeAudioPaths([...kept, ...added]);
     }
     ordered = dedupeAudioPaths(ordered);
     if (listEquals(state.playlist, ordered)) return;
@@ -2358,6 +2371,79 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
 }
 
 class AutomixQueueNotifier extends Notifier<List<File>> {
+  Future<void> _addChain = Future<void>.value();
+
+  bool _shuffleOn() {
+    try {
+      return ref.read(automixProvider).mixStrategy == MixStrategy.random;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  int _locked(List<String> paths) {
+    final AutomixState auto = ref.read(automixProvider);
+    var lock = 0;
+    if (auto.currentTrackPath != null) {
+      final int i = paths.indexWhere(
+        (String p) => sameAudioPath(p, auto.currentTrackPath),
+      );
+      if (i >= 0) lock = i + 1;
+    }
+    if (ref.read(automixProvider.notifier).nextTrackLocked &&
+        auto.nextTrackPath != null) {
+      final int i = paths.indexWhere(
+        (String p) => sameAudioPath(p, auto.nextTrackPath),
+      );
+      if (i >= 0 && i + 1 > lock) lock = i + 1;
+    }
+    return lock;
+  }
+
+  Future<void> _insertShuffle(List<File> files) async {
+    final List<File> fresh = <File>[];
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      if (state.any((File e) => sameAudioPath(e.path, f.path))) continue;
+      fresh.add(f);
+    }
+    if (fresh.isEmpty) return;
+    final List<String> paths = fresh.map((File f) => f.path).toList();
+    try {
+      await preloadQueueBpm(paths);
+    } catch (_) {}
+    for (final String p in paths) {
+      saveTrackMusic(p, bpm: cachedBpm(p), camelot: harmonicKeyOf(p));
+    }
+    if (!_shuffleOn()) {
+      final List<File> next = <File>[...state, ...fresh];
+      state = next;
+      await _saveSession(next);
+      return;
+    }
+    final List<String> base = state.map((File f) => f.path).toList();
+    final AutomixState auto = ref.read(automixProvider);
+    final List<String> merged = insertHarmonicTracks(
+      queue: base,
+      incoming: paths,
+      bpmOf: cachedBpm,
+      keyOf: harmonicKeyOf,
+      lockedPrefix: _locked(base),
+      playing: auto.currentTrackPath,
+      pinned: ref.read(automixProvider.notifier).nextTrackLocked
+          ? auto.nextTrackPath
+          : null,
+    );
+    final Map<String, File> byKey = <String, File>{
+      for (final File f in <File>[...state, ...fresh]) audioPathKey(f.path): f,
+    };
+    final List<File> next = <File>[
+      for (final String p in merged) byKey[audioPathKey(p)] ?? File(p),
+    ];
+    state = next;
+    await _saveSession(next);
+  }
+
   @override
   List<File> build() {
     _loadSession();
@@ -2416,6 +2502,10 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   void addTrack(File file) {
     if (isKaraokeAudioPath(file.path)) return;
     final File kept = File(canonicalAudioPath(file.path));
+    if (_shuffleOn()) {
+      _addChain = _addChain.then((_) => _insertShuffle(<File>[kept]));
+      return;
+    }
     final newState = state
         .where((f) => !sameAudioPath(f.path, kept.path))
         .toList();
@@ -2425,6 +2515,14 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   }
 
   void addAll(List<File> files) {
+    if (_shuffleOn()) {
+      final List<File> kept = <File>[
+        for (final File f in files)
+          if (!isKaraokeAudioPath(f.path)) File(canonicalAudioPath(f.path)),
+      ];
+      _addChain = _addChain.then((_) => _insertShuffle(kept));
+      return;
+    }
     var newState = List<File>.from(state);
     for (final File f in files) {
       if (isKaraokeAudioPath(f.path)) continue;

@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'audio_path.dart';
+import 'queue_bpm.dart';
 import 'track_name_clean.dart';
 
 /// Orden de la cola de Live DJ en modo Secuencial.
@@ -266,4 +267,241 @@ String _pickTop3(
     if (ticket <= 0) return top[i].$1;
   }
   return top.last.$1;
+}
+
+/// Tonalidad del nombre o, si no viene, la guardada en `.gatomix.json`.
+String? harmonicKeyOf(String path) {
+  final String? named = camelotFromPath(path);
+  if (named != null && named.isNotEmpty) return named;
+  final String? stored = readStoredCamelot(path);
+  if (stored == null) return null;
+  final (int, String)? parsed = _camelot(stored);
+  if (parsed == null) return null;
+  return '${parsed.$1}${parsed.$2}';
+}
+
+/// Siguiente pista entre [candidates] con los criterios del Shuffle armónico.
+/// Sin ancla de BPM elige al azar entre las que tienen BPM (si no hay, entre
+/// todas). Sin candidatos devuelve null.
+String? pickHarmonicNext(
+  List<String> candidates,
+  double Function(String path) bpmOf, {
+  String? Function(String path)? keyOf,
+  String? anchor,
+  double anchorBpm = 0,
+  bool waveUp = true,
+  Set<String> usedPairs = const <String>{},
+  Map<String, int> recentAge = const <String, int>{},
+  Random? rng,
+  bool? foldCase,
+}) {
+  final Random random = rng ?? Random();
+  final List<String> known = <String>[];
+  final List<String> unknown = <String>[];
+  final Set<String> seen = <String>{};
+  for (final String p in candidates) {
+    if (isKaraokeAudioPath(p)) continue;
+    if (!seen.add(audioPathKey(p, foldCase: foldCase))) continue;
+    if (bpmOf(p) > 0) {
+      known.add(p);
+    } else {
+      unknown.add(p);
+    }
+  }
+  final double cur = anchor != null && bpmOf(anchor) > 0
+      ? bpmOf(anchor)
+      : anchorBpm;
+  final String anchorPath = anchor ?? '';
+  if (cur <= 0 || known.isEmpty) {
+    final List<String> bag = known.isNotEmpty ? known : unknown;
+    if (bag.isEmpty) return null;
+    return bag[random.nextInt(bag.length)];
+  }
+  bool along(String p) {
+    final double b = bpmOf(p);
+    if ((b - cur).abs() <= 0.05) return true;
+    return waveUp ? b > cur : b < cur;
+  }
+
+  List<String> window(double delta) => known
+      .where((String p) => (bpmOf(p) - cur).abs() <= delta + 1e-6)
+      .toList();
+  List<String> cands = window(4).where(along).toList();
+  if (cands.isEmpty) cands = window(8).where(along).toList();
+  if (cands.isEmpty) cands = window(12).where(along).toList();
+  if (cands.isEmpty) {
+    final List<String> side = known.where(along).toList();
+    cands = <String>[_closest(side.isEmpty ? known : side, bpmOf, cur)];
+  }
+  return _pickTop3(
+    cands,
+    anchorPath,
+    cur,
+    waveUp,
+    bpmOf,
+    keyOf,
+    usedPairs,
+    recentAge,
+    random,
+    foldCase,
+  );
+}
+
+/// Mete [incoming] en el hueco armónico de la parte que aún no suena.
+/// [lockedPrefix] y [playing] / [pinned] no se reordenan. Sin BPM, al final.
+/// No duplica rutas ni mete pistas `_K`.
+List<String> insertHarmonicTracks({
+  required List<String> queue,
+  required List<String> incoming,
+  required double Function(String path) bpmOf,
+  String? Function(String path)? keyOf,
+  int lockedPrefix = 0,
+  String? playing,
+  String? pinned,
+  bool? foldCase,
+  int waveLength = 20,
+}) {
+  final List<String> base = List<String>.from(queue);
+  final Set<String> seen = <String>{
+    for (final String p in base) audioPathKey(p, foldCase: foldCase),
+  };
+  if (playing != null && playing.isNotEmpty) {
+    seen.add(audioPathKey(playing, foldCase: foldCase));
+  }
+  final List<String> fresh = <String>[];
+  final List<String> noBpm = <String>[];
+  for (final String p in incoming) {
+    if (isKaraokeAudioPath(p)) continue;
+    if (!seen.add(audioPathKey(p, foldCase: foldCase))) continue;
+    if (bpmOf(p) > 0) {
+      fresh.add(p);
+    } else {
+      noBpm.add(p);
+    }
+  }
+  final int wave = waveLength < 1 ? 20 : waveLength;
+
+  int pinOf(String? path) {
+    if (path == null || path.isEmpty) return 0;
+    for (var i = 0; i < base.length; i++) {
+      if (sameAudioPath(base[i], path, foldCase: foldCase)) return i + 1;
+    }
+    return 0;
+  }
+
+  var lock = lockedPrefix;
+  if (lock < 0) lock = 0;
+  final int playLock = pinOf(playing);
+  final int pinLock = pinOf(pinned);
+  if (playLock > lock) lock = playLock;
+  if (pinLock > lock) lock = pinLock;
+  if (lock > base.length) lock = base.length;
+
+  String? prevKnown(int i) {
+    for (var j = i - 1; j >= 0; j--) {
+      if (bpmOf(base[j]) > 0) return base[j];
+    }
+    if (playing != null &&
+        playing.isNotEmpty &&
+        bpmOf(playing) > 0 &&
+        !base.any((String p) => sameAudioPath(p, playing, foldCase: foldCase))) {
+      return playing;
+    }
+    return null;
+  }
+
+  String? nextKnown(int i, int tail) {
+    for (var j = i; j < tail; j++) {
+      if (bpmOf(base[j]) > 0) return base[j];
+    }
+    return null;
+  }
+
+  int tierOf(double dist) {
+    if (dist <= 4) return 0;
+    if (dist <= 8) return 1;
+    if (dist <= 12) return 2;
+    return 3;
+  }
+
+  for (final String p in fresh) {
+    var tail = base.length;
+    while (tail > lock && bpmOf(base[tail - 1]) <= 0) {
+      tail--;
+    }
+    var bestI = tail;
+    var bestTier = 1 << 20;
+    var bestKey = -100;
+    var bestWave = -2;
+    var bestDist = double.infinity;
+    final double b = bpmOf(p);
+    final String? kb = keyOf?.call(p);
+    for (var i = lock; i <= tail; i++) {
+      final String? prev = prevKnown(i);
+      final String? next = i < tail ? nextKnown(i, tail) : null;
+      final double? dp = prev == null ? null : (b - bpmOf(prev)).abs();
+      final double? dn = next == null ? null : (b - bpmOf(next)).abs();
+      var tier = 4;
+      if (dp != null && dn != null) {
+        tier = max(tierOf(dp), tierOf(dn));
+      } else if (dp != null) {
+        tier = tierOf(dp);
+      } else if (dn != null) {
+        tier = tierOf(dn);
+      }
+      var keys = 0;
+      if (kb != null && kb.isNotEmpty) {
+        final String? kp = prev == null ? null : keyOf?.call(prev);
+        final String? kn = next == null ? null : keyOf?.call(next);
+        if (kp != null && kp.isNotEmpty) {
+          keys += camelotCompatible(kp, kb) ? 1 : -1;
+        }
+        if (kn != null && kn.isNotEmpty) {
+          keys += camelotCompatible(kn, kb) ? 1 : -1;
+        }
+      }
+      var placed = 0;
+      for (var j = 0; j < i; j++) {
+        if (bpmOf(base[j]) <= 0) continue;
+        if (playing != null &&
+            sameAudioPath(base[j], playing, foldCase: foldCase)) {
+          continue;
+        }
+        placed++;
+      }
+      final bool up = (placed ~/ wave) % 2 == 0;
+      var waveScore = 0;
+      if (prev != null) {
+        final double pb = bpmOf(prev);
+        final bool higher = b > pb + 0.05;
+        final bool lower = b < pb - 0.05;
+        final bool flat = (b - pb).abs() <= 0.05;
+        if (flat || (up && higher) || (!up && lower)) {
+          waveScore = 1;
+        } else {
+          waveScore = -1;
+        }
+      }
+      final double dist = (dp ?? 0) + (dn ?? 0);
+      final bool better =
+          tier < bestTier ||
+          (tier == bestTier && keys > bestKey) ||
+          (tier == bestTier && keys == bestKey && waveScore > bestWave) ||
+          (tier == bestTier &&
+              keys == bestKey &&
+              waveScore == bestWave &&
+              dist < bestDist);
+      if (better) {
+        bestI = i;
+        bestTier = tier;
+        bestKey = keys;
+        bestWave = waveScore;
+        bestDist = dist;
+      }
+    }
+    base.insert(bestI, p);
+    if (bestI < lock) lock = bestI;
+  }
+  base.addAll(noBpm);
+  return base;
 }

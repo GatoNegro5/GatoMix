@@ -11,6 +11,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/audio_path.dart';
+import '../core/gatomix_radio.dart';
 import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 import '../core/livedj_order.dart';
@@ -23,7 +24,6 @@ import '../services/track_tags.dart';
 import '../core/audio/dj_audio_handler.dart';
 import 'equalizer_provider.dart';
 import 'mix_formula.dart';
-import 'directory_provider.dart';
 import '../djiphone/iphone_library.dart';
 
 enum LiveDjMixStrategy { sequential, random }
@@ -174,6 +174,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // Pista realmente precargada en el deck standby. Si la cola cambia
   // (quitar, shuffle, otra pista) antes del cruce, se vuelve a cargar.
   String? _standbyArmedPath;
+  Future<void> _queueAddChain = Future<void>.value();
+  final Set<String> _queueAddPending = <String>{};
+  RadioMemory? _radioMem;
+  LiveQueueFreeze? _radioFreeze;
+  bool _radioOffAfterFade = false;
   bool _isPrepModeBypass = false;
   int _lastSavedPositionMs = 0;
   int _lastUiPosMs = -1;
@@ -421,6 +426,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         'radioOn': state.radioOn,
         'radioGenres': state.radioGenres.toList(),
         'sortMode': state.sortMode.name,
+        if (_radioFreeze != null) 'radioFreeze': _radioFreeze!.toJson(),
       };
       // Atómico y en fila: un cierre o una actualización a mitad de guardado
       // ya no deja la sesión dañada (antes: cola vacía y modo Secuencial).
@@ -451,25 +457,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (e, stack) {
       debugPrint("🔴 [TRACKER ERROR FATAL] El Shuffle explotó: $e\n$stack");
     }
-  }
-
-  List<String> _harmonicBatch(List<String> paths, {String? continueFrom}) {
-    preloadQueueBpmSync(paths);
-    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
-      ...paths,
-      if (continueFrom != null) continueFrom,
-    ]);
-    final HarmonicOrder order = buildHarmonicShuffle(
-      paths,
-      _extractBpm,
-      keyOf: camelotFromPath,
-      usedPairs: mem.pairs,
-      recentAge: mem.age,
-      playing: state.currentTrackPath,
-      continueFrom: continueFrom,
-    );
-    GatomixStore.commitShuffleMemory(order.tracks, anchor: continueFrom);
-    return order.tracks;
   }
 
   void _applyLiveShuffleBank({required bool advance}) {
@@ -606,7 +593,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           .map((e) => e.toString())
           .where(kRadioGenreIds.contains)
           .toSet();
-      _loadRadioHistory();
+      _radioFreeze = LiveQueueFreeze.tryParse(data['radioFreeze']);
+      _radioMem = GatomixRadio.load(
+        _musicRoot(),
+        legacyPaths: <String>[_radioHistoryPath()],
+      );
 
       if (state.queue.isNotEmpty || state.currentTrackPath != null) {
         return;
@@ -668,18 +659,23 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   void addTrack(File file) {
     if (isKaraokeAudioPath(file.path)) return;
     final File kept = File(canonicalAudioPath(file.path));
-    if (!state.queue.any((f) => sameAudioPath(f.path, kept.path))) {
-      // Cola estable: la pista nueva va al final; lo ya cargado no se mueve
-      // ni cambia de modo (secuencial/shuffle solo lo cambia el botón).
-      state = state.copyWith(queue: [...state.queue, kept]);
-      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
+    if (state.queue.any((File f) => sameAudioPath(f.path, kept.path))) return;
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      // Secuencial: la pista nueva va al final. El modo no cambia.
+      state = state.copyWith(queue: <File>[...state.queue, kept]);
+      _applySort();
       _saveSnapshot();
+      return;
     }
+    final String key = audioPathKey(kept.path);
+    if (!_queueAddPending.add(key)) return;
+    _queueAddChain = _queueAddChain.then((_) => _insertLiveRandom(<File>[kept]));
   }
 
   void addAllTracks(List<File> files) {
     final Set<String> currentPaths = <String>{
       for (final File f in state.queue) audioPathKey(f.path),
+      ..._queueAddPending,
     };
     final List<File> newFiles = <File>[];
     for (final File f in files) {
@@ -687,34 +683,79 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final File kept = File(canonicalAudioPath(f.path));
       if (currentPaths.add(audioPathKey(kept.path))) newFiles.add(kept);
     }
-    if (newFiles.isNotEmpty) {
-      // Cola estable: solo se mezcla el lote nuevo (y solo en modo shuffle);
-      // lo ya cargado conserva su orden.
-      if (state.mixStrategy == LiveDjMixStrategy.random &&
-          state.queue.isNotEmpty &&
-          newFiles.length > 1) {
-        final String? anchor = state.queue.last.path;
-        final List<String> ordered = _harmonicBatch(
-          newFiles.map((f) => f.path).toList(),
-          continueFrom: anchor,
-        );
-        final byPath = {for (final f in newFiles) f.path: f};
-        newFiles
-          ..clear()
-          ..addAll(ordered.map((p) => byPath[p]!));
-      }
-      final bool wasEmpty = state.queue.isEmpty;
-      state = state.copyWith(queue: [...state.queue, ...newFiles]);
-      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
+    if (newFiles.isEmpty) return;
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      state = state.copyWith(queue: <File>[...state.queue, ...newFiles]);
+      _applySort();
       _saveSnapshot();
-      // Cola vacía (p. ej. fin de cola) + shuffle activo: la carga nueva usa
-      // el mismo banco de shuffle del botón, así no arranca secuencial.
-      if (wasEmpty &&
-          state.mixStrategy == LiveDjMixStrategy.random &&
-          state.queue.length > 1) {
-        _applyLiveShuffleBank(advance: true);
-      }
+      return;
     }
+    for (final File f in newFiles) {
+      _queueAddPending.add(audioPathKey(f.path));
+    }
+    _queueAddChain = _queueAddChain.then((_) => _insertLiveRandom(newFiles));
+  }
+
+  int _liveLockedPrefix() {
+    if (state.queue.isEmpty) return 0;
+    if (_isCrossfading) return 1;
+    if (_standbyArmedPath == null) return 0;
+    final int i = state.queue.indexWhere(
+      (File f) => sameAudioPath(f.path, _standbyArmedPath),
+    );
+    if (i >= 0) return i + 1;
+    return 0;
+  }
+
+  Future<void> _insertLiveRandom(List<File> files) async {
+    final List<File> fresh = <File>[];
+    for (final File f in files) {
+      _queueAddPending.remove(audioPathKey(f.path));
+      if (isKaraokeAudioPath(f.path)) continue;
+      if (state.queue.any((File e) => sameAudioPath(e.path, f.path))) continue;
+      if (state.currentTrackPath != null &&
+          sameAudioPath(state.currentTrackPath, f.path)) {
+        continue;
+      }
+      fresh.add(f);
+    }
+    if (fresh.isEmpty) return;
+    final List<String> paths = fresh.map((File f) => f.path).toList();
+    try {
+      await preloadQueueBpm(paths);
+    } catch (_) {}
+    for (final String p in paths) {
+      saveTrackMusic(p, bpm: _extractBpm(p), camelot: harmonicKeyOf(p));
+    }
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
+      _applySort();
+      _saveSnapshot();
+      return;
+    }
+    if (state.queue.isEmpty && fresh.length > 1) {
+      state = state.copyWith(queue: fresh);
+      _applyLiveShuffleBank(advance: true);
+      return;
+    }
+    final List<String> next = insertHarmonicTracks(
+      queue: state.queue.map((File f) => f.path).toList(),
+      incoming: paths,
+      bpmOf: _extractBpm,
+      keyOf: harmonicKeyOf,
+      lockedPrefix: _liveLockedPrefix(),
+      playing: state.currentTrackPath,
+      pinned: _standbyArmedPath,
+    );
+    final Map<String, File> byKey = <String, File>{
+      for (final File f in <File>[...state.queue, ...fresh]) audioPathKey(f.path): f,
+    };
+    state = state.copyWith(
+      queue: <File>[
+        for (final String p in next) byKey[audioPathKey(p)] ?? File(p),
+      ],
+    );
+    _saveSnapshot();
   }
 
   void removeTrack(String path) {
@@ -774,30 +815,19 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           final List<File> fresh = newFiles
               .where((f) => currentPaths.add(audioPathKey(f.path)))
               .toList();
-          if (state.mixStrategy == LiveDjMixStrategy.random &&
-              state.queue.isNotEmpty &&
-              fresh.length > 1) {
-            final List<String> ordered = _harmonicBatch(
-              fresh.map((f) => f.path).toList(),
-              continueFrom: state.queue.last.path,
+          if (fresh.isEmpty) return;
+          if (state.mixStrategy == LiveDjMixStrategy.random) {
+            for (final File f in fresh) {
+              _queueAddPending.add(audioPathKey(f.path));
+            }
+            _queueAddChain = _queueAddChain.then(
+              (_) => _insertLiveRandom(fresh),
             );
-            final byPath = {for (final f in fresh) f.path: f};
-            fresh
-              ..clear()
-              ..addAll(ordered.map((p) => byPath[p]!));
-          }
-          if (fresh.isNotEmpty) {
-            final bool wasEmpty = state.queue.isEmpty;
-            state = state.copyWith(queue: [...state.queue, ...fresh]);
-            if (state.mixStrategy == LiveDjMixStrategy.sequential) {
-              _applySort();
-            }
+            await _queueAddChain;
+          } else {
+            state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
+            _applySort();
             _saveSnapshot();
-            if (wasEmpty &&
-                state.mixStrategy == LiveDjMixStrategy.random &&
-                state.queue.length > 1) {
-              _applyLiveShuffleBank(advance: true);
-            }
           }
         }
       }
@@ -1171,18 +1201,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   // ───────────────────────── ON AIR Radio ─────────────────────────
-  // La radio NO toca la cola (congelada). Solo decide qué pista sigue:
-  // universo = carpetas de género dentro de Música (sin _K), salto de carpeta
-  // cada 2 temas, BPM cercano, sin artista seguido y sin repetir (historial).
+  // La cola de Live DJ se congela al encender. Cada opción de géneros tiene
+  // una lista ya armada en `.gatomix_radio.json` y sigue desde su posición.
   Map<String, List<String>>? _radioIndex; // carpeta → pistas
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
-  final Set<String> _radioHistory = <String>{};
   String? _radioPending;
-  String? _radioPendingFolder;
-  String? _radioLastFolder;
-  String _radioLastArtist = '';
-  int _radioStreak = 0;
   final Random _radioRng = Random();
 
   static const Set<String> _radioExt = {
@@ -1207,21 +1231,32 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return b.toString();
   }
 
-  String _radioMusicRoot() {
-    String base;
+  String _musicBase() {
     if (Platform.isIOS) {
-      base = IphoneLibrary.musicRoot;
+      if (IphoneLibrary.musicRoot.isNotEmpty) return IphoneLibrary.musicRoot;
     } else if (Platform.isAndroid) {
-      base = '/storage/emulated/0/Music';
+      return '/storage/emulated/0/Music';
     } else if (Platform.isWindows) {
-      final up = Platform.environment['USERPROFILE'];
-      base = up != null ? '$up\\Music' : 'C:\\Music';
+      final String? up = Platform.environment['USERPROFILE'];
+      return up != null ? '$up\\Music' : 'C:\\Music';
     } else {
-      final home = Platform.environment['HOME'];
-      base = home != null ? '$home/Music' : '/';
+      final String? home = Platform.environment['HOME'];
+      return home != null ? '$home/Music' : '/tmp/Music';
     }
+    return File(_sessionFilePath()).parent.path;
+  }
+
+  /// Raíz de Música, donde vive `.gatomix_radio.json`.
+  String _musicRoot() {
+    final String base = _musicBase();
+    if (base.isEmpty || base == '/') return File(_sessionFilePath()).parent.path;
+    return base;
+  }
+
+  String _radioMusicRoot() {
+    final String base = _musicBase();
     // Las carpetas de género viven en Música/ReGenial; si no existe, en Música.
-    final regenial = Directory('$base${Platform.pathSeparator}ReGenial');
+    final Directory regenial = Directory('$base${Platform.pathSeparator}ReGenial');
     return regenial.existsSync() ? regenial.path : base;
   }
 
@@ -1247,35 +1282,57 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return null;
   }
 
-  String _radioArtist(String path) {
-    var name = path.replaceAll('\\', '/').split('/').last;
-    final dot = name.lastIndexOf('.');
-    if (dot > 0) name = name.substring(0, dot);
-    final i = name.indexOf(' - ');
-    if (i <= 0) return '';
-    return _radioFold(name.substring(0, i)).trim();
-  }
-
   String _radioHistoryPath() =>
       '${File(_sessionFilePath()).parent.path}${Platform.pathSeparator}_livedj_radio.json';
 
-  void _loadRadioHistory() {
-    try {
-      final f = File(_radioHistoryPath());
-      if (!f.existsSync()) return;
-      final data = jsonDecode(f.readAsStringSync());
-      final list = (data['history'] as List?) ?? const [];
-      _radioHistory
-        ..clear()
-        ..addAll(list.map((e) => e.toString()));
-    } catch (_) {}
+  RadioMemory _radioMemory() => _radioMem ??= GatomixRadio.load(
+    _musicRoot(),
+    legacyPaths: <String>[_radioHistoryPath()],
+  );
+
+  void _saveRadio(RadioMemory mem, {String? activeKey}) {
+    _radioMem = mem;
+    GatomixRadio.save(_musicRoot(), mem, activeKey: activeKey);
   }
 
-  void _saveRadioHistory() {
-    try {
-      File(_radioHistoryPath())
-          .writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
-    } catch (_) {}
+  bool _radioAccept(String path) {
+    if (isKaraokeAudioPath(path)) return false;
+    final String fname = path.replaceAll('\\', '/').split('/').last;
+    final int dot = fname.lastIndexOf('.');
+    if (dot < 0) return false;
+    return _radioExt.contains(fname.substring(dot + 1).toLowerCase());
+  }
+
+  List<String> _radioPoolNow() {
+    final Map<String, List<String>>? idx = _radioIndex;
+    if (idx == null || idx.isEmpty) return const <String>[];
+    List<String> from(bool Function(String folder) take) {
+      final List<String> out = <String>[];
+      final Set<String> seen = <String>{};
+      for (final String folder in idx.keys) {
+        if (!take(folder)) continue;
+        final Directory dir = Directory(folder);
+        if (!dir.existsSync()) continue;
+        try {
+          for (final FileSystemEntity ent in dir.listSync(
+            recursive: true,
+            followLinks: false,
+          )) {
+            if (ent is! File || !_radioAccept(ent.path)) continue;
+            if (seen.add(audioPathKey(ent.path))) out.add(ent.path);
+          }
+        } catch (_) {}
+      }
+      return out;
+    }
+
+    final Set<String> genres = state.radioGenres;
+    final List<String> filtered = from((String folder) {
+      final String? g = _radioFolderGenre[folder];
+      return genres.isEmpty || (g != null && genres.contains(g));
+    });
+    if (filtered.isNotEmpty || genres.isEmpty) return filtered;
+    return from((String _) => true);
   }
 
   Future<void> _radioEnsureIndex() {
@@ -1362,109 +1419,46 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
   }
 
-  /// BPM más cercano al actual (±12 %); sin BPM, sorteo simple.
-  String _radioPickByBpm(List<String> list) {
-    final double cur = _extractBpm(state.currentTrackPath);
-    if (cur > 60) {
-      final sample = List<String>.from(list)..shuffle(_radioRng);
-      String? best;
-      double bestDiff = double.infinity;
-      for (final p in sample.take(80)) {
-        final b = _extractBpm(p);
-        if (b <= 60) continue;
-        final ratio = cur / b;
-        if (ratio < 0.88 || ratio > 1.12) continue;
-        final d = (cur - b).abs();
-        if (d < bestDiff) {
-          bestDiff = d;
-          best = p;
-        }
-      }
-      if (best != null) return best;
-    }
-    return list[_radioRng.nextInt(list.length)];
-  }
-
-  /// Siguiente pista de la radio (se fija hasta consumirse o cambiar géneros).
-  Future<String?> _radioNextPath() async {
-    final pending = _radioPending;
+  /// Siguiente de la lista ya armada de la opción actual. No la rearma
+  /// si todavía quedan canciones.
+  Future<String?> _radioNextPath({int depth = 0}) async {
+    final String? pending = _radioPending;
     if (pending != null && File(pending).existsSync()) return pending;
     _radioPending = null;
     await _radioEnsureIndex();
-    // Otra llamada pudo elegir mientras se esperaba el índice.
-    final already = _radioPending;
+    final String? already = _radioPending;
     if (already != null && File(already).existsSync()) return already;
-    final idx = _radioIndex;
-    if (idx == null || idx.isEmpty) return _radioQueueFallback();
-
-    final genres = state.radioGenres;
-    var folders = <String>[
-      for (final e in idx.entries)
-        if (genres.isEmpty || genres.contains(_radioFolderGenre[e.key])) e.key,
-    ];
-    // Géneros elegidos que no existen en esta biblioteca: suena todo, no se para.
-    if (folders.isEmpty) folders = idx.keys.toList();
-    if (folders.isEmpty) return _radioQueueFallback();
-
-    // La carpeta seleccionada en el Explorador queda fuera de la radio.
-    String selPrefix = '';
+    final List<String> pool = _radioPoolNow();
+    if (pool.isEmpty) return _radioQueueFallback();
+    final String key = radioGenreKey(state.radioGenres);
+    final RadioMemory mem = _radioMemory();
+    final RadioPlan? saved = mem.planOf(key);
     try {
-      final sel = ref.read(liveDjDirectoryProvider).currentPath;
-      if (sel.isNotEmpty) {
-        selPrefix = sel + Platform.pathSeparator;
-        if (Platform.isWindows) selPrefix = selPrefix.toLowerCase();
-      }
+      preloadQueueBpmSync(pool);
     } catch (_) {}
-    bool relaxSel = false; // nivel 3: la carpeta del Explorador también vale
-    bool outsideSel(String p) {
-      if (relaxSel || selPrefix.isEmpty) return true;
-      return !(Platform.isWindows ? p.toLowerCase() : p).startsWith(selPrefix);
+    final RadioSync synced = syncRadioPlan(
+      saved: saved,
+      pool: pool,
+      bpmOf: _extractBpm,
+      keyOf: harmonicKeyOf,
+      pinned: pending,
+      rng: _radioRng,
+    );
+    _saveRadio(mem.putPlan(key, synced.plan), activeKey: key);
+    if (synced.plan.finished || synced.plan.order.isEmpty) {
+      return _radioQueueFallback();
     }
-
-    // nivel 0: estricto · 1: sin regla de artista · 2: historial reiniciado
-    for (int level = 0; level < 4; level++) {
-      if (level == 3) relaxSel = true;
-      if (level == 2) {
-        _radioHistory.clear();
-        _saveRadioHistory();
-      }
-      final cand = <String, List<String>>{};
-      for (final f in folders) {
-        final list = idx[f]!.where((p) {
-          if (!outsideSel(p)) return false;
-          if (level < 2 && _radioHistory.contains(p)) return false;
-          if (level < 1 &&
-              _radioLastArtist.isNotEmpty &&
-              _radioArtist(p) == _radioLastArtist) {
-            return false;
-          }
-          return true;
-        }).toList();
-        if (list.isNotEmpty) cand[f] = list;
-      }
-      if (cand.isEmpty) continue;
-
-      String folder;
-      final last = _radioLastFolder;
-      if (last != null && _radioStreak < 2 && cand.containsKey(last)) {
-        folder = last; // 2 temas por carpeta
-      } else {
-        final others = cand.keys.where((k) => k != last).toList();
-        final pool = others.isNotEmpty ? others : cand.keys.toList();
-        folder = pool[_radioRng.nextInt(pool.length)];
-      }
-
-      final pick = _radioPickByBpm(cand[folder]!);
-      if (!File(pick).existsSync()) {
-        idx[folder]!.remove(pick);
-        return _radioNextPath();
-      }
-      _radioPending = pick;
-      _radioPendingFolder = folder;
-      state = state.copyWith(radioNextPath: pick);
-      return pick;
+    final String pick = synced.plan.order[synced.plan.position];
+    if (!File(pick).existsSync()) {
+      if (depth >= 8) return _radioQueueFallback();
+      final RadioPlan skipped = advanceRadioPlan(synced.plan, pick);
+      _saveRadio(mem.putPlan(key, skipped), activeKey: key);
+      return _radioNextPath(depth: depth + 1);
     }
-    return _radioQueueFallback();
+    saveTrackMusic(pick, bpm: _extractBpm(pick), camelot: harmonicKeyOf(pick));
+    _radioPending = pick;
+    state = state.copyWith(radioNextPath: pick);
+    return pick;
   }
 
   /// Último recurso: la radio nunca se para; suena una pista de la cola.
@@ -1477,55 +1471,110 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void _radioConsumed(String path) {
-    _radioHistory.add(path);
-    final folder = _radioPendingFolder;
-    if (folder != null) {
-      if (folder == _radioLastFolder) {
-        _radioStreak++;
-      } else {
-        _radioLastFolder = folder;
-        _radioStreak = 1;
-      }
+    final String key = radioGenreKey(state.radioGenres);
+    final RadioMemory mem = _radioMemory();
+    final RadioPlan? plan = mem.planOf(key);
+    if (plan != null) {
+      _saveRadio(mem.putPlan(key, advanceRadioPlan(plan, path)), activeKey: key);
     }
-    _radioLastArtist = _radioArtist(path);
+    saveTrackMusic(path, bpm: _extractBpm(path), camelot: harmonicKeyOf(path));
     _radioPending = null;
-    _radioPendingFolder = null;
     state = state.copyWith(clearRadioNextPath: true);
-    _saveRadioHistory();
+  }
+
+  void _captureRadioFreeze() {
+    if (_radioFreeze != null) return;
+    _radioFreeze = LiveQueueFreeze(
+      queue: state.queue.map((File f) => f.path).toList(),
+      current: state.currentTrackPath,
+      positionMs: state.position.inMilliseconds,
+      wasPlaying: state.isPlaying,
+    );
+  }
+
+  Future<void> _applyRadioFreeze(LiveQueueFreeze freeze) async {
+    final LiveQueueFreeze back = resumeLiveQueue(freeze);
+    _radioFreeze = null;
+    _radioPending = null;
+    _radioOffAfterFade = false;
+    _isStandbyArmed = false;
+    _standbyArmedPath = null;
+    state = state.copyWith(
+      radioOn: false,
+      queue: back.queue.map(File.new).toList(),
+      currentTrackPath: back.current,
+      clearCurrentTrackPath: back.current == null,
+      position: Duration(milliseconds: back.positionMs),
+      clearRadioNextPath: true,
+      isPlaying: back.wasPlaying,
+    );
+    _saveSnapshot();
+    final String? current = back.current;
+    if (current == null || !File(current).existsSync()) {
+      try {
+        await _activePlayer.stop();
+      } catch (_) {}
+      return;
+    }
+    try {
+      await _activePlayer.setVolume(100);
+      await _activePlayer.setRate(1);
+      await _activePlayer.open(Media(current), play: false);
+      ref.read(liveDjEqualizerProvider.notifier).adapt(_activePlayer, current);
+      if (back.positionMs > 0) {
+        await _activePlayer.seek(Duration(milliseconds: back.positionMs));
+      }
+      _attachListeners(_activePlayer);
+      if (back.wasPlaying) await _activePlayer.play();
+    } catch (e) {
+      debugPrint('🔴 [RADIO] reanudar cola: $e');
+    }
   }
 
   Future<void> toggleRadio() async {
     final bool on = !state.radioOn;
-    state = state.copyWith(radioOn: on, clearRadioNextPath: true);
     _radioPending = null;
-    _radioPendingFolder = null;
-    _saveSnapshot();
-    if (on) {
-      unawaited(_radioEnsureIndex());
-      if (state.currentTrackPath == null && !_isCrossfading) {
-        _isPrepModeBypass = false;
-        await forceNext();
-      } else {
-        unawaited(_radioNextPath()); // que el "siguiente" salga de inmediato
+    if (!on) {
+      final LiveQueueFreeze? freeze = _radioFreeze;
+      if (_isCrossfading && freeze != null) {
+        _radioOffAfterFade = true;
+        state = state.copyWith(radioOn: false, clearRadioNextPath: true);
+        _saveSnapshot();
+        return;
       }
+      if (freeze != null) {
+        await _applyRadioFreeze(freeze);
+        return;
+      }
+      state = state.copyWith(radioOn: false, clearRadioNextPath: true);
+      _saveSnapshot();
+      return;
+    }
+    _captureRadioFreeze();
+    state = state.copyWith(radioOn: true, clearRadioNextPath: true);
+    _saveSnapshot();
+    unawaited(_radioEnsureIndex());
+    if (state.currentTrackPath == null && !_isCrossfading) {
+      _isPrepModeBypass = false;
+      await forceNext();
+    } else {
+      unawaited(_radioNextPath());
     }
   }
 
   void clearRadioGenres() {
     state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
     _radioPending = null;
-    _radioPendingFolder = null;
     _saveSnapshot();
     if (state.radioOn) unawaited(_radioNextPath());
   }
 
   void toggleRadioGenre(String genre) {
     if (!kRadioGenreIds.contains(genre)) return;
-    final next = Set<String>.from(state.radioGenres);
+    final Set<String> next = Set<String>.from(state.radioGenres);
     if (!next.remove(genre)) next.add(genre);
     state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
     _radioPending = null;
-    _radioPendingFolder = null;
     _saveSnapshot();
     if (state.radioOn) unawaited(_radioNextPath());
   }
@@ -1766,7 +1815,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     // Empieza la última canción de la cola: la Radio se enciende sola.
     final bool autoRadio = !radioPick && !state.radioOn && newQueue.isEmpty;
-    if (autoRadio) unawaited(_radioEnsureIndex());
+    if (autoRadio) {
+      unawaited(_radioEnsureIndex());
+      _radioFreeze ??= LiveQueueFreeze(
+        queue: newQueue.map((File f) => f.path).toList(),
+        current: nextTrack,
+        positionMs: cueInMs,
+        wasPlaying: true,
+      );
+    }
     if (radioPick) _radioConsumed(nextTrack);
 
     state = state.copyWith(
@@ -1923,6 +1980,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
 
       _isCrossfading = false;
+      if (_radioOffAfterFade) {
+        _radioOffAfterFade = false;
+        final LiveQueueFreeze? freeze = _radioFreeze;
+        if (freeze != null) unawaited(_applyRadioFreeze(freeze));
+      }
     }
   }
 

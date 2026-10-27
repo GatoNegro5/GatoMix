@@ -107,6 +107,57 @@ double _bpmValue(dynamic value) {
   return 0;
 }
 
+/// BPM ya conocido (nombre del archivo o caché de etiquetas). No decodifica.
+double cachedBpm(String? path) {
+  if (path == null || path.isEmpty) return 0;
+  final String fileName = path.replaceAll('\\', '/').split('/').last;
+  final RegExpMatch? match = RegExp(
+    r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
+    caseSensitive: false,
+  ).firstMatch(fileName);
+  if (match != null) return double.parse(match.group(1)!);
+  return TrackTags.peek(path)?.bpm ?? 0;
+}
+
+/// Tonalidad Camelot guardada en el `.gatomix.json` de la carpeta.
+String? readStoredCamelot(String path) {
+  if (path.isEmpty) return null;
+  final String key = audioPathKey(path);
+  final String name = path.replaceAll('\\', '/').split('/').last.toLowerCase();
+  final List<Map<String, dynamic>> maps = _metaChain(
+    path,
+    <String, List<Map<String, dynamic>>>{},
+  );
+  String? from(dynamic value) {
+    if (value is Map && value['key'] is String) {
+      final String s = (value['key'] as String).trim();
+      if (s.isNotEmpty) return s;
+    }
+    return null;
+  }
+
+  for (final Map<String, dynamic> m in maps) {
+    for (final MapEntry<String, dynamic> e in m.entries) {
+      if (audioPathKey(e.key) != key) continue;
+      final String? k = from(e.value);
+      if (k != null) return k;
+    }
+  }
+  for (final Map<String, dynamic> m in maps) {
+    for (final MapEntry<String, dynamic> e in m.entries) {
+      final String base = e.key
+          .replaceAll('\\', '/')
+          .split('/')
+          .last
+          .toLowerCase();
+      if (base != name) continue;
+      final String? k = from(e.value);
+      if (k != null) return k;
+    }
+  }
+  return null;
+}
+
 int _syncsafe(List<int> b, int o) =>
     (b[o] << 21) | (b[o + 1] << 14) | (b[o + 2] << 7) | b[o + 3];
 

@@ -272,4 +272,90 @@ void main() {
     );
     dir.deleteSync(recursive: true);
   });
+
+  double bpmOf(String p) {
+    final RegExpMatch? m = RegExp(r'(\d+)bpm').firstMatch(p);
+    return m == null ? 0 : double.parse(m.group(1)!);
+  }
+
+  String? keyOf(String p) => camelotFromPath(p);
+
+  test('inserta una canción en el hueco de BPM y no mueve la actual ni la siguiente', () {
+    final List<String> queue = <String>[
+      '/q/siguiente 100bpm 8A.mp3',
+      '/q/a 104bpm 8A.mp3',
+      '/q/b 112bpm 9A.mp3',
+      '/q/c 120bpm 9A.mp3',
+    ];
+    final List<String> next = insertHarmonicTracks(
+      queue: queue,
+      incoming: <String>['/q/nueva 108bpm 8A.mp3'],
+      bpmOf: bpmOf,
+      keyOf: keyOf,
+      lockedPrefix: 1,
+      playing: '/q/sonando 98bpm 8A.mp3',
+      pinned: queue.first,
+    );
+    expect(next.first, queue.first);
+    expect(next[1], queue[1]);
+    expect(next[2], '/q/nueva 108bpm 8A.mp3');
+    expect(next.contains('/q/sonando 98bpm 8A.mp3'), isFalse);
+    expect(next.length, queue.length + 1);
+  });
+
+  test('inserta un lote en los huecos, sin duplicados y sin BPM al final', () {
+    final List<String> queue = <String>[
+      '/q/siguiente 100bpm 8A.mp3',
+      '/q/a 104bpm 8A.mp3',
+      '/q/b 112bpm 9A.mp3',
+      '/q/c 120bpm 9A.mp3',
+    ];
+    final List<String> next = insertHarmonicTracks(
+      queue: queue,
+      incoming: <String>[
+        '/q/nueva 108bpm 8A.mp3',
+        '/q/otra 116bpm 9A.mp3',
+        '/q/a 104bpm 8A.mp3',
+        '/q/nueva 108bpm 8A.mp3',
+        '/q/sin.mp3',
+        '/q/tema_K.mp3',
+      ],
+      bpmOf: bpmOf,
+      keyOf: keyOf,
+      lockedPrefix: 1,
+      playing: '/q/sonando 98bpm 8A.mp3',
+      pinned: queue.first,
+    );
+    expect(next, <String>[
+      queue[0],
+      queue[1],
+      '/q/nueva 108bpm 8A.mp3',
+      queue[2],
+      '/q/otra 116bpm 9A.mp3',
+      queue[3],
+      '/q/sin.mp3',
+    ]);
+    expect(next.toSet().length, next.length);
+  });
+
+  test('BPM y tonalidad se escriben al momento en .gatomix.json', () {
+    final Directory dir = Directory.systemTemp.createTempSync('gmx_tag_');
+    final String s = Platform.pathSeparator;
+    final String path = '${dir.path}${s}Tema 118bpm 8A.mp3';
+    File(path).writeAsBytesSync(<int>[1, 2, 3]);
+    saveTrackMusic(path, bpm: 118, camelot: '8A');
+    final File store = File('${dir.path}${s}.gatomix.json');
+    expect(store.existsSync(), isTrue);
+    final Map<String, dynamic> doc =
+        jsonDecode(store.readAsStringSync()) as Map<String, dynamic>;
+    final Map<dynamic, dynamic> meta = doc['djMetadata'] as Map<dynamic, dynamic>;
+    final dynamic row = meta[path];
+    expect(row, isA<Map>());
+    expect((row as Map)['bpm'], 118);
+    expect(row['key'], '8A');
+    expect(File(path).readAsBytesSync(), <int>[1, 2, 3]);
+    expect(readStoredCamelot(path), '8A');
+    expect(harmonicKeyOf(path), '8A');
+    dir.deleteSync(recursive: true);
+  });
 }
