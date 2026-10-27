@@ -256,6 +256,18 @@ bool radioPlanIsOpen(RadioPlan? saved, List<String> pool) {
   return position >= 0 && position < kept;
 }
 
+/// La vuelta completa (BPM de todo el universo + Shuffle) no se relanza
+/// en cada tick. Mientras hay una en curso, o la lista guardada sigue
+/// abierta, no arranca otra. Una lista ya terminada sí pide la vuelta
+/// siguiente: una sola, no una por tick.
+bool radioAssembleShouldStart({
+  required bool inFlight,
+  required bool planOpen,
+}) {
+  if (planOpen || inFlight) return false;
+  return true;
+}
+
 /// Una pista para mezclar ya, sin armar la vuelta entera.
 String? radioQuickNext({
   required List<String> pool,

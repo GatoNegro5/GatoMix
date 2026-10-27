@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/audio/af_caps.dart';
 import '../core/hal/platform_strategy.dart';
 
@@ -49,17 +51,21 @@ class AdaptiveEq {
   /// Interruptor global (por defecto activo).
   static bool enabled = true;
 
-  /// 1.0.19 tipo Sound Check: sonoridad integrada BS.1770, objetivo −14 LUFS
-  /// (el mismo de Masterizar). Antes: −16 LUFS medido solo en 30 s.
+  /// 1.0.19 tipo Sound Check: sonoridad integrada BS.1770 de la pista
+  /// COMPLETA, objetivo −14 LUFS (el mismo de Masterizar). Antes: −16 LUFS
+  /// medido solo en 30 s, por eso canciones masterizadas y no masterizadas
+  /// sonaban distinto.
   static const double targetLufs = -14.0;
 
-  /// Arranques (s) de las ventanas de sonoridad. Vacío si la pista ya trae
-  /// `GMX_LUFS_DONE`: la ganancia de sonoridad queda en 0 y no se decodifica
-  /// el resto del archivo mientras suena.
+  /// Arranques (s) de las ventanas de sonoridad integrada. Igual con
+  /// `GMX_LUFS_DONE`: la ganancia queda en 0 solo si la medida cae en
+  /// −14 ±1 LU (`soundCheckGainDb`). No se salta la medida.
   @visibleForTesting
-  static List<int> integratedLoudnessStarts({required bool lufsDone}) {
-    if (lufsDone) return const <int>[];
-    return const <int>[0, 60, 120, 180];
+  static List<int> integratedLoudnessStarts({bool lufsDone = false}) {
+    final List<int> windows = <int>[for (int s = 0; s < 1200; s += 30) s];
+    // La marca no acorta la medida: las dos ramas son la pista completa.
+    if (lufsDone) return windows;
+    return windows;
   }
 
   /// Ganancia (dB) hacia [targetLufs] sin clipping: nunca más arriba que
@@ -259,9 +265,8 @@ class AdaptiveEq {
       _mem[k] = c;
       return Future.value(c);
     }
-    return _pending[k] ??= _enqueue(
-      () => _measure(path, k),
-    ).whenComplete(() => _pending.remove(k));
+    return _pending[k] ??= _enqueue(() => _measure(path, k))
+        .whenComplete(() => _pending.remove(k));
   }
 
   static Future<AdaptiveProfile?> _enqueue(
@@ -306,17 +311,14 @@ class AdaptiveEq {
       AdaptiveProfile? p = await Isolate.run(
         () => _analyze(data, lufsDone: lufsDone),
       );
-      // Sonoridad. Una pista con GMX_LUFS_DONE ya está en −14: no se
-      // decodifica entera (eso calentaba el CPU en cada canción de Live DJ).
-      // Sin esa marca, cuatro ventanas y se corta al acabar el archivo.
-      // Antes: cada 30 s hasta 20 min; si el seek fallaba, 40 veces el
-      // mismo tramo inicial.
-      if (p != null && lufsDone) {
-        p = AdaptiveProfile(p.gains, 0);
-      } else if (p != null) {
+      // 1.0.19 Sound Check: sonoridad integrada de la pista COMPLETA, por
+      // tramos de 30 s (memoria acotada en el celular). El espectro sigue
+      // saliendo de la ventana de 30 s. GMX_LUFS_DONE no anula la medida:
+      // la ganancia es 0 solo si el resultado cae en −14 ±1 LU.
+      if (p != null) {
         final List<double> blocks = <double>[];
         double peak = 0;
-        for (final int start in integratedLoudnessStarts(lufsDone: false)) {
+        for (final int start in integratedLoudnessStarts()) {
           Uint8List chunk;
           try {
             chunk = await rust_dsp.decodeMonoPcm(

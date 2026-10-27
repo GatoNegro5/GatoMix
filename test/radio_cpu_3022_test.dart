@@ -101,36 +101,33 @@ void main() {
     );
   });
 
-  test(
-    '1500 pistas: el índice gana al bucle que llamaba audioPathKey por candidato',
-    () {
-      final List<String> pool = spread(1500);
-      final Stopwatch neu = Stopwatch()..start();
-      final List<String> order = buildDifferentRound(
-        pool: pool,
-        bpmOf: bpmOf,
-        rng: Random(7),
-      );
-      neu.stop();
-      final Stopwatch old = Stopwatch()..start();
-      var ops = 0;
-      for (var left = pool.length; left > 1; left--) {
-        for (var j = 0; j < left; j++) {
-          audioPathKey(pool[j]);
-          ops++;
-        }
+  test('1500 pistas: el índice gana al bucle que llamaba audioPathKey por candidato', () {
+    final List<String> pool = spread(1500);
+    final Stopwatch neu = Stopwatch()..start();
+    final List<String> order = buildDifferentRound(
+      pool: pool,
+      bpmOf: bpmOf,
+      rng: Random(7),
+    );
+    neu.stop();
+    final Stopwatch old = Stopwatch()..start();
+    var ops = 0;
+    for (var left = pool.length; left > 1; left--) {
+      for (var j = 0; j < left; j++) {
+        audioPathKey(pool[j]);
+        ops++;
       }
-      old.stop();
-      expectPermutation(order, pool);
-      expect(
-        neu.elapsedMicroseconds,
-        lessThan(old.elapsedMicroseconds),
-        reason:
-            'nuevo ${neu.elapsedMilliseconds} ms, '
-            'bucle viejo $ops claves en ${old.elapsedMilliseconds} ms',
-      );
-    },
-  );
+    }
+    old.stop();
+    expectPermutation(order, pool);
+    expect(
+      neu.elapsedMicroseconds,
+      lessThan(old.elapsedMicroseconds),
+      reason:
+          'nuevo ${neu.elapsedMilliseconds} ms, '
+          'bucle viejo $ops claves en ${old.elapsedMilliseconds} ms',
+    );
+  });
 
   test('300 pistas: la ola sigue siendo de saltos cortos', () {
     final List<String> pool = <String>[
@@ -205,13 +202,22 @@ void main() {
     expect(sessionPositionShouldSave(1000, 20000), isTrue);
   });
 
-  test('sonoridad: masterizada no pide ventanas; el resto, cuatro', () {
-    expect(AdaptiveEq.integratedLoudnessStarts(lufsDone: true), isEmpty);
+  test('sonoridad: masterizada se mide igual y no se anula a 0 dB', () {
+    final List<int> done = AdaptiveEq.integratedLoudnessStarts(lufsDone: true);
     final List<int> open = AdaptiveEq.integratedLoudnessStarts(lufsDone: false);
-    expect(open.length, lessThanOrEqualTo(4));
-    expect(open.length, greaterThan(0));
-    // Antes: 0, 30, …, 1170 → 40 decodificaciones por canción.
-    expect(open.length, lessThan(10));
+    expect(done, open);
+    expect(done.length, 40);
+    expect(done.first, 0);
+    expect(done.last, 1170);
+    // Dentro de ±1 LU de −14, la ganancia es 0. Fuera, se corrige.
+    expect(
+      AdaptiveEq.soundCheckGainDb(lufs: -14.2, peakDb: -1.2, lufsDone: true),
+      0,
+    );
+    expect(
+      AdaptiveEq.soundCheckGainDb(lufs: -10, peakDb: -1.2, lufsDone: true),
+      isNot(0),
+    );
   });
 
   test('un fallo de artista no se reintenta en cada frame', () {

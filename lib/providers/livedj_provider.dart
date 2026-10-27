@@ -941,7 +941,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final String? tickPath = state.currentTrackPath;
       final durMs = state.duration.inMilliseconds;
 
-      if ((posMs - _lastUiPosMs).abs() >= 250) {
+      if (uiPositionShouldPublish(posMs, _lastUiPosMs)) {
         _lastUiPosMs = posMs;
         state = state.copyWith(position: pos);
       }
@@ -1577,7 +1577,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     required RadioPlan? saved,
     required String? pinned,
   }) {
-    if (_radioAssemble != null && _radioAssembleEpoch == epoch) return;
+    if (!radioAssembleShouldStart(
+      inFlight: _radioAssemble != null && _radioAssembleEpoch == epoch,
+      planOpen: false,
+    )) {
+      return;
+    }
     _radioAssembleEpoch = epoch;
     final Map<String, Object?> msg = <String, Object?>{
       'pool': List<String>.from(pool),

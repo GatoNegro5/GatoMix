@@ -79,11 +79,21 @@ double _fromMetadata(
   return 0;
 }
 
+int _metaGen = -1;
+final Map<String, List<Map<String, dynamic>>> _metaMem =
+    <String, List<Map<String, dynamic>>>{};
+
 List<Map<String, dynamic>> _metaChain(
   String path,
   Map<String, List<Map<String, dynamic>>> cache,
 ) {
+  if (_metaGen != GatomixStore.generation) {
+    _metaGen = GatomixStore.generation;
+    _metaMem.clear();
+  }
   final String dir = File(path).parent.path;
+  final List<Map<String, dynamic>>? stable = _metaMem[dir];
+  if (stable != null) return stable;
   final List<Map<String, dynamic>>? hit = cache[dir];
   if (hit != null) return hit;
   final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
@@ -96,6 +106,7 @@ List<Map<String, dynamic>> _metaChain(
     cursor = parent;
   }
   cache[dir] = out;
+  _metaMem[dir] = out;
   return out;
 }
 
@@ -115,12 +126,33 @@ double memoryBpm(String? path) {
   return TrackTags.peek(path)?.bpm ?? 0;
 }
 
+int _knownBpmGen = -1;
+final Map<String, double> _knownBpmMem = <String, double>{};
+
+void _syncKnownBpmGen() {
+  if (_knownBpmGen == GatomixStore.generation) return;
+  _knownBpmGen = GatomixStore.generation;
+  _knownBpmMem.clear();
+}
+
 /// BPM ya conocido. No decodifica.
 ///
 /// Nombre, caché de etiquetas y `.gatomix.json`. La caché y el metadata se
 /// buscan por [audioPathKey]: otra forma de la misma ruta no cae en 0.
+/// Un acierto positivo se recuerda: el tick de posición no vuelve a abrir
+/// el JSON. Un 0 no se recuerda (Masterizar puede escribir el BPM después).
 double knownBpm(String? path) {
   if (path == null || path.isEmpty) return 0;
+  _syncKnownBpmGen();
+  final String memKey = audioPathKey(path);
+  final double? mem = _knownBpmMem[memKey];
+  if (mem != null && mem > 0) return mem;
+  final double found = _knownBpmRead(path);
+  if (found > 0) _knownBpmMem[memKey] = found;
+  return found;
+}
+
+double _knownBpmRead(String path) {
   final String fileName = path.replaceAll('\\', '/').split('/').last;
   final RegExpMatch? match = RegExp(
     r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',

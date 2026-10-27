@@ -65,10 +65,23 @@ class ShuffleMemory {
 class GatomixStore {
   static final String _sep = Platform.pathSeparator;
 
+  /// Documento ya leído, por carpeta. Se invalida al escribir.
+  static final Map<String, Map<String, dynamic>> _docs =
+      <String, Map<String, dynamic>>{};
+
+  /// Carpetas sin JSON viejo: `migrate` no vuelve a hacer `existsSync`.
+  static final Set<String> _migratedClean = <String>{};
+
+  /// Sube en cada escritura. Quien cachea un BPM derivado lo descarta.
+  static int generation = 0;
+
+  /// Lecturas reales de `.gatomix.json` (no los aciertos de caché).
+  static int debugDiskReads = 0;
+
   static File fileOf(String dir) => File('$dir$_sep$gatomixStoreName');
 
   static bool migrate(String dir) {
-    if (dir.isEmpty) return false;
+    if (dir.isEmpty || _migratedClean.contains(dir)) return false;
     final Directory folder = Directory(dir);
     if (!folder.existsSync()) return false;
     final List<File> pending = <File>[];
@@ -82,7 +95,10 @@ class GatomixStore {
       final File f = File('$dir$_sep$name');
       if (f.existsSync()) pending.add(f);
     }
-    if (pending.isEmpty) return false;
+    if (pending.isEmpty) {
+      _migratedClean.add(dir);
+      return false;
+    }
 
     final Map<String, dynamic>? existing = _read(dir);
     if (existing == null) return false;
@@ -137,6 +153,7 @@ class GatomixStore {
         if (f.existsSync()) f.deleteSync();
       } catch (_) {}
     }
+    _migratedClean.add(dir);
     return true;
   }
 
@@ -345,11 +362,18 @@ class GatomixStore {
   }
 
   static Map<String, dynamic>? _read(String dir) {
+    final Map<String, dynamic>? hit = _docs[dir];
+    if (hit != null) return hit;
     final File f = fileOf(dir);
     if (!f.existsSync()) return <String, dynamic>{'schema': 1};
     try {
+      debugDiskReads++;
       final Object? d = jsonDecode(f.readAsStringSync());
-      if (d is Map) return Map<String, dynamic>.from(d);
+      if (d is Map) {
+        final Map<String, dynamic> map = Map<String, dynamic>.from(d);
+        _docs[dir] = map;
+        return map;
+      }
     } catch (_) {}
     return null;
   }
@@ -373,8 +397,12 @@ class GatomixStore {
       if (dest.existsSync()) dest.deleteSync();
       tmp.renameSync(dest.path);
       hideOnWindows(dest.path);
+      _docs[dir] = doc;
+      _migratedClean.add(dir);
+      generation++;
       return true;
     } catch (_) {
+      _docs.remove(dir);
       return false;
     }
   }
@@ -423,10 +451,7 @@ void saveTrackMusic(String path, {required double bpm, String? camelot}) {
   if (stored <= 0 && (storedKey == null || storedKey.isEmpty)) return;
   final Object value = (storedKey == null || storedKey.isEmpty)
       ? stored
-      : <String, dynamic>{
-          if (stored > 0) 'bpm': stored,
-          'key': storedKey,
-        };
+      : <String, dynamic>{if (stored > 0) 'bpm': stored, 'key': storedKey};
   if (slot != null && slot != path) map.remove(slot);
   map[path] = value;
   writeDjMetadata(dir, map);
@@ -466,10 +491,7 @@ Map<String, dynamic> bpmIndexPreservingKeys(
     final double bpm = e.value > 0 ? e.value : prevBpm;
     final Object value;
     if (camelot != null) {
-      value = <String, dynamic>{
-        if (bpm > 0) 'bpm': bpm,
-        'key': camelot,
-      };
+      value = <String, dynamic>{if (bpm > 0) 'bpm': bpm, 'key': camelot};
     } else if (bpm > 0) {
       value = bpm;
     } else if (prev != null) {

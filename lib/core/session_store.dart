@@ -98,6 +98,17 @@ bool sessionPositionShouldSave(int posMs, int lastSavedMs) {
   return false;
 }
 
+/// ¿Este tick del reloj repinta la vista (un `notifyListeners`)?
+///
+/// Como máximo cada 250 ms. Un glitch a 0 intercalado por media_kit no
+/// cuenta: si contara, el `abs` del umbral republicaría la carátula en
+/// cada tick (~60 Hz) durante toda la canción.
+bool uiPositionShouldPublish(int posMs, int lastUiMs) {
+  if (lastUiMs < 0) return true;
+  if (posMs <= 0 && lastUiMs > 500) return false;
+  return (posMs - lastUiMs).abs() >= 250;
+}
+
 /// Clave de nombre para reencontrar una pista que Masterizar renombró
 /// (limpieza de nombre): minúsculas, solo letras/dígitos, sin "bpm" ni
 /// sufijos de versión.
@@ -129,9 +140,11 @@ List<String> resolveSessionPaths(
       listDir ??
       (String dir) {
         try {
-          return Directory(
-            dir,
-          ).listSync().whereType<File>().map((f) => f.path).toList();
+          return Directory(dir)
+              .listSync()
+              .whereType<File>()
+              .map((f) => f.path)
+              .toList();
         } catch (_) {
           return const <String>[];
         }
