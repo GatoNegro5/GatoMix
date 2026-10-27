@@ -78,6 +78,9 @@ class GatomixStore {
   /// Lecturas reales de `.gatomix.json` (no los aciertos de caché).
   static int debugDiskReads = 0;
 
+  /// Cierto si el documento de [dir] ya se leyó (o se escribió) en este proceso.
+  static bool holdsDocument(String dir) => _docs.containsKey(dir);
+
   static File fileOf(String dir) => File('$dir$_sep$gatomixStoreName');
 
   static bool migrate(String dir) {

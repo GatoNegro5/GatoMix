@@ -134,6 +134,34 @@ class RadioMemory {
     );
   }
 
+  /// La mezcla de [played] ya entró. Avanza la posición de [key] y la anota
+  /// al final del historial para que no vuelva enseguida (A→B→A).
+  RadioMemory rememberMix({required String key, required String played}) {
+    final RadioPlan? plan = plans[key];
+    final Map<String, RadioPlan> nextPlans = <String, RadioPlan>{...plans};
+    if (plan != null) {
+      nextPlans[key] = advanceRadioPlan(plan, played);
+    }
+    final List<String> nextHistory = <String>[
+      for (final String p in history)
+        if (!sameAudioPath(p, played)) p,
+      played,
+    ];
+    final List<String> capped = nextHistory.length > 48
+        ? nextHistory.sublist(nextHistory.length - 48)
+        : nextHistory;
+    return RadioMemory(
+      history: capped,
+      plans: nextPlans,
+      carriedPairs: carriedPairs,
+      waveUp: waveUp,
+      inWave: inWave,
+      previousBpm: previousBpm,
+      lastArtist: lastArtist,
+      lastPath: played,
+    );
+  }
+
   Map<String, dynamic> toJson({String? activeKey}) {
     final RadioPlan? active = activeKey == null ? null : plans[activeKey];
     final List<String> prev = active != null && active.previousPairs.isNotEmpty
@@ -268,10 +296,199 @@ bool radioAssembleShouldStart({
   return true;
 }
 
+/// La que suena, la anterior y el historial reciente no pueden volver a salir.
+bool radioRepeatsRecent(
+  String path, {
+  String? playing,
+  String? previous,
+  Iterable<String> recent = const <String>[],
+}) {
+  if (path.isEmpty) return true;
+  if (playing != null && playing.isNotEmpty && sameAudioPath(path, playing)) {
+    return true;
+  }
+  if (previous != null &&
+      previous.isNotEmpty &&
+      sameAudioPath(path, previous)) {
+    return true;
+  }
+  for (final String r in recent) {
+    if (sameAudioPath(path, r)) return true;
+  }
+  return false;
+}
+
+/// Las últimas [limit] del historial (lo más nuevo al final).
+List<String> radioRecent(List<String> history, {int limit = 8}) {
+  if (history.length <= limit) return List<String>.from(history);
+  return List<String>.from(history.sublist(history.length - limit));
+}
+
+/// Siguiente de una lista que todavía no se terminó.
+/// Salta la que suena, la anterior y el historial. No rearma.
+String? radioPlanNext({
+  required RadioPlan plan,
+  String? playing,
+  String? previous,
+  List<String> recent = const <String>[],
+}) {
+  if (plan.order.isEmpty || plan.finished) return null;
+  final int start = plan.position < 0 ? 0 : plan.position;
+  for (var i = start; i < plan.order.length; i++) {
+    final String p = plan.order[i];
+    if (radioRepeatsRecent(
+      p,
+      playing: playing,
+      previous: previous,
+      recent: recent,
+    )) {
+      continue;
+    }
+    return p;
+  }
+  return null;
+}
+
+/// Lo que elige la radio para la próxima mezcla, sin tocar un deck.
+class RadioResolve {
+  final String? next;
+  final RadioMemory memory;
+
+  /// Cierto si esta llamada armó una vuelta nueva.
+  final bool rebuilt;
+
+  /// Cierto si [next] sale de la lista ya abierta, en su orden.
+  final bool followedPlan;
+
+  /// No hay lista abierta: hay que armarla fuera del hilo que suena.
+  final bool needsAssemble;
+
+  const RadioResolve({
+    required this.next,
+    required this.memory,
+    required this.rebuilt,
+    required this.followedPlan,
+    required this.needsAssemble,
+  });
+}
+
+/// Sigue la lista de [key]. Si queda cola, no la rearma y no elige por BPM.
+/// Si no queda, y [allowRebuild] es falso, devuelve una pista suelta que no
+/// sea la actual ni la anterior; la vuelta completa la arma el isolate.
+RadioResolve radioResolveNext({
+  required RadioMemory memory,
+  required String key,
+  required List<String> pool,
+  String? playing,
+  String? previous,
+  required double Function(String path) bpmOf,
+  String? Function(String path)? keyOf,
+  Random? rng,
+  bool allowRebuild = true,
+}) {
+  final List<String> recent = radioRecent(memory.history);
+  final RadioPlan? saved = memory.planOf(key);
+  if (saved != null && !saved.finished) {
+    final RadioSync synced = syncRadioPlan(
+      saved: saved,
+      pool: pool,
+      bpmOf: bpmOf,
+      keyOf: keyOf,
+      rng: rng,
+      playing: playing,
+      previous: previous,
+    );
+    final String? next = radioPlanNext(
+      plan: synced.plan,
+      playing: playing,
+      previous: previous,
+      recent: recent,
+    );
+    if (next != null) {
+      // Si el puesto apuntaba a la que suena, la lista visible empieza en la
+      // que va a entrar. La mezcla, al completarse, avanza uno más.
+      return RadioResolve(
+        next: next,
+        memory: memory.putPlan(key, _alignPlan(synced.plan, next)),
+        rebuilt: synced.rebuilt,
+        followedPlan: !synced.rebuilt,
+        needsAssemble: false,
+      );
+    }
+    memory = memory.putPlan(key, synced.plan.copy(position: synced.plan.order.length));
+  }
+  if (!allowRebuild) {
+    return RadioResolve(
+      next: radioQuickNext(
+        pool: pool,
+        anchor: playing,
+        previous: previous,
+        recent: recent,
+        bpmOf: bpmOf,
+        keyOf: keyOf,
+        rng: rng,
+      ),
+      memory: memory,
+      rebuilt: false,
+      followedPlan: false,
+      needsAssemble: true,
+    );
+  }
+  final List<String> roundPool = <String>[
+    for (final String p in pool)
+      if (!radioRepeatsRecent(p, playing: playing, previous: previous)) p,
+  ];
+  if (roundPool.isEmpty) {
+    return RadioResolve(
+      next: null,
+      memory: memory,
+      rebuilt: false,
+      followedPlan: false,
+      needsAssemble: false,
+    );
+  }
+  final RadioPlan? done = memory.planOf(key);
+  final RadioSync fresh = syncRadioPlan(
+    saved: done != null && done.finished ? done : null,
+    pool: roundPool,
+    bpmOf: bpmOf,
+    keyOf: keyOf,
+    rng: rng,
+    playing: playing,
+    previous: previous,
+  );
+  final String? next = radioPlanNext(
+    plan: fresh.plan,
+    playing: playing,
+    previous: previous,
+    recent: recent,
+  );
+  return RadioResolve(
+    next: next,
+    memory: next == null ? memory : memory.putPlan(key, _alignPlan(fresh.plan, next)),
+    rebuilt: true,
+    followedPlan: false,
+    needsAssemble: false,
+  );
+}
+
+RadioPlan _alignPlan(RadioPlan plan, String next) {
+  final int start = plan.position < 0 ? 0 : plan.position;
+  for (var i = start; i < plan.order.length; i++) {
+    if (!sameAudioPath(plan.order[i], next)) continue;
+    if (i == plan.position) return plan;
+    return plan.copy(position: i);
+  }
+  return plan;
+}
+
 /// Una pista para mezclar ya, sin armar la vuelta entera.
+/// Nunca devuelve [anchor] (la que suena), [previous] ni [recent].
 String? radioQuickNext({
   required List<String> pool,
   String? anchor,
+  String? previous,
+  Iterable<String> recent = const <String>[],
   double Function(String path)? bpmOf,
   String? Function(String path)? keyOf,
   Random? rng,
@@ -283,7 +500,14 @@ String? radioQuickNext({
   for (var i = 0; i < pool.length && cands.length < cap; i += step) {
     final String p = pool[i];
     if (p.isEmpty || isKaraokeAudioPath(p)) continue;
-    if (anchor != null && sameAudioPath(p, anchor)) continue;
+    if (radioRepeatsRecent(
+      p,
+      playing: anchor,
+      previous: previous,
+      recent: recent,
+    )) {
+      continue;
+    }
     cands.add(p);
   }
   if (cands.isEmpty) return null;
@@ -350,6 +574,8 @@ List<String> buildDifferentRound({
   List<String> previousOrder = const <String>[],
   List<String> previousPairs = const <String>[],
   String? fixedFirst,
+  String? playing,
+  Map<String, int> recentAge = const <String, int>{},
   Random? rng,
   int maxAttempts = radioRebuildAttempts,
 }) {
@@ -372,6 +598,8 @@ List<String> buildDifferentRound({
         bpmOf,
         keyOf: keyOf,
         usedPairs: used,
+        recentAge: recentAge,
+        playing: playing,
         fixedFirst: fixedFirst,
         rng: spin,
       ).tracks,
@@ -407,6 +635,8 @@ RadioPlan _freshPlan(
   List<String> previousPairs,
   Random rng, {
   String? fixedFirst,
+  String? playing,
+  Map<String, int> recentAge = const <String, int>{},
 }) {
   final List<String> order = buildDifferentRound(
     pool: pool,
@@ -415,6 +645,8 @@ RadioPlan _freshPlan(
     previousOrder: previousOrder,
     previousPairs: previousPairs,
     fixedFirst: fixedFirst,
+    playing: playing,
+    recentAge: recentAge,
     rng: rng,
   );
   return RadioPlan(
@@ -435,9 +667,16 @@ RadioSync syncRadioPlan({
   required double Function(String path) bpmOf,
   String? Function(String path)? keyOf,
   String? pinned,
+  String? playing,
+  String? previous,
   Random? rng,
 }) {
   final Random random = rng ?? Random();
+  String? lock = pinned;
+  if (lock != null &&
+      radioRepeatsRecent(lock, playing: playing, previous: previous)) {
+    lock = null;
+  }
   final List<String> songs = _cleanPool(pool);
   if (songs.isEmpty) {
     return RadioSync(const RadioPlan(), rebuilt: saved == null);
@@ -455,7 +694,8 @@ RadioSync syncRadioPlan({
         const <String>[],
         const <String>[],
         random,
-        fixedFirst: pinned,
+        fixedFirst: lock,
+        playing: playing,
       ),
       rebuilt: true,
     );
@@ -484,7 +724,8 @@ RadioSync syncRadioPlan({
         saved.order,
         prevPairs,
         random,
-        fixedFirst: pinned,
+        fixedFirst: lock,
+        playing: playing,
       ),
       rebuilt: true,
     );
@@ -771,6 +1012,26 @@ class GatomixRadio {
       if (dest.existsSync()) dest.deleteSync();
       tmp.renameSync(dest.path);
       hideOnWindows(dest.path);
+    } catch (_) {}
+  }
+
+  /// Escritura fuera del hilo que está sonando. No usa `writeAsStringSync`.
+  static Future<void> saveAsync(String musicRoot, Map<String, dynamic> doc) async {
+    if (musicRoot.isEmpty) return;
+    try {
+      final Directory dir = Directory(musicRoot);
+      if (!await dir.exists()) await dir.create(recursive: true);
+      final String text = jsonEncode(doc);
+      final File dest = fileIn(musicRoot);
+      final File tmp = File('${dest.path}.tmp');
+      await tmp.writeAsString(text, flush: true);
+      if (await dest.exists()) await dest.delete();
+      await tmp.rename(dest.path);
+      if (Platform.isWindows) {
+        try {
+          await Process.run('attrib', <String>['+h', dest.path]);
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 

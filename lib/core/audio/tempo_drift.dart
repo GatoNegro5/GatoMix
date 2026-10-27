@@ -91,7 +91,8 @@ class TempoDrift {
     return null;
   }
 
-  /// Rampa lenta (senoidal) del rate; se cancela si empieza otra pista o otro paso.
+  /// Rampa lenta (senoidal) del rate. El temporizador es propio: no depende
+  /// del reloj de la UI (250 ms) ni de los rebuilds de la carátula.
   Future<void> ramp(Player p, double from, double to, {int ms = 5000}) async {
     final int g = _gen;
     final int r = _rampGen;
@@ -99,11 +100,50 @@ class TempoDrift {
     try {
       while (sw.elapsedMilliseconds < ms) {
         if (g != _gen || r != _rampGen) return;
-        final double t = (sw.elapsedMilliseconds / ms).clamp(0.0, 1.0);
-        await p.setRate(from + (to - from) * sin(t * pi / 2));
+        final double t = sw.elapsedMilliseconds / ms;
+        await p.setRate(tempoRampValue(from, to, t));
         await Future.delayed(const Duration(milliseconds: 100));
       }
       if (g == _gen && r == _rampGen) await p.setRate(to);
     } catch (_) {}
   }
+}
+
+/// Curva de la rampa: seno de cuarto de ciclo, de [from] a [to].
+/// Espera hasta el próximo golpe del saliente, menos 20 ms de arranque.
+/// El saliente avanza [outRate] ms de pista por cada ms real.
+/// Cero si no hay que esperar. El llamador solo demora si queda entre 0 y 1500.
+int beatPhaseWaitMs({
+  required double nowOutMs,
+  required double beatMs,
+  required double bpm,
+  required double outRate,
+}) {
+  if (bpm <= 0 || outRate <= 0) return 0;
+  final double period = 60000.0 / bpm;
+  final double k = ((nowOutMs + 60 - beatMs) / period).ceilToDouble();
+  final double nextBeat = beatMs + k * period;
+  return ((nextBeat - nowOutMs) / outRate).round() - 20;
+}
+
+double tempoRampValue(double from, double to, double t) {
+  final double u = t.clamp(0.0, 1.0);
+  return from + (to - from) * sin(u * pi / 2);
+}
+
+/// Pasos de la rampa con su propio reloj. 5 s / 100 ms: el mismo recorrido
+/// aunque la UI publique la posición solo cada 250 ms.
+List<double> tempoRampSchedule(
+  double from,
+  double to, {
+  int ms = 5000,
+  int stepMs = 100,
+}) {
+  if (ms <= 0 || stepMs <= 0) return <double>[to];
+  final List<double> out = <double>[];
+  for (int elapsed = 0; elapsed < ms; elapsed += stepMs) {
+    out.add(tempoRampValue(from, to, elapsed / ms));
+  }
+  out.add(to);
+  return out;
 }

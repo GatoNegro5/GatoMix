@@ -98,15 +98,21 @@ List<Map<String, dynamic>> _metaChain(
   if (hit != null) return hit;
   final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
   Directory cursor = Directory(dir);
+  var ownLoaded = false;
   for (var depth = 0; depth < 6; depth++) {
     final Map<String, dynamic> m = readDjMetadata(cursor.path);
+    if (depth == 0) ownLoaded = GatomixStore.holdsDocument(cursor.path);
     if (m.isNotEmpty) out.add(m);
     final Directory parent = cursor.parent;
     if (parent.path == cursor.path) break;
     cursor = parent;
   }
   cache[dir] = out;
-  _metaMem[dir] = out;
+  // Un archivo que todavía no está no se memoriza: si no, el BPM queda en 0
+  // para siempre y la rampa cree que las dos pistas van igual. Un documento
+  // ya leído sí se memoriza, aunque no tenga BPM, para no reabrir el JSON
+  // en cada tick.
+  if (ownLoaded || out.isNotEmpty) _metaMem[dir] = out;
   return out;
 }
 

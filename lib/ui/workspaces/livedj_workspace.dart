@@ -13,6 +13,7 @@ import 'livedj_bpm_badge.dart';
 import 'livedj_artist_card.dart';
 import 'livedj_folder_playlist.dart';
 import '../../core/audio/cue_preview.dart';
+import '../../core/livedj_next.dart';
 
 /// Texto del buscador de la cola (solo filtra la vista; la cola real no cambia).
 final liveDjQueueSearchProvider = StateProvider<String>((ref) => '');
@@ -246,8 +247,6 @@ class LiveDjPlayerPanel extends ConsumerStatefulWidget {
 
 class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
   double? _dragPosition;
-  String? _stealthNextName;
-  String? _stealthCacheKey;
 
   /// Línea vertical en la barra: punto donde arranca la mezcla (DNA / Phrase 8 /
   /// Stealth). `mixMs` = `customMixOutMs` del provider (mismo valor que dispara).
@@ -294,51 +293,12 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
 
     final isMixBypass = state.currentMixMode == LiveDjMixMode.longBypass;
     final mixFormula = ref.watch(mixFormulaProvider);
-    String? nextName;
-    if (state.queue.isEmpty) {
-      nextName = null;
-      _stealthCacheKey = null;
-    } else if (mixFormula == MixFormula.stealthGap &&
-        state.currentTrackPath != null) {
-      final String key =
-          '${state.currentTrackPath}|${state.queue.map((f) => f.path).join('|')}';
-      if (_stealthCacheKey != key) {
-        _stealthCacheKey = key;
-        final int i = pickStealthNextIndex(
-          remaining: state.queue.map((f) => f.path).toList(),
-          currentPath: state.currentTrackPath,
-          bpmOf: (p) {
-            final fileName = p.replaceAll('\\', '/').split('/').last;
-            final match = RegExp(
-              r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-              caseSensitive: false,
-            ).firstMatch(fileName);
-            return match != null ? double.parse(match.group(1)!) : 0.0;
-          },
-        );
-        _stealthNextName =
-            (i >= 0 ? state.queue[i].path : state.queue.first.path)
-                .replaceAll('\\', '/')
-                .split('/')
-                .last;
-      }
-      nextName = _stealthNextName;
-    } else if (state.currentTrackPath == null) {
-      _stealthCacheKey = null;
-      nextName = state.queue.length > 1
-          ? state.queue[1].path.replaceAll('\\', '/').split('/').last
-          : null;
-    } else {
-      _stealthCacheKey = null;
-      nextName = state.queue.first.path.replaceAll('\\', '/').split('/').last;
-    }
-    // Radio encendida: el "siguiente" es el que la Radio ya eligió, no la cola.
-    if (state.radioOn) {
-      final String? rn = state.radioNextPath;
-      nextName = rn == null
-          ? 'RADIO ▸ eligiendo…'
-          : 'RADIO ▸ ${rn.replaceAll('\\', '/').split('/').last}';
-    }
+    final String? nextName = liveDjFollowingLabel(
+      radioOn: state.radioOn,
+      radioNextPath: state.radioNextPath,
+      queuePaths: <String>[for (final File f in state.queue) f.path],
+      currentPath: state.currentTrackPath,
+    );
     final engineModeStr = isMixBypass
         ? "BYPASS (MEZCLA PROTEGIDA)"
         : (mixFormula == MixFormula.stealthGap
@@ -1281,12 +1241,26 @@ class LiveDjCartridgePanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final bool radioOn = ref.watch(liveDjProvider.select((s) => s.radioOn));
+    final List<String> radioUpcoming = ref.watch(
+      liveDjProvider.select((s) => s.radioUpcoming),
+    );
     final queue = ref.watch(liveDjProvider.select((s) => s.queue));
+    final List<String> shown = liveDjSidePaths(
+      radioOn: radioOn,
+      queuePaths: <String>[for (final File f in queue) f.path],
+      radioUpcoming: radioUpcoming,
+    );
     final query = ref.watch(liveDjQueueSearchProvider).trim().toLowerCase();
     final visible = <int>[
-      for (int i = 0; i < queue.length; i++)
+      for (int i = 0; i < shown.length; i++)
         if (query.isEmpty ||
-            queue[i].uri.pathSegments.last.toLowerCase().contains(query))
+            shown[i]
+                .replaceAll('\\', '/')
+                .split('/')
+                .last
+                .toLowerCase()
+                .contains(query))
           i,
     ];
     // Pre-escucha (flecha roja): solo Windows; activa solo con audífono.
@@ -1311,7 +1285,7 @@ class LiveDjCartridgePanel extends ConsumerWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  "CARTRIDGE (${queue.length})",
+                  "CARTRIDGE (${shown.length})",
                   style: const TextStyle(
                     color: Colors.pinkAccent,
                     fontWeight: FontWeight.bold,
@@ -1334,7 +1308,7 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                   height: 28,
                 ),
                 visualDensity: VisualDensity.compact,
-                onPressed: queue.isEmpty
+                onPressed: radioOn || queue.isEmpty
                     ? null
                     : () => ref.read(liveDjProvider.notifier).clearQueue(),
                 tooltip: "Borrar Cola",
@@ -1376,12 +1350,14 @@ class LiveDjCartridgePanel extends ConsumerWidget {
           ),
         ),
         Expanded(
-          child: queue.isEmpty
-              ? const Center(
+          child: shown.isEmpty
+              ? Center(
                   child: Text(
-                    "CARTRIDGE VACÍO\nCola de emisión sin pistas.",
+                    radioOn
+                        ? "RADIO ▸ eligiendo…"
+                        : "CARTRIDGE VACÍO\nCola de emisión sin pistas.",
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white24, fontSize: 12),
+                    style: const TextStyle(color: Colors.white24, fontSize: 12),
                   ),
                 )
               : ListView.builder(
@@ -1389,8 +1365,9 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                   itemCount: visible.length,
                   itemBuilder: (context, vi) {
                     final index = visible[vi];
-                    final file = queue[index];
-                    final fileName = file.uri.pathSegments.last;
+                    final String path = shown[index];
+                    final File file = File(path);
+                    final fileName = path.replaceAll('\\', '/').split('/').last;
 
                     return Material(
                       color: Colors.transparent,
@@ -1421,9 +1398,11 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        onTap: () => ref
-                            .read(liveDjProvider.notifier)
-                            .playTrackFromQueue(index),
+                        onTap: radioOn
+                            ? null
+                            : () => ref
+                                  .read(liveDjProvider.notifier)
+                                  .playTrackFromQueue(index),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -1467,14 +1446,18 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                               ),
                               visualDensity: VisualDensity.compact,
                               tooltip: "Play",
-                              onPressed: () {
-                                if (CuePreviewNotifier.supported) {
-                                  ref.read(cuePreviewProvider.notifier).stop();
-                                }
-                                ref
-                                    .read(liveDjProvider.notifier)
-                                    .playTrackFromQueue(index);
-                              },
+                              onPressed: radioOn
+                                  ? null
+                                  : () {
+                                      if (CuePreviewNotifier.supported) {
+                                        ref
+                                            .read(cuePreviewProvider.notifier)
+                                            .stop();
+                                      }
+                                      ref
+                                          .read(liveDjProvider.notifier)
+                                          .playTrackFromQueue(index);
+                                    },
                             ),
                             IconButton(
                               icon: const Icon(
@@ -1488,9 +1471,11 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                                 height: 28,
                               ),
                               visualDensity: VisualDensity.compact,
-                              onPressed: () => ref
-                                  .read(liveDjProvider.notifier)
-                                  .removeTrack(file.path),
+                              onPressed: radioOn
+                                  ? null
+                                  : () => ref
+                                        .read(liveDjProvider.notifier)
+                                        .removeTrack(file.path),
                             ),
                           ],
                         ),

@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/id3_names.dart';
+import '../../core/livedj_next.dart';
 import '../../core/net/artist_info.dart';
 import '../../core/track_file_name.dart';
 import '../../providers/livedj_provider.dart';
@@ -51,8 +52,6 @@ class _PlayerPane extends ConsumerStatefulWidget {
 class _PlayerPaneState extends ConsumerState<_PlayerPane>
     with TickerProviderStateMixin {
   double? _dragPosition;
-  String? _stealthNextName;
-  String? _stealthCacheKey;
   late final AnimationController _relevo;
   late final AnimationController _beat;
   String? _handoffFrom;
@@ -117,54 +116,6 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
     });
   }
 
-  String? _nextName({
-    required String? track,
-    required List<File> queue,
-    required bool radioOn,
-    required String? radioNext,
-    required MixFormula mixFormula,
-  }) {
-    if (radioOn) {
-      return radioNext == null
-          ? 'RADIO ▸ eligiendo…'
-          : 'RADIO ▸ ${radioNext.replaceAll('\\', '/').split('/').last}';
-    }
-    if (queue.isEmpty) {
-      _stealthCacheKey = null;
-      return null;
-    }
-    if (mixFormula == MixFormula.stealthGap && track != null) {
-      final key = '$track|${queue.map((f) => f.path).join('|')}';
-      if (_stealthCacheKey != key) {
-        _stealthCacheKey = key;
-        final i = pickStealthNextIndex(
-          remaining: queue.map((f) => f.path).toList(),
-          currentPath: track,
-          bpmOf: (p) {
-            final fileName = p.replaceAll('\\', '/').split('/').last;
-            final match = RegExp(
-              r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-              caseSensitive: false,
-            ).firstMatch(fileName);
-            return match != null ? double.parse(match.group(1)!) : 0.0;
-          },
-        );
-        _stealthNextName = (i >= 0 ? queue[i].path : queue.first.path)
-            .replaceAll('\\', '/')
-            .split('/')
-            .last;
-      }
-      return _stealthNextName;
-    }
-    _stealthCacheKey = null;
-    if (track == null) {
-      return queue.length > 1
-          ? queue[1].path.replaceAll('\\', '/').split('/').last
-          : null;
-    }
-    return queue.first.path.replaceAll('\\', '/').split('/').last;
-  }
-
   @override
   Widget build(BuildContext context) {
     ref.listen<String?>(liveDjProvider.select((s) => s.currentTrackPath), (
@@ -198,14 +149,12 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
     final int mixOut = ref.watch(
       liveDjProvider.select((s) => s.customMixOutMs),
     );
-    final mixFormula = ref.watch(mixFormulaProvider);
     final wide = MediaQuery.sizeOf(context).width >= 800;
-    final nextName = _nextName(
-      track: track,
-      queue: queue,
+    final String? nextName = liveDjFollowingLabel(
       radioOn: radioOn,
-      radioNext: radioNext,
-      mixFormula: mixFormula,
+      radioNextPath: radioNext,
+      queuePaths: <String>[for (final File f in queue) f.path],
+      currentPath: track,
     );
     final isShuffle = strategy == LiveDjMixStrategy.random;
     final canToggle = track != null || queue.isNotEmpty;
@@ -480,7 +429,16 @@ class _QueuePane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final bool radioOn = ref.watch(liveDjProvider.select((s) => s.radioOn));
+    final List<String> upcoming = ref.watch(
+      liveDjProvider.select((s) => s.radioUpcoming),
+    );
     final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
+    final List<String> paths = liveDjSidePaths(
+      radioOn: radioOn,
+      queuePaths: <String>[for (final File f in queue) f.path],
+      radioUpcoming: upcoming,
+    );
     return ColoredBox(
       color: GatoMixTheme.bgDark,
       child: Column(
@@ -491,7 +449,7 @@ class _QueuePane extends ConsumerWidget {
             alignment: Alignment.centerLeft,
             color: GatoMixTheme.bgPanel,
             child: Text(
-              'COLA (${queue.length})',
+              'COLA (${paths.length})',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -503,11 +461,11 @@ class _QueuePane extends ConsumerWidget {
             ),
           ),
           Expanded(
-            child: queue.isEmpty
-                ? const Center(
+            child: paths.isEmpty
+                ? Center(
                     child: Text(
-                      'COLA VACÍA',
-                      style: TextStyle(
+                      radioOn ? 'RADIO ▸ eligiendo…' : 'COLA VACÍA',
+                      style: const TextStyle(
                         color: GatoMixTheme.textHidden,
                         fontSize: 12,
                       ),
@@ -515,10 +473,9 @@ class _QueuePane extends ConsumerWidget {
                   )
                 : ListView.builder(
                     physics: const BouncingScrollPhysics(),
-                    itemCount: queue.length,
+                    itemCount: paths.length,
                     itemBuilder: (context, index) {
-                      final File file = queue[index];
-                      return _QueueLine(path: file.path);
+                      return _QueueLine(path: paths[index]);
                     },
                   ),
           ),
