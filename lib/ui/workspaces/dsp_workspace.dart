@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../core/brand_paths.dart';
+import '../../core/gatomix_store.dart';
 import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/master_cool.dart';
@@ -443,9 +445,6 @@ class DspNlpWorkspace extends ConsumerWidget {
     String? criticalFailureMessage;
     bool isThermalThrottling = false;
 
-    final checkpointFile = File(
-      '$targetPath${Platform.pathSeparator}.dj_master_checkpoint.json',
-    );
     Map<String, dynamic> checkpoint = {
       'schema': 2,
       'status': 'started',
@@ -453,10 +452,14 @@ class DspNlpWorkspace extends ConsumerWidget {
       'processed': <String>[],
       'failed': <String>[],
     };
+    void persistCheckpoint() =>
+        GatomixStore.writeCheckpoint(targetPath, checkpoint);
 
-    if (checkpointFile.existsSync()) {
+    final Map<String, dynamic>? existingData = GatomixStore.readCheckpoint(
+      targetPath,
+    );
+    if (existingData != null) {
       try {
-        final existingData = jsonDecode(checkpointFile.readAsStringSync());
         final String lastStatus = existingData['status'] ?? 'unknown';
 
         if (existingData['schema'] == 2 && lastStatus != 'completed') {
@@ -485,7 +488,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             );
           }
         } else if (existingData['schema'] == 2) {
-          checkpointFile.deleteSync();
+          GatomixStore.clearCheckpoint(targetPath);
         } else {
           debugPrint(
             "🔄 [PROCESS VALIDATOR] Checkpoint anterior (solo etiquetas). Este pase mira las marcas GMX.",
@@ -513,7 +516,7 @@ class DspNlpWorkspace extends ConsumerWidget {
       if (total == 0) return;
 
       checkpoint['status'] = 'in_progress';
-      checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+      persistCheckpoint();
 
       final MasterProfile profile = MasterProfile.current();
       // 1.0.20: índice por carpeta para saltar en milisegundos las pistas
@@ -578,7 +581,7 @@ class DspNlpWorkspace extends ConsumerWidget {
               );
               if (skipped % 25 == 0) {
                 skipIndex.save();
-                checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+                persistCheckpoint();
               }
               await Future<void>.delayed(Duration.zero);
               continue;
@@ -723,7 +726,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             }
             consecutiveErrors = 0;
             checkpoint['timestamp'] = DateTime.now().toIso8601String();
-            checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+            persistCheckpoint();
           } catch (e) {
             debugPrint(
               "🔴 Error preparando la pista $originalName en stage $currentStage: $e",
@@ -732,7 +735,7 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             (checkpoint['failed'] as List).add(originalName);
             checkpoint['timestamp'] = DateTime.now().toIso8601String();
-            checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+            persistCheckpoint();
 
             String errorCode = "ERR_UNKNOWN";
             String recommendedAction =
@@ -740,24 +743,19 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             if (currentStage == "METADATA_CLEANUP") {
               errorCode = "ERR_FILE_IO";
-              recommendedAction =
-                  "El archivo está bloqueado por otro programa (ej. Rekordbox, Serato o un reproductor). Ciérralos e inténtalo de nuevo.";
+              recommendedAction = "El archivo está bloqueado por otro programa (ej. Rekordbox, Serato o un reproductor). Ciérralos e inténtalo de nuevo.";
             } else if (currentStage == "DSP_FFMPEG") {
               errorCode = "ERR_CODEC";
-              recommendedAction =
-                  "El codec del archivo MP3/M4A está roto o vacío. Reemplázalo descargando una nueva copia desde YouTube DL.";
+              recommendedAction = "El codec del archivo MP3/M4A está roto o vacío. Reemplázalo descargando una nueva copia desde YouTube DL.";
             } else if (currentStage == "WATERMARK_ID3") {
               errorCode = "ERR_TAGS";
-              recommendedAction =
-                  "Fallo al inyectar firmas ID3v2. Las etiquetas originales están corruptas. Intenta limpiar las etiquetas del archivo.";
+              recommendedAction = "Fallo al inyectar firmas ID3v2. Las etiquetas originales están corruptas. Intenta limpiar las etiquetas del archivo.";
             } else if (currentStage == "DB_ISAR") {
               errorCode = "ERR_DATABASE";
-              recommendedAction =
-                  "Fallo al guardar en ISAR Database. Ejecuta un Reset de Fábrica si el problema persiste.";
+              recommendedAction = "Fallo al guardar en ISAR Database. Ejecuta un Reset de Fábrica si el problema persiste.";
             } else if (e.toString().contains("Timeout DSP")) {
               errorCode = "ERR_TIMEOUT";
-              recommendedAction =
-                  "Fallo por alta temperatura de la CPU al normalizar el audio. Intenta masterizar esta pista sola más tarde.";
+              recommendedAction = "Fallo por alta temperatura de la CPU al normalizar el audio. Intenta masterizar esta pista sola más tarde.";
             }
 
             try {
@@ -812,20 +810,18 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             if (errorMessage.contains("Timeout DSP")) {
               isThermalThrottling = true;
-              criticalFailureMessage =
-                  "🌡️ ALERTA TÉRMICA: Tu procesador se ha sobrecalentado y el motor DSP colapsó.\n\n👉 ACCIÓN: Deja enfriar el equipo unos minutos y luego vuelve a darle a 'Masterización Global'. El Validador de Procesos saltará todo el trabajo anterior y retomará justo donde te quedaste.";
+              criticalFailureMessage = "🌡️ ALERTA TÉRMICA: Tu procesador se ha sobrecalentado y el motor DSP colapsó.\n\n👉 ACCIÓN: Deja enfriar el equipo unos minutos y luego vuelve a darle a 'Masterización Global'. El Validador de Procesos saltará todo el trabajo anterior y retomará justo donde te quedaste.";
               checkpoint['status'] = 'thermal_halt';
-              checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+              persistCheckpoint();
               pipe.abort();
               stopAll = true;
               await logSong(0);
               return;
             } else if (consecutiveErrors >= 3) {
               isThermalThrottling = false;
-              criticalFailureMessage =
-                  "💥 COLAPSO I/O: Se han detectado múltiples fallos consecutivos de disco o base de datos.\n\n👉 ACCIÓN: Es OBLIGATORIO que ejecutes el 'Reset de Fábrica' antes de intentar masterizar. Recuerda borrar manualmente el archivo oculto .dj_master_checkpoint.json en tu carpeta si quieres forzar un re-procesamiento total.";
+              criticalFailureMessage = "💥 COLAPSO I/O: Se han detectado múltiples fallos consecutivos de disco o base de datos.\n\n👉 ACCIÓN: Es OBLIGATORIO que ejecutes el 'Reset de Fábrica' antes de intentar masterizar. Recuerda borrar la sección checkpoint del archivo oculto .gatomix.json en tu carpeta si quieres forzar un re-procesamiento total.";
               checkpoint['status'] = 'io_crash';
-              checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+              persistCheckpoint();
               pipe.abort();
               stopAll = true;
               await logSong(0);
@@ -879,7 +875,7 @@ class DspNlpWorkspace extends ConsumerWidget {
         if (criticalFailureMessage == null) {
           checkpoint['status'] = 'completed';
           checkpoint['timestamp'] = DateTime.now().toIso8601String();
-          checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+          persistCheckpoint();
         }
       }
     } catch (e) {
@@ -1384,8 +1380,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           cardNodes.add(
             _buildActionCard(
               title: "MASTERIZACIÓN PROFESIONAL",
-              description:
-                  "TODO EN UNO en PC/Mac: nombre, letra, corte real de silencios, BPM y −14 LUFS (una generación, sin EQ), una canción a la vez con enfriamiento. El _K va al final. Retoma si se corta.",
+              description: "TODO EN UNO en PC/Mac: nombre, letra, corte real de silencios, BPM y −14 LUFS (una generación, sin EQ), una canción a la vez con enfriamiento. El _K va al final. Retoma si se corta.",
               icon: Icons.rocket_launch,
               color: const Color(0xFF39FF14),
               isPrimary: true,
@@ -1408,8 +1403,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           cardNodes.add(
             _buildActionCard(
               title: "PREPARACIÓN MÓVIL",
-              description:
-                  "TODO EN UNO: nombre, letra, corte real, BPM y −14 LUFS, una canción a la vez, con enfriamiento. Sin _K (eso es de PC/Mac). Retoma si se corta.",
+              description: "TODO EN UNO: nombre, letra, corte real, BPM y −14 LUFS, una canción a la vez, con enfriamiento. Sin _K (eso es de PC/Mac). Retoma si se corta.",
               icon: Icons.phone_android,
               color: Colors.cyanAccent,
               isPrimary: true,
@@ -1433,8 +1427,7 @@ class DspNlpWorkspace extends ConsumerWidget {
         cardNodes.addAll([
           _buildActionCard(
             title: "LETRAS",
-            description:
-                "Descarga letras solo si coinciden artista, título y duración. Nunca pisa una letra que ya tengas.",
+            description: "Descarga letras solo si coinciden artista, título y duración. Nunca pisa una letra que ya tengas.",
             icon: Icons.lyrics_outlined,
             color: const Color(0xFFFFC107),
             isPrimary: false,
@@ -1463,9 +1456,7 @@ class DspNlpWorkspace extends ConsumerWidget {
               title: aiState.isRunning
                   ? "IA TRABAJANDO..."
                   : "EXTRACCIÓN KARAOKE IA",
-              description: aiState.isRunning
-                  ? aiState.status
-                  : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
+              description: aiState.isRunning ? aiState.status : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
               icon: aiState.isRunning ? Icons.memory : Icons.mic_external_off,
               color: aiState.isRunning
                   ? Colors.orangeAccent
@@ -1507,8 +1498,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             ),
           _buildActionCard(
             title: "INFORME DE AUDITORÍA",
-            description:
-                "Identifica cuellos de botella: faltantes de letras, BPMs o errores de volumen.",
+            description: "Identifica cuellos de botella: faltantes de letras, BPMs o errores de volumen.",
             icon: Icons.analytics_outlined,
             color: Colors.cyanAccent,
             isPrimary: false,
@@ -1518,8 +1508,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           ),
           _buildActionCard(
             title: "RESET DE FÁBRICA",
-            description:
-                "Quita el sello y las etiquetas de sonido y purga ISAR. NO toca letras, cues manuales ni el corte (para volver al audio original: Restaurar).",
+            description: "Quita el sello y las etiquetas de sonido y purga ISAR. NO toca letras, cues manuales ni el corte (para volver al audio original: Restaurar).",
             icon: Icons.dangerous,
             color: Colors.redAccent,
             isPrimary: false,
@@ -2425,13 +2414,9 @@ String _masterStageLabel(String stage) {
 }
 
 bool _lrcListedAsAuto(File lrc) {
-  final File reg = File(
-    '${lrc.parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-  );
-  if (!reg.existsSync()) return false;
   try {
-    final dynamic decoded = jsonDecode(reg.readAsStringSync());
-    return decoded is Map && decoded.containsKey(lrc.uri.pathSegments.last);
+    return readLyricsAuto(lrc.parent.path)
+        .containsKey(lrc.uri.pathSegments.last);
   } catch (_) {
     return false;
   }

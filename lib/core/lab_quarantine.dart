@@ -10,6 +10,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'gatomix_store.dart';
+
 const String lyricFailJournalName = '.gatomix_lyric_fail.json';
 const String labRegistryName = 'quarantine_registry.json';
 
@@ -36,26 +38,24 @@ void _writeJson(File f, Map<String, dynamic> m) {
   tmp.renameSync(f.path);
 }
 
-File _journal(String dir) => File('$dir$_sep$lyricFailJournalName');
-
 /// Anota (o quita, si [reason] es null/vacío) el FAIL de letra de [mp3].
 void recordLyricFailSync(String mp3, String? reason) {
   try {
-    final File j = _journal(_dirOf(mp3));
-    final Map<String, dynamic> m = _readJson(j);
+    final String dir = _dirOf(mp3);
+    final Map<String, dynamic> m = readLyricFailMap(dir);
     final String k = _nameOf(mp3);
     if (reason == null || reason.isEmpty || !reason.startsWith('FAIL:')) {
       if (m.remove(k) == null) return;
     } else {
       m[k] = reason;
     }
-    _writeJson(j, m);
+    writeLyricFailMap(dir, m);
   } catch (_) {}
 }
 
-Map<String, String> readLyricFails(String dir) => _readJson(
-  _journal(dir),
-).map((String k, dynamic v) => MapEntry<String, String>(k, '$v'));
+Map<String, String> readLyricFails(String dir) =>
+    readLyricFailMap(dir)
+        .map((String k, dynamic v) => MapEntry<String, String>(k, '$v'));
 
 /// Archivos que viajan con la pista.
 List<String> companionsOf(String mp3) {
@@ -110,17 +110,17 @@ List<LabMove> moveFailsToLab(
   }
   if (out.isNotEmpty) {
     _writeJson(regF, reg);
-    final Map<String, dynamic> m = _readJson(_journal(dir));
+    final Map<String, dynamic> m = readLyricFailMap(dir);
     for (final LabMove mv in out) {
       m.remove(mv.fileName);
     }
-    _writeJson(_journal(dir), m);
+    writeLyricFailMap(dir, m);
     // El FAIL viaja al LAB para que el modo rescate sepa qué intentar.
-    final Map<String, dynamic> lj = _readJson(_journal(labDir));
+    final Map<String, dynamic> lj = readLyricFailMap(labDir);
     for (final LabMove mv in out) {
       lj[mv.fileName] = mv.reason;
     }
-    _writeJson(_journal(labDir), lj);
+    writeLyricFailMap(labDir, lj);
   }
   return out;
 }

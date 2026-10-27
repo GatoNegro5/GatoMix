@@ -2,15 +2,19 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_selector/file_selector.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/audio_path.dart';
+import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 import '../core/livedj_order.dart';
+import '../core/queue_bpm.dart';
 import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
@@ -247,7 +251,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       caseSensitive: false,
     ).firstMatch(fileName);
     if (match != null) return double.parse(match.group(1)!);
-    // Sin BPM en el nombre: el que midió/guardó el masterizado (etiqueta TBPM).
+    // Sin BPM en el nombre: el que midió/guardó el masterizado (etiqueta TBPM
+    // o _dj_metadata). La caché va por audioPathKey, no por la ruta cruda.
     return TrackTags.peek(path)?.bpm ?? 0.0;
   }
 
@@ -432,48 +437,43 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     debugPrint(
       "🛠️ [TRACKER] shuffleQueue() INICIADO. Elementos en cola: ${state.queue.length}",
     );
+    unawaited(_shuffleQueueAsync());
+  }
+
+  Future<void> _shuffleQueueAsync() async {
     try {
+      final List<String> paths = state.queue
+          .map((f) => f.path)
+          .where((p) => !isKaraokeAudioPath(p))
+          .toList();
+      await preloadQueueBpm(paths);
       _applyLiveShuffleBank(advance: true);
     } catch (e, stack) {
       debugPrint("🔴 [TRACKER ERROR FATAL] El Shuffle explotó: $e\n$stack");
     }
   }
 
-  String _liveShuffleBanksPath() {
-    final session = File(_sessionFilePath());
-    return '${session.parent.path}${Platform.pathSeparator}_livedj_shuffle_banks.json';
-  }
-
-  Map<String, dynamic> _readLiveShuffleBankFile() {
-    try {
-      final data = SessionStore.readJson(_liveShuffleBanksPath());
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map) return Map<String, dynamic>.from(data);
-    } catch (_) {}
-    return <String, dynamic>{};
-  }
-
-  void _writeLiveShuffleBankFile(Map<String, dynamic> data) {
-    try {
-      SessionStore.writeJsonSync(_liveShuffleBanksPath(), data);
-    } catch (_) {}
-  }
-
-  // Grupos de 20 vecinos en BPM: el 1º sube, el 2º baja, el 3º sube…
-  // Sin BPM van al final, una vez. Ver lib/core/livedj_order.dart.
-  List<String> _bpmGroupOrder(List<String> paths, int salt) {
-    return buildShuffleGroups(
+  List<String> _harmonicBatch(List<String> paths, {String? continueFrom}) {
+    preloadQueueBpmSync(paths);
+    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+      ...paths,
+      if (continueFrom != null) continueFrom,
+    ]);
+    final HarmonicOrder order = buildHarmonicShuffle(
       paths,
       _extractBpm,
-      salt,
-    ).expand((g) => g).toList();
+      keyOf: camelotFromPath,
+      usedPairs: mem.pairs,
+      recentAge: mem.age,
+      playing: state.currentTrackPath,
+      continueFrom: continueFrom,
+    );
+    GatomixStore.commitShuffleMemory(order.tracks, anchor: continueFrom);
+    return order.tracks;
   }
 
-  // Firmas de grupos ya usados (persisten en _livedj_shuffle_banks.json):
-  // cada Shuffle arma grupos con composición nueva.
-  static const int _shuffleHistoryCap = 3000;
-
   void _applyLiveShuffleBank({required bool advance}) {
+    if (!advance) return;
     final List<String> paths = dedupeAudioPaths(
       state.queue
           .map((f) => f.path)
@@ -489,35 +489,29 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       _saveSnapshot();
       return;
     }
-    final all = _readLiveShuffleBankFile();
-    final List<String> hist = ((all['history'] as List?) ?? const [])
-        .map((e) => e.toString())
-        .toList();
-    final picked = pickFreshShuffle(paths, _extractBpm, hist.toSet(), Random());
-    final queued = <File>[
-      for (final g in picked.groups)
-        for (final p in g) File(p),
-    ];
-    for (final g in picked.groups) {
-      if (g.length > 1) hist.add(groupSignature(g));
-    }
-    final int over = hist.length - _shuffleHistoryCap;
-    all['history'] = over > 0 ? hist.sublist(over) : hist;
-    all['algo'] = 4;
-    all['lastSeed'] = picked.seed;
-    all.remove(
-      'lists',
-    ); // bancos fijos de la versión anterior (se repetían cada 10)
-    _writeLiveShuffleBankFile(all);
-
+    GatomixStore.migrate(File(_sessionFilePath()).parent.path);
+    preloadQueueBpmSync(paths);
+    final String? playing = state.currentTrackPath;
+    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+      ...paths,
+      if (playing != null) playing,
+    ]);
+    final HarmonicOrder order = buildHarmonicShuffle(
+      paths,
+      _extractBpm,
+      keyOf: camelotFromPath,
+      usedPairs: mem.pairs,
+      recentAge: mem.age,
+      playing: playing,
+      continueFrom: playing,
+    );
+    GatomixStore.commitShuffleMemory(order.tracks, anchor: playing);
     state = state.copyWith(
-      queue: queued,
+      queue: order.tracks.map(File.new).toList(),
       mixStrategy: LiveDjMixStrategy.random,
     );
     _saveSnapshot();
-    debugPrint(
-      "🔀 [TRACKER] Shuffle: ${picked.groups.length} grupos, ${queued.length} pistas.",
-    );
+    debugPrint("🔀 [TRACKER] Shuffle armónico: ${order.tracks.length} pistas.");
   }
 
   /// Orden de la cola en Secuencial. Se guarda y se vuelve a aplicar a lo
@@ -696,10 +690,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (newFiles.isNotEmpty) {
       // Cola estable: solo se mezcla el lote nuevo (y solo en modo shuffle);
       // lo ya cargado conserva su orden.
-      if (state.mixStrategy == LiveDjMixStrategy.random) {
-        final ordered = _bpmGroupOrder(
+      if (state.mixStrategy == LiveDjMixStrategy.random &&
+          state.queue.isNotEmpty &&
+          newFiles.length > 1) {
+        final String? anchor = state.queue.last.path;
+        final List<String> ordered = _harmonicBatch(
           newFiles.map((f) => f.path).toList(),
-          Random().nextInt(1 << 30),
+          continueFrom: anchor,
         );
         final byPath = {for (final f in newFiles) f.path: f};
         newFiles
@@ -777,10 +774,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           final List<File> fresh = newFiles
               .where((f) => currentPaths.add(audioPathKey(f.path)))
               .toList();
-          if (state.mixStrategy == LiveDjMixStrategy.random) {
-            final ordered = _bpmGroupOrder(
+          if (state.mixStrategy == LiveDjMixStrategy.random &&
+              state.queue.isNotEmpty &&
+              fresh.length > 1) {
+            final List<String> ordered = _harmonicBatch(
               fresh.map((f) => f.path).toList(),
-              Random().nextInt(1 << 30),
+              continueFrom: state.queue.last.path,
             );
             final byPath = {for (final f in fresh) f.path: f};
             fresh
@@ -1274,9 +1273,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _saveRadioHistory() {
     try {
-      File(
-        _radioHistoryPath(),
-      ).writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
+      File(_radioHistoryPath())
+          .writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
     } catch (_) {}
   }
 

@@ -1,10 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // 🛠️ FIX: Requerido para leer el sello de agua y saltar I/O
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../core/gatomix_store.dart';
 import '../core/id3_names.dart';
 import '../core/track_name_clean.dart';
 import '../services/id3_title_artist.dart';
@@ -78,9 +79,8 @@ class MetadataWorker {
 
         if (onCorrupt != null) {
           // Limpiamos el nombre para entregarle al Scraper de YouTube un query puro
-          final cleanQuery = _cleanFilename(
-            filename,
-          ).replaceAll(RegExp(r'\.mp3$', caseSensitive: false), '');
+          final cleanQuery = _cleanFilename(filename)
+              .replaceAll(RegExp(r'\.mp3$', caseSensitive: false), '');
           onCorrupt(cleanQuery);
         }
         continue; // Bypass atómico: El bucle jamás se detiene
@@ -207,23 +207,21 @@ class MetadataWorker {
 
   Future<void> _retargetAutoLyric(String oldMp3, String newMp3) async {
     final RegExp ext = RegExp(r'\.mp3$', caseSensitive: false);
-    final String oldBase = File(
-      oldMp3.replaceAll(ext, '.lrc'),
-    ).uri.pathSegments.last;
-    final String newBase = File(
-      newMp3.replaceAll(ext, '.lrc'),
-    ).uri.pathSegments.last;
+    final String oldBase = File(oldMp3.replaceAll(ext, '.lrc'))
+        .uri
+        .pathSegments
+        .last;
+    final String newBase = File(newMp3.replaceAll(ext, '.lrc'))
+        .uri
+        .pathSegments
+        .last;
     if (oldBase == newBase) return;
-    final File reg = File(
-      '${File(newMp3).parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-    );
-    if (!reg.existsSync()) return;
+    final String folder = File(newMp3).parent.path;
+    final Map<String, dynamic> map = readLyricsAuto(folder);
+    if (!map.containsKey(oldBase)) return;
     try {
-      final dynamic decoded = jsonDecode(reg.readAsStringSync());
-      if (decoded is! Map || !decoded.containsKey(oldBase)) return;
-      final Map<String, dynamic> map = Map<String, dynamic>.from(decoded);
       map[newBase] = map.remove(oldBase);
-      await reg.writeAsString(jsonEncode(map));
+      writeLyricsAuto(folder, map);
     } catch (_) {}
   }
 

@@ -1,11 +1,13 @@
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 
 // 🛠️ INYECCIÓN: Uso estricto de la capa HAL
 import '../core/audio_path.dart';
+import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 
 class DirectoryState {
@@ -133,9 +135,13 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
       ) {
         debugPrint("⚠️ [I/O Ignorado en Scoped Storage]: $e");
       });
+      final Set<String> legacyDirs = <String>{};
 
       await for (final entity in stream) {
         if (entity is File) {
+          if (isGatomixLegacyName(entity.uri.pathSegments.last)) {
+            legacyDirs.add(entity.parent.path);
+          }
           final lowerPath = entity.path.toLowerCase();
           if (lowerPath.endsWith('.mp3') ||
               lowerPath.endsWith('.webm') ||
@@ -153,6 +159,11 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
           }
         }
       }
+
+      for (final String legacyDir in legacyDirs) {
+        GatomixStore.migrate(legacyDir);
+      }
+      GatomixStore.migrate(path);
 
       for (final lrc in lrcFiles) {
         final baseName = lrc.path.replaceAll(

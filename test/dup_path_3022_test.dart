@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/audio_path.dart';
@@ -33,10 +34,7 @@ void main() {
       audioPathKey(r'C:\Music\80s\..\80s\A.mp3', foldCase: win),
       audioPathKey(r'C:\Music\80s\A.mp3', foldCase: win),
     );
-    expect(
-      sameAudioPath(a, b, foldCase: win),
-      isTrue,
-    );
+    expect(sameAudioPath(a, b, foldCase: win), isTrue);
     // Linux/Android distinguen mayúsculas: no se fusionan dos archivos distintos.
     expect(sameAudioPath('/m/A.mp3', '/m/a.mp3', foldCase: false), isFalse);
   });
@@ -126,22 +124,25 @@ void main() {
     expect(r.currentFromQueue, isFalse);
   });
 
-  test('Live DJ sin actual: la primera sale de la cola y no hereda posición', () {
-    final LiveDjSessionRestore r = restoreLiveDjSession(
-      <String, dynamic>{
-        'queue': <String>[r'C:\Music\A.mp3', r'C:\Music\B.mp3'],
-        'positionMs': 4000,
-        'mixStrategy': 1,
-      },
-      exists: (_) => true,
-      foldCase: win,
-    );
-    expect(r.currentTrackPath, r'C:\Music\A.mp3');
-    expect(r.queue, <String>[r'C:\Music\B.mp3']);
-    expect(r.positionMs, isNull);
-    expect(r.currentFromQueue, isTrue);
-    expect(r.mixStrategyIndex, 1);
-  });
+  test(
+    'Live DJ sin actual: la primera sale de la cola y no hereda posición',
+    () {
+      final LiveDjSessionRestore r = restoreLiveDjSession(
+        <String, dynamic>{
+          'queue': <String>[r'C:\Music\A.mp3', r'C:\Music\B.mp3'],
+          'positionMs': 4000,
+          'mixStrategy': 1,
+        },
+        exists: (_) => true,
+        foldCase: win,
+      );
+      expect(r.currentTrackPath, r'C:\Music\A.mp3');
+      expect(r.queue, <String>[r'C:\Music\B.mp3']);
+      expect(r.positionMs, isNull);
+      expect(r.currentFromQueue, isTrue);
+      expect(r.mixStrategyIndex, 1);
+    },
+  );
 
   test('ninguna pista _K entra en cola restaurada ni en Shuffle', () {
     final List<String> saved = <String>[
@@ -162,33 +163,27 @@ void main() {
       '/m/song0 80bpm_K.mp3',
       '/m/song1_k.mp3',
     ];
-    final List<List<String>> groups = buildShuffleGroups(
+    final HarmonicOrder order = buildHarmonicShuffle(
       <String>[...lib, lib.first, lib.first.toUpperCase()],
       (String p) {
         final RegExpMatch? m = RegExp(r'(\d{2,3})bpm').firstMatch(p);
         return m == null ? 0 : double.parse(m.group(1)!);
       },
-      4,
+      playing: lib.first,
+      rng: Random(4),
       foldCase: win,
     );
-    final List<String> flat = groups.expand((g) => g).toList();
+    final List<String> flat = order.tracks;
     expect(flat.where(isKaraokeAudioPath), isEmpty);
-    final Set<String> keys = flat.map((p) => audioPathKey(p, foldCase: win)).toSet();
+    final Set<String> keys = flat
+        .map((p) => audioPathKey(p, foldCase: win))
+        .toSet();
     expect(keys.length, flat.length);
-    expect(flat.length, 45);
-    for (final List<String> g in groups) {
-      expect(g.length, lessThanOrEqualTo(20));
-      final List<double> bpm = g
-          .map((p) {
-            final RegExpMatch? m = RegExp(r'(\d{2,3})bpm').firstMatch(p);
-            return m == null ? 0.0 : double.parse(m.group(1)!);
-          })
-          .toList();
-      if (bpm.any((b) => b <= 0)) continue;
-      final List<double> sorted = List<double>.from(bpm)..sort();
-      final bool up = groups.indexOf(g).isEven;
-      expect(bpm, up ? sorted : sorted.reversed.toList());
-    }
+    expect(flat.length, 44);
+    expect(
+      flat.any((p) => sameAudioPath(p, lib.first, foldCase: win)),
+      isFalse,
+    );
   });
 
   test('la siguiente nunca es la ruta que suena', () {
@@ -197,12 +192,14 @@ void main() {
       r'c:/music/80s/no limit.mp3',
       r'C:\Music\80s\Walk This Way.mp3',
     ];
-    final int next = nextDifferentAudioIndex(playlist, 0, playlist[0], foldCase: win);
-    expect(next, 2);
-    expect(
-      sameAudioPath(playlist[next], playlist[0], foldCase: win),
-      isFalse,
+    final int next = nextDifferentAudioIndex(
+      playlist,
+      0,
+      playlist[0],
+      foldCase: win,
     );
+    expect(next, 2);
+    expect(sameAudioPath(playlist[next], playlist[0], foldCase: win), isFalse);
     expect(
       nextDifferentAudioIndex(
         <String>[playlist[0], playlist[1]],

@@ -115,59 +115,71 @@ void main() {
     });
   });
 
-  group('Shuffle por grupos de 20', () {
+  group('Shuffle armónico', () {
     final lib = [
       for (var i = 0; i < 100; i++) '/m/song$i ${80 + i}bpm.mp3',
       '/m/sinbpm1.mp3',
       '/m/sinbpm2.mp3',
     ];
 
-    test(
-      'grupos de 20, alterna sube/baja, sin BPM al final, sin perder pistas',
-      () {
-        final g = buildShuffleGroups(lib, bpmFromName, 7);
-        expect(g.take(5).every((x) => x.length == 20), isTrue);
-        for (var i = 0; i < 5; i++) {
-          final b = g[i].map(bpmFromName).toList();
-          final sorted = List<double>.from(b)..sort();
-          expect(
-            b,
-            i.isEven ? sorted : sorted.reversed.toList(),
-            reason: 'grupo $i',
-          );
-        }
-        expect(g.last.toSet(), {'/m/sinbpm1.mp3', '/m/sinbpm2.mp3'});
-        final flat = g.expand((x) => x).toList();
-        expect(flat.length, lib.length);
-        expect(flat.toSet(), lib.toSet());
-      },
-    );
-
-    test('los grupos se mantienen cerca en BPM (vecinos)', () {
-      final g = buildShuffleGroups(lib, bpmFromName, 3);
-      for (final x in g.take(5)) {
-        final b = x.map(bpmFromName);
-        expect(
-          b.reduce((a, c) => a > c ? a : c) - b.reduce((a, c) => a < c ? a : c),
-          lessThan(60),
-        );
+    test('sin BPM al final, sin perder pistas, saltos cortos', () {
+      final HarmonicOrder order = buildHarmonicShuffle(
+        lib,
+        bpmFromName,
+        fixedFirst: lib.first,
+        rng: Random(7),
+      );
+      final List<String> flat = order.tracks;
+      expect(flat.length, lib.length);
+      expect(flat.toSet(), lib.toSet());
+      expect(flat.sublist(flat.length - 2).toSet(), {
+        '/m/sinbpm1.mp3',
+        '/m/sinbpm2.mp3',
+      });
+      final List<double> bpm = flat
+          .map(bpmFromName)
+          .where((double b) => b > 0)
+          .toList();
+      var close = 0;
+      for (var i = 1; i < bpm.length; i++) {
+        if ((bpm[i] - bpm[i - 1]).abs() <= 4) close++;
       }
+      expect(close / (bpm.length - 1), greaterThan(0.9));
     });
 
-    test('cada Shuffle arma grupos nuevos (nunca repite)', () {
-      final history = <String>{};
-      for (var press = 0; press < 30; press++) {
-        final r = pickFreshShuffle(lib, bpmFromName, history, Random(press));
-        for (final x in r.groups.where((x) => x.length > 1 && x.length >= 20)) {
-          final sig = groupSignature(x);
-          expect(
-            history.contains(sig),
-            isFalse,
-            reason: 'press $press repitió',
-          );
-          history.add(sig);
+    test('dos shuffles no repiten el par A→B', () {
+      final HarmonicOrder first = buildHarmonicShuffle(
+        lib,
+        bpmFromName,
+        fixedFirst: '/m/song20 100bpm.mp3',
+        rng: Random(1),
+      );
+      final Set<String> pairs = <String>{};
+      for (var i = 1; i < first.tracks.length; i++) {
+        if (bpmFromName(first.tracks[i]) <= 0) continue;
+        if (bpmFromName(first.tracks[i - 1]) <= 0) continue;
+        pairs.add(shufflePairKey(first.tracks[i - 1], first.tracks[i]));
+      }
+      final HarmonicOrder second = buildHarmonicShuffle(
+        lib,
+        bpmFromName,
+        fixedFirst: '/m/song20 100bpm.mp3',
+        usedPairs: pairs,
+        rng: Random(2),
+      );
+      var shared = 0;
+      var steps = 0;
+      for (var i = 1; i < second.tracks.length; i++) {
+        if (bpmFromName(second.tracks[i]) <= 0) continue;
+        if (bpmFromName(second.tracks[i - 1]) <= 0) continue;
+        steps++;
+        if (pairs.contains(
+          shufflePairKey(second.tracks[i - 1], second.tracks[i]),
+        )) {
+          shared++;
         }
       }
+      expect(shared / steps, lessThan(0.15));
     });
   });
 }

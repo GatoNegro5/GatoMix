@@ -1,5 +1,5 @@
-import 'dart:convert';
 import 'dart:io';
+
 import 'package:gatomix/core/yt_chunked_download.dart';
 import 'package:gatomix/core/master_profile.dart';
 import 'package:gatomix/services/karaoke_engine.dart';
@@ -9,11 +9,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:media_kit/media_kit.dart';
+
+import '../../core/gatomix_store.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/net/safe_download.dart';
 import '../../core/track_name_clean.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../../providers/nlp_provider.dart';
 import '../../providers/dsp_provider.dart';
 import '../../providers/db_provider.dart';
@@ -34,22 +37,9 @@ void registerYtAutoLyric(String lrcPath) {
   final File f = File(lrcPath);
   if (!f.existsSync()) return;
   if (!ytLyricCountsAsAuto(f.readAsStringSync())) return;
-  final File reg = File(
-    '${f.parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-  );
-  final Map<String, dynamic> map = <String, dynamic>{};
-  if (reg.existsSync()) {
-    try {
-      final dynamic decoded = jsonDecode(reg.readAsStringSync());
-      if (decoded is Map) {
-        decoded.forEach((dynamic k, dynamic v) {
-          map['$k'] = v;
-        });
-      }
-    } catch (_) {}
-  }
+  final Map<String, dynamic> map = readLyricsAuto(f.parent.path);
   map[f.uri.pathSegments.last] = f.lengthSync();
-  reg.writeAsStringSync(jsonEncode(map));
+  writeLyricsAuto(f.parent.path, map);
 }
 
 // =====================================================================
@@ -376,8 +366,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
         Media(
           directStreamUrl,
           httpHeaders: {
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           },
         ),
         play: true,
@@ -1005,8 +994,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
                 margin: const EdgeInsets.symmetric(horizontal: 15),
               ),
               Tooltip(
-                message:
-                    "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
+                message: "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
                 child: Row(
                   children: [
                     const Icon(
@@ -1378,8 +1366,7 @@ class _PreIngestModalState extends State<PreIngestModal> {
                   filled: true,
                   fillColor: Color(0xFF0A0A0A),
                   border: OutlineInputBorder(),
-                  hintText:
-                      "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
+                  hintText: "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
                   hintStyle: TextStyle(color: Colors.white24),
                 ),
               ),

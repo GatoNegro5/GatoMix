@@ -1,10 +1,12 @@
 import 'dart:io';
-import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 // 🛠️ INYECTADO: Backend FFI Nativo
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/bpm_range.dart';
+import '../core/gatomix_store.dart';
 import 'pipeline_provider.dart';
 import 'db_provider.dart'; // 🛠️ FIX: Enlace al controlador de ISAR
 
@@ -60,9 +62,8 @@ class DspWorker {
               tagData[i + 7];
           if (frameSize > 0 && i + 10 + frameSize <= tagData.length) {
             final bpmStringBytes = tagData.sublist(i + 11, i + 10 + frameSize);
-            final rawString = String.fromCharCodes(
-              bpmStringBytes,
-            ).replaceAll(RegExp(r'[^\d.]'), '');
+            final rawString = String.fromCharCodes(bpmStringBytes)
+                .replaceAll(RegExp(r'[^\d.]'), '');
             return double.tryParse(rawString) ?? 0.0;
           }
         }
@@ -77,39 +78,22 @@ class DspWorker {
     final dir = Directory(directoryPath);
     if (!dir.existsSync()) return;
 
-    final cacheFile = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.json',
-    );
-    final tempCache = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.tmp',
-    );
-    final timeFile = File(
-      '$directoryPath${Platform.pathSeparator}_dj_timestamps.json',
-    );
-    final tempTime = File(
-      '$directoryPath${Platform.pathSeparator}_dj_timestamps.tmp',
-    );
-
     final pipe = ref.read(pipelineProvider.notifier);
 
     Map<String, double> cacheData = {};
     Map<String, int> timestamps = {};
 
-    if (cacheFile.existsSync()) {
-      try {
-        final content = await cacheFile.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        decoded.forEach((k, v) => cacheData[k] = (v as num).toDouble());
-      } catch (_) {}
-    }
+    try {
+      readDjMetadata(directoryPath).forEach((k, v) {
+        if (v is num) cacheData[k] = v.toDouble();
+      });
+    } catch (_) {}
 
-    if (timeFile.existsSync()) {
-      try {
-        final content = await timeFile.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        decoded.forEach((k, v) => timestamps[k] = (v as num).toInt());
-      } catch (_) {}
-    }
+    try {
+      readDjTimestamps(directoryPath).forEach((k, v) {
+        if (v is num) timestamps[k] = v.toInt();
+      });
+    } catch (_) {}
 
     final files = <File>[];
     try {
@@ -224,11 +208,14 @@ class DspWorker {
 
     // Solo guardamos si hubo cambios Y el proceso no fue abortado a la mitad
     if (hasChanges && !ref.read(pipelineProvider).isAborted) {
-      await tempCache.writeAsString(jsonEncode(cacheData));
-      await tempCache.rename(cacheFile.path);
-
-      await tempTime.writeAsString(jsonEncode(timestamps));
-      await tempTime.rename(timeFile.path);
+      writeDjMetadata(directoryPath, <String, dynamic>{
+        for (final MapEntry<String, double> e in cacheData.entries)
+          e.key: e.value,
+      });
+      writeDjTimestamps(directoryPath, <String, dynamic>{
+        for (final MapEntry<String, int> e in timestamps.entries)
+          e.key: e.value,
+      });
       debugPrint("🟢 [DSP Cache] Caché estático actualizado atómicamente.");
     }
 

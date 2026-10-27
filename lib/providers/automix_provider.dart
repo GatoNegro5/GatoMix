@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
+
 // 🛡️ FIX: Se cambió foundation.dart por material.dart para dar acceso al BuildContext
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -18,6 +19,10 @@ import '../djiphone/iphone_library.dart';
 import '../core/audio/dj_audio_handler.dart';
 
 import '../core/audio_path.dart';
+import '../core/gatomix_store.dart';
+import '../core/livedj_order.dart';
+import '../core/queue_bpm.dart';
+import '../services/track_tags.dart';
 import '../core/lyric_files.dart' hide sameAudioPath;
 import '../core/session_restore.dart';
 import '../core/lyric_match.dart';
@@ -421,54 +426,20 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void shufflePlaylist() {
+    unawaited(_shufflePlaylistAsync());
+  }
+
+  Future<void> _shufflePlaylistAsync() async {
+    final List<String> paths = state.playlist
+        .where((p) => !isKaraokeAudioPath(p))
+        .toList();
+    await preloadQueueBpm(paths);
     _applyShuffleBank(advance: true);
   }
 
-  String _shuffleBanksPath() {
-    final session = File(_getSessionFilePath());
-    return '${session.parent.path}${Platform.pathSeparator}shuffle_banks.json';
-  }
-
-  String _shuffleListKey(List<String> paths) {
-    final sorted = List<String>.from(paths)..sort();
-    return jsonEncode(sorted);
-  }
-
-  Map<String, dynamic> _readShuffleBankFile() {
-    try {
-      final file = File(_shuffleBanksPath());
-      if (!file.existsSync()) return <String, dynamic>{};
-      final data = jsonDecode(file.readAsStringSync());
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map) return Map<String, dynamic>.from(data);
-    } catch (_) {}
-    return <String, dynamic>{};
-  }
-
-  void _writeShuffleBankFile(Map<String, dynamic> data) {
-    try {
-      File(_shuffleBanksPath()).writeAsStringSync(jsonEncode(data));
-    } catch (_) {}
-  }
-
-  List<List<String>> _buildTenShuffleBanks(List<String> paths) {
-    final banks = <List<String>>[];
-    final seen = <String>{};
-    var salt = 1;
-    while (banks.length < 10 && salt < 400) {
-      final copy = List<String>.from(paths);
-      copy.shuffle(Random(salt * 9973 + paths.length * 13));
-      final sig = copy.join('\n');
-      if (seen.add(sig)) banks.add(copy);
-      salt++;
-    }
-    while (banks.length < 10) {
-      banks.add(List<String>.from(paths));
-    }
-    return banks;
-  }
-
   void _applyShuffleBank({required bool advance}) {
+    // Al reabrir, el orden guardado es la verdad: no se vuelve a armar.
+    if (!advance) return;
     final paths = dedupeAudioPaths(
       state.playlist.where((p) => !isKaraokeAudioPath(p)).toList(),
     );
@@ -488,74 +459,44 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return;
     }
     _shuffleKnown.addAll(paths);
-    final key = _shuffleListKey(paths);
-    final all = _readShuffleBankFile();
-    final int spin = (all['spin'] as int?) ?? 0;
-    final lists = Map<String, dynamic>.from(
-      (all['lists'] as Map?) ?? <String, dynamic>{},
-    );
-    Map<String, dynamic> entry = <String, dynamic>{};
-    final raw = lists[key];
-    if (raw is Map) entry = Map<String, dynamic>.from(raw);
-
-    List<List<String>> banks = <List<String>>[];
-    final rawBanks = entry['banks'];
-    if (rawBanks is List) {
-      for (final row in rawBanks) {
-        if (row is List) {
-          banks.add(row.map((e) => e.toString()).toList());
-        }
-      }
-    }
-    final bool sameSet =
-        banks.length == 10 &&
-        banks.every((row) {
-          if (row.length != paths.length) return false;
-          final a = List<String>.from(row)..sort();
-          final b = List<String>.from(paths)..sort();
-          return listEquals(a, b);
-        });
-    if (!sameSet) {
-      banks = _buildTenShuffleBanks(paths);
-      final int previous = (entry['cursor'] as int?) ?? -1;
-      final int carried = previous >= 0 ? previous : (spin % 10) - 1;
-      if (previous < 0) all['spin'] = (spin + 1) % 10;
-      entry = <String, dynamic>{'cursor': carried, 'banks': banks};
-    }
-
-    final int last = (entry['cursor'] as int?) ?? -1;
-    final int use = advance ? (last + 1) % 10 : (last < 0 ? 0 : last % 10);
-    final List<String> order = List<String>.from(banks[use]);
-
+    GatomixStore.migrate(File(_getSessionFilePath()).parent.path);
+    preloadQueueBpmSync(paths);
     final String? playing = state.currentTrackPath;
-    String head = order.first;
+    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+      ...paths,
+      if (playing != null) playing,
+    ]);
+    final HarmonicOrder built = buildHarmonicShuffle(
+      paths,
+      _extractBpm,
+      keyOf: camelotFromPath,
+      usedPairs: mem.pairs,
+      recentAge: mem.age,
+      playing: playing,
+      continueFrom: playing,
+    );
+    String? head;
     if (playing != null) {
-      for (final String path in order) {
+      for (final String path in paths) {
         if (sameAudioPath(path, playing)) {
           head = path;
           break;
         }
       }
     }
-    final List<String> rest = <String>[
-      for (final path in order)
-        if (!sameAudioPath(path, head)) path,
-    ];
+    final List<String> rest = List<String>.from(built.tracks);
     for (final path in paths) {
-      if (!sameAudioPath(path, head) &&
-          !rest.any((r) => sameAudioPath(r, path))) {
-        rest.add(path);
-      }
+      if (head != null && sameAudioPath(path, head)) continue;
+      if (!rest.any((r) => sameAudioPath(r, path))) rest.add(path);
     }
-
-    entry['cursor'] = use;
-    entry['banks'] = banks;
-    lists[key] = entry;
-    all['lists'] = lists;
-    _writeShuffleBankFile(all);
+    final List<String> playlist = <String>[
+      if (head != null) head,
+      ...rest.where((p) => head == null || !sameAudioPath(p, head)),
+    ];
+    GatomixStore.commitShuffleMemory(rest, anchor: head ?? playing);
 
     state = state.copyWith(
-      playlist: [head, ...rest],
+      playlist: playlist,
       currentIndex: 0,
       mixStrategy: MixStrategy.random,
     );
@@ -563,7 +504,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _saveSnapshot();
     _recalculateMixWindow();
 
-    debugPrint("🔀 [DSP] Shuffle banco ${use + 1}/10. ${rest.length} pistas.");
+    debugPrint("🔀 [DSP] Shuffle armónico. ${rest.length} pistas.");
   }
 
   void toggleMixStrategy() {
@@ -618,7 +559,25 @@ class AutomixNotifier extends Notifier<AutomixState> {
           if (!hasPath(kept, path)) path,
       ];
       if (added.length > 1) {
-        added.shuffle(Random(DateTime.now().millisecondsSinceEpoch));
+        preloadQueueBpmSync(added);
+        final String? anchor = kept.isNotEmpty ? kept.last : null;
+        final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+          ...added,
+          if (anchor != null) anchor,
+        ]);
+        final HarmonicOrder built = buildHarmonicShuffle(
+          added,
+          _extractBpm,
+          keyOf: camelotFromPath,
+          usedPairs: mem.pairs,
+          recentAge: mem.age,
+          playing: state.currentTrackPath,
+          continueFrom: anchor,
+        );
+        added
+          ..clear()
+          ..addAll(built.tracks);
+        GatomixStore.commitShuffleMemory(built.tracks, anchor: anchor);
       }
       ordered = dedupeAudioPaths([...kept, ...added]);
     }
@@ -726,7 +685,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
       r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
       caseSensitive: false,
     ).firstMatch(fileName);
-    return match != null ? double.parse(match.group(1)!) : 0.0;
+    if (match != null) return double.parse(match.group(1)!);
+    return TrackTags.peek(path)?.bpm ?? 0.0;
   }
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
@@ -2469,7 +2429,9 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     for (final File f in files) {
       if (isKaraokeAudioPath(f.path)) continue;
       final File kept = File(canonicalAudioPath(f.path));
-      newState.removeWhere((existing) => sameAudioPath(existing.path, kept.path));
+      newState.removeWhere(
+        (existing) => sameAudioPath(existing.path, kept.path),
+      );
       newState.add(kept);
     }
     state = newState;
@@ -2540,27 +2502,23 @@ class BpmCacheNotifier extends Notifier<Map<String, double>> {
       return;
     }
 
-    final file = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.json',
-    );
-    if (file.existsSync()) {
-      try {
-        final content = await file.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        final Map<String, double> newCache = {};
-
-        decoded.forEach((key, value) {
-          if (value is num) {
-            newCache[key] = value.toDouble();
-          } else if (value is Map && value['bpm'] != null) {
-            newCache[key] = (value['bpm'] as num).toDouble();
-          }
-        });
-        state = newCache;
-      } catch (e) {
+    try {
+      final Map<String, dynamic> decoded = readDjMetadata(directoryPath);
+      if (decoded.isEmpty) {
         state = {};
+        return;
       }
-    } else {
+      final Map<String, double> newCache = {};
+
+      decoded.forEach((key, value) {
+        if (value is num) {
+          newCache[key] = value.toDouble();
+        } else if (value is Map && value['bpm'] != null) {
+          newCache[key] = (value['bpm'] as num).toDouble();
+        }
+      });
+      state = newCache;
+    } catch (e) {
       state = {};
     }
   }

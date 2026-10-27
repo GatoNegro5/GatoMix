@@ -1,5 +1,6 @@
-import 'dart:convert';
 import 'dart:io';
+
+import 'package:gatomix/core/gatomix_store.dart';
 import 'package:gatomix/services/track_tags.dart';
 import 'package:flutter/material.dart';
 
@@ -32,10 +33,8 @@ String _baseName(String p) {
 Future<_BpmIndex?> _loadIndex(String dir) {
   return _indexCache.putIfAbsent(dir, () async {
     try {
-      final f = File('$dir${Platform.pathSeparator}_dj_metadata.json');
-      if (!await f.exists()) return null;
-      final decoded = jsonDecode(await f.readAsString());
-      if (decoded is! Map) return null;
+      final Map<String, dynamic> decoded = readDjMetadata(dir);
+      if (decoded.isEmpty) return null;
       final idx = _BpmIndex();
       decoded.forEach((key, value) {
         double? bpm;

@@ -1,10 +1,10 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../core/gatomix_store.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_ai_align.dart';
 import '../core/lab_quarantine.dart';
@@ -73,9 +73,8 @@ class MasterTrack {
 
     await _ensureBackup(current);
 
-    final int durMs = (await rust_dsp.getAudioDurationMs(
-      inputPath: current,
-    )).toInt();
+    final int durMs = (await rust_dsp.getAudioDurationMs(inputPath: current))
+        .toInt();
     final bool mega = lyricLooksMegamix(
       current.replaceAll(r"\\", "/").split("/").last,
       durMs,
@@ -266,9 +265,8 @@ class MasterTrack {
       await _mark(path, 'GMX_LYR_CHECK', 'SKIP');
       return (mark: 'SKIP', reason: skip);
     }
-    final int durationMs = (await rust_dsp.getAudioDurationMs(
-      inputPath: path,
-    )).toInt();
+    final int durationMs = (await rust_dsp.getAudioDurationMs(inputPath: path))
+        .toInt();
     final worker = ref.read(nlpWorkerProvider);
     final int? voice = await worker.probeVoiceOnsetMs(path);
     final LyricTimingVerdict v = checkLyricTiming(
@@ -480,13 +478,8 @@ class MasterTrack {
 
   static bool _lrcIsAuto(String lrcPath) {
     final File f = File(lrcPath);
-    final File reg = File(
-      '${f.parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-    );
-    if (!reg.existsSync()) return false;
     try {
-      final dynamic decoded = jsonDecode(reg.readAsStringSync());
-      return decoded is Map && decoded.containsKey(f.uri.pathSegments.last);
+      return readLyricsAuto(f.parent.path).containsKey(f.uri.pathSegments.last);
     } catch (_) {
       return false;
     }
@@ -619,19 +612,13 @@ class MasterTrack {
 
   static Future<void> _retargetBpmCache(String oldPath, String newPath) async {
     final Directory parent = File(newPath).parent;
-    final File cache = File(
-      '${parent.path}${Platform.pathSeparator}_dj_metadata.json',
-    );
-    if (!cache.existsSync()) return;
     try {
-      final dynamic decoded = jsonDecode(await cache.readAsString());
-      if (decoded is! Map) return;
-      final Map<String, dynamic> map = Map<String, dynamic>.from(decoded);
+      final Map<String, dynamic> map = readDjMetadata(parent.path);
       if (!map.containsKey(oldPath)) return;
       map[newPath] = map[oldPath];
       map[File(newPath).uri.pathSegments.last] = map[oldPath];
       map.remove(oldPath);
-      await cache.writeAsString(jsonEncode(map));
+      writeDjMetadata(parent.path, map);
     } catch (_) {}
   }
 
@@ -670,9 +657,8 @@ class MasterTrack {
     final db = ref.read(dbServiceProvider);
     final existing = await db.getTrackMetadata(path);
     final bool isManual = existing?.isManualCue ?? false;
-    final int physical = (await rust_dsp.getAudioDurationMs(
-      inputPath: path,
-    )).toInt();
+    final int physical = (await rust_dsp.getAudioDurationMs(inputPath: path))
+        .toInt();
     int leadMs = 0;
     int tailMs = 0;
     try {

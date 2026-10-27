@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'audio_path.dart';
+import 'gatomix_store.dart';
 
 /// 1.0.20: salto rápido del Masterizar. Antes de decodificar nada decide si
 /// una pista ya está completa con lecturas baratas:
@@ -213,7 +214,10 @@ bool _lrcIsApproxFile(String mp3) {
   try {
     raf = f.openSync();
     final String head = latin1.decode(raf.readSync(64), allowInvalid: true);
-    return head.replaceFirst('\uFEFF', '').trimLeft().toLowerCase()
+    return head
+        .replaceFirst('\uFEFF', '')
+        .trimLeft()
+        .toLowerCase()
         .startsWith('[gmx_approx');
   } catch (_) {
     return false;
@@ -247,24 +251,22 @@ class MasterSkipIndex {
   MasterSkipIndex(this.root, [Map<String, Map<String, dynamic>>? e])
     : entries = e ?? <String, Map<String, dynamic>>{};
 
-  File get file => File('$root${Platform.pathSeparator}$masterIndexName');
+  File get file => GatomixStore.fileOf(root);
 
   static MasterSkipIndex load(String root) {
     final MasterSkipIndex idx = MasterSkipIndex(root);
     try {
-      if (idx.file.existsSync()) {
-        final dynamic d = jsonDecode(idx.file.readAsStringSync());
-        if (d is Map && d['schema'] == 1 && d['entries'] is Map) {
-          (d['entries'] as Map).forEach((k, v) {
-            if (v is Map) {
-              final String nk = audioPathKey(
-                '$k'.replaceAll('\\', '/'),
-                absolute: false,
-              );
-              idx.entries[nk] = Map<String, dynamic>.from(v);
-            }
-          });
-        }
+      final dynamic d = GatomixStore.section(root, 'masterIndex');
+      if (d is Map && d['schema'] == 1 && d['entries'] is Map) {
+        (d['entries'] as Map).forEach((k, v) {
+          if (v is Map) {
+            final String nk = audioPathKey(
+              '$k'.replaceAll('\\', '/'),
+              absolute: false,
+            );
+            idx.entries[nk] = Map<String, dynamic>.from(v);
+          }
+        });
       }
     } catch (_) {}
     return idx;
@@ -272,9 +274,10 @@ class MasterSkipIndex {
 
   void save() {
     try {
-      file.writeAsStringSync(
-        jsonEncode(<String, dynamic>{'schema': 1, 'entries': entries}),
-      );
+      GatomixStore.putSection(root, 'masterIndex', <String, dynamic>{
+        'schema': 1,
+        'entries': entries,
+      });
     } catch (_) {}
   }
 
