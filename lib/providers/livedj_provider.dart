@@ -14,6 +14,7 @@ import '../core/audio_path.dart';
 import '../core/gatomix_radio.dart';
 import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
+import '../core/mode_session.dart';
 import '../core/livedj_order.dart';
 import '../core/queue_bpm.dart';
 import '../core/session_restore.dart';
@@ -176,6 +177,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   String? _standbyArmedPath;
   Future<void> _queueAddChain = Future<void>.value();
   final Set<String> _queueAddPending = <String>{};
+  int _addEpoch = 0;
+  bool _queueHold = false;
+  bool _queueRestart = false;
   RadioMemory? _radioMem;
   LiveQueueFreeze? _radioFreeze;
   bool _radioOffAfterFade = false;
@@ -388,10 +392,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return null;
   }
 
-  String _sessionFilePath() {
-    final shared = _liveStrategy.getSessionPath();
-    return '${File(shared).parent.path}${Platform.pathSeparator}_livedj_session.json';
-  }
+  String _sessionFilePath() => liveDjStatePath();
 
   File _resolveSessionFile() {
     return File(_sessionFilePath());
@@ -400,18 +401,34 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> _saveSnapshot() async {
     try {
       final path = _sessionFilePath();
-      final pos = _freezePersist
-          ? _sessionPositionMs
-          : state.position.inMilliseconds;
-      final data = {
+      if (_queueHold && state.queue.isNotEmpty) {
+        _queueHold = false;
+      }
+      if (_queueHold && !state.radioOn) {
+        clearModeQueueSync(path);
+        return;
+      }
+      final bool restart = _queueRestart;
+      if (restart) {
+        _queueRestart = false;
+        _sessionPositionMs = 0;
+      }
+      final pos = restart
+          ? 0
+          : (_freezePersist
+                ? _sessionPositionMs
+                : state.position.inMilliseconds);
+      final data = <String, dynamic>{
         'schema': 2,
         'queue': state.queue.map((f) => f.path).toList(),
-        'currentTrackPath': state.currentTrackPath,
+        'currentTrackPath': restart ? null : state.currentTrackPath,
         'positionMs': pos,
         'mixMode': state.currentMixMode.index,
         'mixStrategy': state.mixStrategy.index,
         'mixFormula': ref.read(mixFormulaProvider).index,
-        'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
+        'wasPlaying': restart
+            ? false
+            : (_freezePersist ? _sessionWasPlaying : state.isPlaying),
         'radioOn': state.radioOn,
         'radioGenres': state.radioGenres.toList(),
         'sortMode': state.sortMode.name,
@@ -419,7 +436,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       };
       // Atómico y en fila: un cierre o una actualización a mitad de guardado
       // ya no deja la sesión dañada (antes: cola vacía y modo Secuencial).
-      await SessionStore.writeJson(path, data);
+      // No pisa parejas ni ola: el parche deja el resto del archivo.
+      await patchModeDoc(path, data);
       debugPrint("✅ [TRACKER] Snapshot guardado en disco correctamente.");
     } catch (e, stack) {
       debugPrint(
@@ -465,23 +483,41 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       _saveSnapshot();
       return;
     }
-    GatomixStore.migrate(File(_sessionFilePath()).parent.path);
+    final String sessionPath = _sessionFilePath();
+    GatomixStore.migrate(File(sessionPath).parent.path);
     preloadQueueBpmSync(paths);
     final String? playing = state.currentTrackPath;
-    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+    final ModeWave wave = loadModeWave(sessionPath, <String>[
       ...paths,
-      if (playing != null) playing,
+      ?playing,
     ]);
     final HarmonicOrder order = buildHarmonicShuffle(
       paths,
       _extractBpm,
       keyOf: camelotFromPath,
-      usedPairs: mem.pairs,
-      recentAge: mem.age,
+      usedPairs: wave.pairs,
+      recentAge: wave.age,
       playing: playing,
       continueFrom: playing,
+      startWaveUp: wave.waveUp,
+      startInWave: wave.inWave,
     );
     GatomixStore.commitShuffleMemory(order.tracks, anchor: playing);
+    unawaited(
+      patchModeDoc(
+        sessionPath,
+        queueWavePatch(
+          doc: readModeDoc(sessionPath),
+          order: order.tracks,
+          anchor: playing,
+          waveUp: order.waveUp,
+          inWave: order.inWave,
+          previousBpm: order.tracks.isEmpty
+              ? 0
+              : _extractBpm(order.tracks.last),
+        ),
+      ),
+    );
     state = state.copyWith(
       queue: order.tracks.map(File.new).toList(),
       mixStrategy: LiveDjMixStrategy.random,
@@ -577,7 +613,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
 
       // Radio: géneros en la sesión. La lista de cada opción vive en
-      // `.gatomix_radio.json`, en la raíz de Música.
+      // `LiveDj_Radio.json`, en la raíz de Música.
       final bool savedRadioOn = data['radioOn'] as bool? ?? false;
       final Set<String> savedGenres = ((data['radioGenres'] as List?) ?? [])
           .map((e) => e.toString())
@@ -659,7 +695,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     final String key = audioPathKey(kept.path);
     if (!_queueAddPending.add(key)) return;
-    _queueAddChain = _queueAddChain.then((_) => _insertLiveRandom(<File>[kept]));
+    final int epoch = _addEpoch;
+    _queueAddChain = _queueAddChain.then(
+      (_) => _insertLiveRandom(<File>[kept], epoch),
+    );
   }
 
   void addAllTracks(List<File> files) {
@@ -683,7 +722,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     for (final File f in newFiles) {
       _queueAddPending.add(audioPathKey(f.path));
     }
-    _queueAddChain = _queueAddChain.then((_) => _insertLiveRandom(newFiles));
+    final int epoch = _addEpoch;
+    _queueAddChain = _queueAddChain.then(
+      (_) => _insertLiveRandom(newFiles, epoch),
+    );
   }
 
   int _liveLockedPrefix() {
@@ -697,7 +739,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return 0;
   }
 
-  Future<void> _insertLiveRandom(List<File> files) async {
+  Future<void> _insertLiveRandom(List<File> files, int epoch) async {
+    if (epoch != _addEpoch) {
+      for (final File f in files) {
+        _queueAddPending.remove(audioPathKey(f.path));
+      }
+      return;
+    }
     final List<File> fresh = <File>[];
     for (final File f in files) {
       _queueAddPending.remove(audioPathKey(f.path));
@@ -714,9 +762,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     try {
       await preloadQueueBpm(paths);
     } catch (_) {}
+    if (epoch != _addEpoch) return;
     for (final String p in paths) {
       saveTrackMusic(p, bpm: _extractBpm(p), camelot: harmonicKeyOf(p));
     }
+    if (epoch != _addEpoch) return;
     if (state.mixStrategy != LiveDjMixStrategy.random) {
       state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
       _applySort();
@@ -728,6 +778,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       _applyLiveShuffleBank(advance: true);
       return;
     }
+    if (epoch != _addEpoch) return;
     final List<String> next = insertHarmonicTracks(
       queue: state.queue.map((File f) => f.path).toList(),
       incoming: paths,
@@ -757,8 +808,27 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void clearQueue() {
-    state = state.copyWith(queue: []);
-    _saveSnapshot();
+    _addEpoch++;
+    _queueAddPending.clear();
+    _queueAddChain = Future<void>.value();
+    if (state.radioOn) {
+      // Fuera de este arreglo: la radio y su archivo no se vacían.
+      state = state.copyWith(queue: <File>[]);
+      _saveSnapshot();
+      return;
+    }
+    _queueHold = true;
+    _queueRestart = true;
+    _radioFreeze = null;
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = 0;
+    _sessionWasPlaying = false;
+    state = state.copyWith(
+      queue: <File>[],
+      position: Duration.zero,
+      clearCurrentTrackPath: true,
+    );
+    clearModeQueueSync(_sessionFilePath());
   }
 
   Future<void> savePlaylist() async {
@@ -810,8 +880,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             for (final File f in fresh) {
               _queueAddPending.add(audioPathKey(f.path));
             }
+            final int epoch = _addEpoch;
             _queueAddChain = _queueAddChain.then(
-              (_) => _insertLiveRandom(fresh),
+              (_) => _insertLiveRandom(fresh, epoch),
             );
             await _queueAddChain;
           } else {
@@ -1192,7 +1263,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   // ───────────────────────── ON AIR Radio ─────────────────────────
   // La cola de Live DJ se congela al encender. Cada opción de géneros tiene
-  // una lista ya armada en `.gatomix_radio.json` y sigue desde su posición.
+  // una lista ya armada en `LiveDj_Radio.json` y sigue desde su posición.
   Map<String, List<String>>? _radioIndex; // carpeta → pistas
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
@@ -1236,7 +1307,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return File(_sessionFilePath()).parent.path;
   }
 
-  /// Raíz de Música, donde vive `.gatomix_radio.json`.
+  /// Raíz de Música, donde vive `LiveDj_Radio.json`.
   String _musicRoot() {
     final String base = _musicBase();
     if (base.isEmpty || base == '/') return File(_sessionFilePath()).parent.path;

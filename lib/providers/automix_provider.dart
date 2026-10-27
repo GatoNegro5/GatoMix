@@ -15,12 +15,12 @@ import '../core/hal/platform_strategy.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
-import '../djiphone/iphone_library.dart';
 import '../core/audio/dj_audio_handler.dart';
 
 import '../core/audio_path.dart';
 import '../core/gatomix_store.dart';
 import '../core/livedj_order.dart';
+import '../core/mode_session.dart';
 import '../core/queue_bpm.dart';
 import '../core/lyric_files.dart' hide sameAudioPath;
 import '../core/session_restore.dart';
@@ -165,6 +165,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
   int _sessionPositionMs = 0;
   bool _sessionWasPlaying = false;
   bool _freezePersist = false;
+  bool _queueHold = false;
+  bool _queueRestart = false;
   bool _mixOutIsManual = false;
   bool _cueInIsManual = false;
   bool _mixPlanReady = false;
@@ -255,8 +257,28 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
   }
 
-  String _getSessionFilePath() {
-    return _mixStrategy.getSessionPath();
+  String _getSessionFilePath() => automixStatePath();
+
+  /// La cola se vació: la sesión no vuelve a escribir la lista ni la posición
+  /// viejas hasta que entre una cola nueva.
+  void dropPersistedQueue() {
+    _queueHold = true;
+    _queueRestart = true;
+    _shuffleKnown.clear();
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = 0;
+    _sessionWasPlaying = false;
+    state = state.copyWith(
+      playlist: const <String>[],
+      currentIndex: -1,
+      position: Duration.zero,
+    );
+  }
+
+  void releaseQueueHold() {
+    _queueHold = false;
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = state.position.inMilliseconds;
   }
 
   Future<void> persistSession() => _saveSnapshot();
@@ -310,20 +332,35 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
   Future<void> _saveSnapshot() async {
     try {
-      final file = File(_getSessionFilePath());
-      final pos = _freezePersist
-          ? _sessionPositionMs
-          : state.position.inMilliseconds;
-      final data = {
+      final String filePath = _getSessionFilePath();
+      if (_queueHold) {
+        clearModeQueueSync(filePath, playbackList: true);
+        return;
+      }
+      final bool restart = _queueRestart;
+      if (restart) {
+        _queueRestart = false;
+        _sessionPositionMs = 0;
+        _sessionWasPlaying = false;
+      }
+      final pos = restart
+          ? 0
+          : (_freezePersist
+                ? _sessionPositionMs
+                : state.position.inMilliseconds);
+      final data = <String, dynamic>{
         'playlist': state.playlist,
         'currentIndex': state.currentIndex,
         'positionMs': pos,
         'mixStrategy': state.mixStrategy.index,
         'autoMixArmed': state.autoMixArmed,
-        'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
+        'wasPlaying': restart
+            ? false
+            : (_freezePersist ? _sessionWasPlaying : state.isPlaying),
       };
       // Atómico y en fila (ver SessionStore): sobrevive cierres y updates.
-      await SessionStore.writeJson(file.path, data);
+      // No pisa la cola, lo ya sonado ni el orden: solo estos campos.
+      await patchModeDoc(filePath, data);
     } catch (_) {}
   }
 
@@ -459,21 +496,24 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return;
     }
     _shuffleKnown.addAll(paths);
-    GatomixStore.migrate(File(_getSessionFilePath()).parent.path);
+    final String sessionPath = _getSessionFilePath();
+    GatomixStore.migrate(File(sessionPath).parent.path);
     preloadQueueBpmSync(paths);
     final String? playing = state.currentTrackPath;
-    final ShuffleMemory mem = GatomixStore.loadShuffleMemory(<String>[
+    final ModeWave wave = loadModeWave(sessionPath, <String>[
       ...paths,
-      if (playing != null) playing,
+      ?playing,
     ]);
     final HarmonicOrder built = buildHarmonicShuffle(
       paths,
       _extractBpm,
       keyOf: camelotFromPath,
-      usedPairs: mem.pairs,
-      recentAge: mem.age,
+      usedPairs: wave.pairs,
+      recentAge: wave.age,
       playing: playing,
       continueFrom: playing,
+      startWaveUp: wave.waveUp,
+      startInWave: wave.inWave,
     );
     String? head;
     if (playing != null) {
@@ -494,6 +534,19 @@ class AutomixNotifier extends Notifier<AutomixState> {
       ...rest.where((p) => head == null || !sameAudioPath(p, head)),
     ];
     GatomixStore.commitShuffleMemory(rest, anchor: head ?? playing);
+    unawaited(
+      patchModeDoc(
+        sessionPath,
+        queueWavePatch(
+          doc: readModeDoc(sessionPath),
+          order: rest,
+          anchor: head ?? playing,
+          waveUp: built.waveUp,
+          inWave: built.inWave,
+          previousBpm: rest.isEmpty ? 0 : _extractBpm(rest.last),
+        ),
+      ),
+    );
 
     state = state.copyWith(
       playlist: playlist,
@@ -579,7 +632,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           );
           if (i >= 0 && i + 1 > lock) lock = i + 1;
         }
-        final List<String> merged = insertHarmonicTracks(
+        final List<String> merged = automixInsertAtGap(
           queue: kept,
           incoming: added,
           bpmOf: _extractBpm,
@@ -2302,44 +2355,29 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
     return {};
   }
 
-  String _getSessionFilePath() {
-    if (Platform.isIOS) {
-      final dir = Directory(IphoneLibrary.playlistsDir);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return '${dir.path}${Platform.pathSeparator}_played_tracks_session.json';
-    }
-    String baseDir;
-    if (Platform.isWindows) {
-      final userProfile = Platform.environment['USERPROFILE'];
-      baseDir = userProfile != null
-          ? '$userProfile\\Music\\DjPlaylists'
-          : 'C:\\Music\\DjPlaylists';
-    } else if (Platform.isMacOS || Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      baseDir = home != null ? '$home/Music/DjPlaylists' : '/tmp/DjPlaylists';
-    } else {
-      baseDir = '/storage/emulated/0/Music/DjPlaylists';
-    }
-    final dir = Directory(baseDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return '${dir.path}${Platform.pathSeparator}_played_tracks_session.json';
+  String _getSessionFilePath() => automixStatePath();
+
+  void clearAll() {
+    state = <String>{};
   }
 
   Future<void> _loadSession() async {
     try {
       final data = SessionStore.readJson(_getSessionFilePath());
-      if (data is List) {
-        state = {...data.map((e) => e.toString()), ...state};
+      final List<dynamic>? raw = data is List
+          ? data
+          : (data is Map ? data['played'] as List? : null);
+      if (raw != null) {
+        state = {...raw.map((e) => e.toString()), ...state};
       }
     } catch (_) {}
   }
 
   Future<void> _saveSession(Set<String> currentPlayed) async {
     try {
-      await SessionStore.writeJson(
-        _getSessionFilePath(),
-        currentPlayed.toList(),
-      );
+      await patchModeDoc(_getSessionFilePath(), <String, dynamic>{
+        'played': currentPlayed.toList(),
+      });
     } catch (_) {}
   }
 
@@ -2362,6 +2400,13 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
 
 class AutomixQueueNotifier extends Notifier<List<File>> {
   Future<void> _addChain = Future<void>.value();
+  int _addEpoch = 0;
+
+  void _releaseHold() {
+    try {
+      ref.read(automixProvider.notifier).releaseQueueHold();
+    } catch (_) {}
+  }
 
   bool _shuffleOn() {
     try {
@@ -2390,7 +2435,8 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     return lock;
   }
 
-  Future<void> _insertShuffle(List<File> files) async {
+  Future<void> _insertShuffle(List<File> files, int epoch) async {
+    if (epoch != _addEpoch) return;
     final List<File> fresh = <File>[];
     for (final File f in files) {
       if (isKaraokeAudioPath(f.path)) continue;
@@ -2402,10 +2448,13 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     try {
       await preloadQueueBpm(paths);
     } catch (_) {}
+    if (epoch != _addEpoch) return;
     for (final String p in paths) {
       saveTrackMusic(p, bpm: cachedBpm(p), camelot: harmonicKeyOf(p));
     }
     if (!_shuffleOn()) {
+      if (epoch != _addEpoch) return;
+      _releaseHold();
       final List<File> next = <File>[...state, ...fresh];
       state = next;
       await _saveSession(next);
@@ -2413,7 +2462,8 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     }
     final List<String> base = state.map((File f) => f.path).toList();
     final AutomixState auto = ref.read(automixProvider);
-    final List<String> merged = insertHarmonicTracks(
+    if (epoch != _addEpoch) return;
+    final List<String> merged = automixInsertAtGap(
       queue: base,
       incoming: paths,
       bpmOf: cachedBpm,
@@ -2424,6 +2474,8 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
           ? auto.nextTrackPath
           : null,
     );
+    if (epoch != _addEpoch) return;
+    _releaseHold();
     final Map<String, File> byKey = <String, File>{
       for (final File f in <File>[...state, ...fresh]) audioPathKey(f.path): f,
     };
@@ -2440,36 +2492,18 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     return [];
   }
 
-  String _getSessionFilePath() {
-    if (Platform.isIOS) {
-      final dir = Directory(IphoneLibrary.playlistsDir);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return '${dir.path}${Platform.pathSeparator}_automix_session.json';
-    }
-    String baseDir;
-    if (Platform.isWindows) {
-      final userProfile = Platform.environment['USERPROFILE'];
-      baseDir = userProfile != null
-          ? '$userProfile\\Music\\DjPlaylists'
-          : 'C:\\Music\\DjPlaylists';
-    } else if (Platform.isMacOS || Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      baseDir = home != null ? '$home/Music/DjPlaylists' : '/tmp/DjPlaylists';
-    } else {
-      baseDir = '/storage/emulated/0/Music/DjPlaylists';
-    }
-    final dir = Directory(baseDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return '${dir.path}${Platform.pathSeparator}_automix_session.json';
-  }
+  String _getSessionFilePath() => automixStatePath();
 
   Future<void> _loadSession() async {
     try {
       final data = SessionStore.readJson(_getSessionFilePath());
-      if (data is List && state.isEmpty) {
+      final List<dynamic>? rawList = data is List
+          ? data
+          : (data is Map ? data['queue'] as List? : null);
+      if (rawList != null && state.isEmpty) {
         // Pistas renombradas por Masterizar se reencuentran en su carpeta.
         // Duplicados guardados (otra grafía de la misma ruta) se limpian.
-        final List<String> raw = data.map((e) => e.toString()).toList();
+        final List<String> raw = rawList.map((e) => e.toString()).toList();
         final List<File> files = dedupeAudioFiles(
           resolvePlayableSessionPaths(raw).map(File.new).toList(),
         );
@@ -2485,7 +2519,9 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   Future<void> _saveSession(List<File> currentQueue) async {
     try {
       final paths = currentQueue.map((f) => f.path).toList();
-      await SessionStore.writeJson(_getSessionFilePath(), paths);
+      await patchModeDoc(_getSessionFilePath(), <String, dynamic>{
+        'queue': paths,
+      });
     } catch (_) {}
   }
 
@@ -2493,9 +2529,11 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
     if (isKaraokeAudioPath(file.path)) return;
     final File kept = File(canonicalAudioPath(file.path));
     if (_shuffleOn()) {
-      _addChain = _addChain.then((_) => _insertShuffle(<File>[kept]));
+      final int epoch = _addEpoch;
+      _addChain = _addChain.then((_) => _insertShuffle(<File>[kept], epoch));
       return;
     }
+    _releaseHold();
     final newState = state
         .where((f) => !sameAudioPath(f.path, kept.path))
         .toList();
@@ -2510,9 +2548,11 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
         for (final File f in files)
           if (!isKaraokeAudioPath(f.path)) File(canonicalAudioPath(f.path)),
       ];
-      _addChain = _addChain.then((_) => _insertShuffle(kept));
+      final int epoch = _addEpoch;
+      _addChain = _addChain.then((_) => _insertShuffle(kept, epoch));
       return;
     }
+    _releaseHold();
     var newState = List<File>.from(state);
     for (final File f in files) {
       if (isKaraokeAudioPath(f.path)) continue;
@@ -2533,8 +2573,16 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   }
 
   void clearQueue() {
+    _addEpoch++;
+    _addChain = Future<void>.value();
     state = [];
-    _saveSession([]);
+    try {
+      ref.read(playedTracksProvider.notifier).clearAll();
+    } catch (_) {}
+    try {
+      ref.read(automixProvider.notifier).dropPersistedQueue();
+    } catch (_) {}
+    clearModeQueueSync(_getSessionFilePath(), playbackList: true);
   }
 
   void restoreQueue(List<String> paths) {
@@ -2544,6 +2592,7 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
           .map(File.new)
           .toList(),
     );
+    _releaseHold();
     state = files;
     _saveSession(files);
   }
@@ -2567,15 +2616,12 @@ class TrackSortNotifier extends Notifier<TrackSortMode> {
     return TrackSortMode.alphabetical;
   }
 
-  String _path() {
-    final session = MixStrategyFactory.getStrategy().getSessionPath();
-    return '${File(session).parent.path}${Platform.pathSeparator}_automix_sort.json';
-  }
+  String _path() => automixStatePath();
 
   void updateMode(TrackSortMode mode) {
     state = mode;
     try {
-      SessionStore.writeJson(_path(), {'sortMode': mode.name});
+      patchModeDoc(_path(), <String, dynamic>{'sortMode': mode.name});
     } catch (_) {}
   }
 }

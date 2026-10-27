@@ -14,13 +14,28 @@ import 'audio_path.dart';
 ///   dañado, se lee la copia.
 class SessionStore {
   static final Map<String, Future<void>> _chains = <String, Future<void>>{};
+  static final Map<String, int> _generation = <String, int>{};
 
-  static Future<void> writeJson(String path, Object data) {
+  static int generationOf(String path) => _generation[path] ?? 0;
+
+  /// El siguiente guardado de [path] queda inválido. Un clear lo usa para
+  /// que una escritura ya en fila no vuelva a poner la cola vieja.
+  static void invalidate(String path) {
+    _generation[path] = (_generation[path] ?? 0) + 1;
+  }
+
+  static Future<void> writeJson(
+    String path,
+    Object data, {
+    int? generation,
+  }) {
+    final int stamp = generation ?? (_generation[path] ?? 0);
     final String text = jsonEncode(data);
     final Future<void> prev = _chains[path] ?? Future<void>.value();
-    final Future<void> next = prev
-        .catchError((_) {})
-        .then((_) => _writeAtomic(path, text));
+    final Future<void> next = prev.catchError((_) {}).then((_) async {
+      if ((_generation[path] ?? 0) != stamp) return;
+      await _writeAtomic(path, text);
+    });
     _chains[path] = next;
     return next;
   }

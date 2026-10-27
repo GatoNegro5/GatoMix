@@ -5,10 +5,12 @@ import 'dart:math';
 import 'audio_path.dart';
 import 'gatomix_store.dart';
 import 'livedj_order.dart';
+import 'mode_session.dart';
 
 /// Estado de la Radio, en un solo archivo en la raíz de Música.
 /// No es una sección de `.gatomix.json`.
-const String gatomixRadioName = '.gatomix_radio.json';
+const String gatomixRadioName = 'LiveDj_Radio.json';
+const String gatomixRadioLegacyName = '.gatomix_radio.json';
 
 /// Tope de parejas iguales con la vuelta anterior. Por encima se rearma.
 const double radioPairOverlapMax = 0.20;
@@ -450,11 +452,96 @@ class GatomixRadio {
   static File fileIn(String musicRoot) =>
       File('$musicRoot${Platform.pathSeparator}$gatomixRadioName');
 
+  /// Copia `.gatomix_radio.json` a `LiveDj_Radio.json`, verifica y solo
+  /// entonces borra el viejo.
+  static void _adoptLegacyName(String musicRoot) {
+    final String sep = Platform.pathSeparator;
+    final File neu = fileIn(musicRoot);
+    final File old = File('$musicRoot$sep$gatomixRadioLegacyName');
+    if (!old.existsSync() && !File('${old.path}.bak').existsSync()) return;
+    final Object? raw = _decodeAny(old);
+    if (raw is! Map) return;
+    final Map<String, dynamic> incoming = Map<String, dynamic>.from(raw);
+    Map<String, dynamic> dest = <String, dynamic>{};
+    if (neu.existsSync()) {
+      final Object? have = _decodeAny(neu);
+      if (have is Map) dest = Map<String, dynamic>.from(have);
+    }
+    var changed = dest.isEmpty;
+    for (final MapEntry<String, dynamic> e in incoming.entries) {
+      if (e.key == 'plans' && e.value is Map) {
+        final Map<String, dynamic> plans = dest['plans'] is Map
+            ? Map<String, dynamic>.from(dest['plans'] as Map)
+            : <String, dynamic>{};
+        final Map<dynamic, dynamic> oldPlans = e.value as Map;
+        for (final MapEntry<dynamic, dynamic> p in oldPlans.entries) {
+          plans.putIfAbsent(p.key.toString(), () => p.value);
+        }
+        if (!jsonEqual(dest['plans'], plans)) changed = true;
+        dest['plans'] = plans;
+        continue;
+      }
+      if (!dest.containsKey(e.key)) {
+        dest[e.key] = e.value;
+        changed = true;
+      }
+    }
+    if (!neu.existsSync() || changed) {
+      try {
+        final Directory dir = Directory(musicRoot);
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final String text = jsonEncode(dest);
+        final File tmp = File('${neu.path}.tmp');
+        tmp.writeAsStringSync(text, flush: true);
+        if (!jsonEqual(jsonDecode(tmp.readAsStringSync()), dest)) {
+          try {
+            tmp.deleteSync();
+          } catch (_) {}
+          return;
+        }
+        if (neu.existsSync()) neu.deleteSync();
+        tmp.renameSync(neu.path);
+        hideOnWindows(neu.path);
+      } catch (_) {
+        return;
+      }
+    }
+    final Object? back = _decodeAny(neu);
+    if (back is! Map) return;
+    final Map<String, dynamic> got = Map<String, dynamic>.from(back);
+    if (incoming['plans'] is Map) {
+      final Map<dynamic, dynamic> want = incoming['plans'] as Map;
+      final Map<dynamic, dynamic> have = got['plans'] is Map
+          ? got['plans'] as Map
+          : const <dynamic, dynamic>{};
+      for (final dynamic k in want.keys) {
+        if (!have.containsKey(k) || !jsonEqual(have[k], want[k])) return;
+      }
+    }
+    for (final MapEntry<String, dynamic> e in incoming.entries) {
+      if (e.key == 'plans') continue;
+      if (!got.containsKey(e.key) || !jsonEqual(got[e.key], e.value)) return;
+    }
+    deleteRadioLegacy(old.path);
+  }
+
+  static Object? _decodeAny(File f) {
+    for (final String p in <String>[f.path, '${f.path}.bak', '${f.path}.tmp']) {
+      final File file = File(p);
+      if (!file.existsSync()) continue;
+      try {
+        return jsonDecode(file.readAsStringSync());
+      } catch (_) {}
+    }
+    return null;
+  }
+
   static RadioMemory load(
     String musicRoot, {
     List<String> legacyPaths = const <String>[],
   }) {
     if (musicRoot.isEmpty) return RadioMemory.empty;
+    _adoptLegacyName(musicRoot);
     final File f = fileIn(musicRoot);
     RadioMemory mem = RadioMemory.empty;
     if (f.existsSync()) {

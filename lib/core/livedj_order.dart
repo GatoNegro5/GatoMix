@@ -87,7 +87,13 @@ String shufflePairKey(String a, String b, {bool? foldCase}) =>
 /// Sin `_K`, sin duplicados, y nunca [playing].
 class HarmonicOrder {
   final List<String> tracks;
-  const HarmonicOrder(this.tracks);
+  final bool waveUp;
+  final int inWave;
+  const HarmonicOrder(
+    this.tracks, {
+    this.waveUp = true,
+    this.inWave = 0,
+  });
 }
 
 HarmonicOrder buildHarmonicShuffle(
@@ -102,6 +108,8 @@ HarmonicOrder buildHarmonicShuffle(
   Random? rng,
   bool? foldCase,
   int waveLength = 20,
+  bool startWaveUp = true,
+  int startInWave = 0,
 }) {
   final Random random = rng ?? Random();
   final List<String> uniq = <String>[];
@@ -128,8 +136,8 @@ HarmonicOrder buildHarmonicShuffle(
   }
   final List<String> order = <String>[];
   String? current = continueFrom;
-  var up = true;
-  var inWave = 0;
+  var up = startWaveUp;
+  var inWave = startInWave < 0 ? 0 : startInWave;
   final int wave = waveLength < 1 ? 20 : waveLength;
 
   void placed() {
@@ -199,7 +207,7 @@ HarmonicOrder buildHarmonicShuffle(
   }
   unknown.shuffle(random);
   order.addAll(unknown);
-  return HarmonicOrder(order);
+  return HarmonicOrder(order, waveUp: up, inWave: inWave);
 }
 
 String _closest(

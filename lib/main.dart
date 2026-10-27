@@ -70,7 +70,12 @@ class RouterNotifier extends Notifier<int> {
 
   int _inferRouteFromAudioSession() {
     try {
-      final file = File(MixStrategyFactory.getStrategy().getSessionPath());
+      final String session = MixStrategyFactory.getStrategy().getSessionPath();
+      final File legacy = File(session);
+      final File live = File(
+        '${legacy.parent.path}${Platform.pathSeparator}liveDj.json',
+      );
+      final File file = legacy.existsSync() ? legacy : live;
       if (!file.existsSync()) return 0;
       final data = jsonDecode(file.readAsStringSync());
       if (data is! Map) return 0;

@@ -164,7 +164,7 @@ void main() {
     expect(shrunk.rebuilt, isFalse);
   });
 
-  test('la lista, la posición y las parejas quedan en .gatomix_radio.json', () {
+  test('la lista, la posición y las parejas quedan en LiveDj_Radio.json', () {
     final Directory dir = Directory.systemTemp.createTempSync('gmx_radio_');
     final String s = Platform.pathSeparator;
     final File legacy = File('${dir.path}${s}DjPlaylists${s}_livedj_radio.json');
@@ -210,7 +210,7 @@ void main() {
     );
     expect(loaded.planOf('ochenteras')!.previousPairs, isNotEmpty);
     final Map<String, dynamic> doc =
-        jsonDecode(File('${dir.path}$s.gatomix_radio.json').readAsStringSync())
+        jsonDecode(File('${dir.path}${s}LiveDj_Radio.json').readAsStringSync())
             as Map<String, dynamic>;
     expect(doc['plans'], isA<Map>());
     expect(doc.containsKey('djMetadata'), isFalse);
@@ -258,7 +258,7 @@ void main() {
       'bpm': 118,
       'key': '8A',
     });
-    expect(File('${root.path}$s.gatomix_radio.json').existsSync(), isTrue);
+    expect(File('${root.path}${s}LiveDj_Radio.json').existsSync(), isTrue);
     final RadioMemory again = GatomixRadio.load(root.path);
     expect(again.history, moved.history);
     expect(

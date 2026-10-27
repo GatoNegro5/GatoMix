@@ -66,9 +66,14 @@ class DjIphoneRouter extends Notifier<int> {
 
   int _inferRouteFromAudioSession() {
     try {
-      final file = File(
-        '${IphoneLibrary.playlistsDir}${Platform.pathSeparator}_player_session.json',
+      final String sep = Platform.pathSeparator;
+      final File legacy = File(
+        '${IphoneLibrary.playlistsDir}${sep}_player_session.json',
       );
+      final File live = File(
+        '${IphoneLibrary.playlistsDir}${sep}liveDj.json',
+      );
+      final File file = legacy.existsSync() ? legacy : live;
       if (!file.existsSync()) return 0;
       final data = jsonDecode(file.readAsStringSync());
       if (data is! Map) return 0;
