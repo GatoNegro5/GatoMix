@@ -6,6 +6,7 @@ import 'audio_path.dart';
 import 'gatomix_store.dart';
 import 'livedj_order.dart';
 import 'mode_session.dart';
+import 'queue_bpm.dart';
 
 /// Estado de la Radio, en un solo archivo en la raíz de Música.
 /// No es una sección de `.gatomix.json`.
@@ -19,12 +20,13 @@ const int radioRebuildAttempts = 5;
 
 /// Clave de una opción: géneros marcados, ordenados, o `todo`.
 String radioGenreKey(Iterable<String> genres) {
-  final List<String> list = genres
-      .map((String g) => g.trim())
-      .where((String g) => g.isNotEmpty)
-      .toSet()
-      .toList()
-    ..sort();
+  final List<String> list =
+      genres
+          .map((String g) => g.trim())
+          .where((String g) => g.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
   if (list.isEmpty) return 'todo';
   return list.join('+');
 }
@@ -217,17 +219,71 @@ LiveQueueFreeze resumeLiveQueue(LiveQueueFreeze freeze) {
   );
 }
 
-bool _has(Iterable<String> xs, String p) =>
-    xs.any((String e) => sameAudioPath(e, p));
-
 List<String> _cleanPool(List<String> pool) {
   final List<String> out = <String>[];
+  final Set<String> seen = <String>{};
   for (final String p in pool) {
     if (p.isEmpty || isKaraokeAudioPath(p)) continue;
-    if (_has(out, p)) continue;
+    if (!seen.add(audioPathKey(p))) continue;
     out.add(p);
   }
   return out;
+}
+
+/// La lista guardada todavía tiene pistas por sonar y el fondo no cambió.
+/// Entonces no hace falta rearmar (ni leer BPM de toda la biblioteca).
+bool radioPlanIsOpen(RadioPlan? saved, List<String> pool) {
+  if (saved == null || saved.order.isEmpty || saved.finished) return false;
+  final Set<String> have = <String>{
+    for (final String p in pool) audioPathKey(p),
+  };
+  final Set<String> orderKeys = <String>{};
+  var removedBefore = 0;
+  var kept = 0;
+  for (var i = 0; i < saved.order.length; i++) {
+    final String key = audioPathKey(saved.order[i]);
+    orderKeys.add(key);
+    if (have.contains(key)) {
+      kept++;
+    } else if (i < saved.position) {
+      removedBefore++;
+    }
+  }
+  for (final String p in pool) {
+    if (!orderKeys.contains(audioPathKey(p))) return false;
+  }
+  final int position = saved.position - removedBefore;
+  return position >= 0 && position < kept;
+}
+
+/// Una pista para mezclar ya, sin armar la vuelta entera.
+String? radioQuickNext({
+  required List<String> pool,
+  String? anchor,
+  double Function(String path)? bpmOf,
+  String? Function(String path)? keyOf,
+  Random? rng,
+}) {
+  final List<String> cands = <String>[];
+  final bool wide = pool.length > 800;
+  final int step = wide ? (pool.length / 400).ceil() : 1;
+  final int cap = wide ? 400 : pool.length;
+  for (var i = 0; i < pool.length && cands.length < cap; i += step) {
+    final String p = pool[i];
+    if (p.isEmpty || isKaraokeAudioPath(p)) continue;
+    if (anchor != null && sameAudioPath(p, anchor)) continue;
+    cands.add(p);
+  }
+  if (cands.isEmpty) return null;
+  final double Function(String path) bpm = bpmOf ?? memoryBpm;
+  return pickHarmonicNext(
+    cands,
+    bpm,
+    keyOf: keyOf ?? camelotFromPath,
+    anchor: anchor,
+    anchorBpm: anchor == null ? 0 : bpm(anchor),
+    rng: rng,
+  );
 }
 
 List<String> radioPairsOf(List<String> order) {
@@ -281,6 +337,7 @@ List<String> buildDifferentRound({
   String? Function(String path)? keyOf,
   List<String> previousOrder = const <String>[],
   List<String> previousPairs = const <String>[],
+  String? fixedFirst,
   Random? rng,
   int maxAttempts = radioRebuildAttempts,
 }) {
@@ -303,16 +360,18 @@ List<String> buildDifferentRound({
         bpmOf,
         keyOf: keyOf,
         usedPairs: used,
+        fixedFirst: fixedFirst,
         rng: spin,
       ).tracks,
     );
-    _displaceFirst(built, banned, spin);
+    if (fixedFirst == null) _displaceFirst(built, banned, spin);
     final bool sameFirst =
         banned != null &&
+        fixedFirst == null &&
         built.isNotEmpty &&
         sameAudioPath(built.first, banned);
-    final bool sameList = previousOrder.isNotEmpty &&
-        sameRadioOrder(built, previousOrder);
+    final bool sameList =
+        previousOrder.isNotEmpty && sameRadioOrder(built, previousOrder);
     final double overlap = radioPairOverlap(built, used);
     final double score = overlap + (sameFirst ? 1 : 0) + (sameList ? 1 : 0);
     if (score < bestScore) {
@@ -324,7 +383,7 @@ List<String> buildDifferentRound({
     }
   }
   final List<String> out = List<String>.from(best ?? songs);
-  _displaceFirst(out, banned, random);
+  if (fixedFirst == null) _displaceFirst(out, banned, random);
   return out;
 }
 
@@ -334,14 +393,16 @@ RadioPlan _freshPlan(
   String? Function(String path)? keyOf,
   List<String> previousOrder,
   List<String> previousPairs,
-  Random rng,
-) {
+  Random rng, {
+  String? fixedFirst,
+}) {
   final List<String> order = buildDifferentRound(
     pool: pool,
     bpmOf: bpmOf,
     keyOf: keyOf,
     previousOrder: previousOrder,
     previousPairs: previousPairs,
+    fixedFirst: fixedFirst,
     rng: rng,
   );
   return RadioPlan(
@@ -367,21 +428,30 @@ RadioSync syncRadioPlan({
   final Random random = rng ?? Random();
   final List<String> songs = _cleanPool(pool);
   if (songs.isEmpty) {
-    return RadioSync(
-      const RadioPlan(),
-      rebuilt: saved == null,
-    );
+    return RadioSync(const RadioPlan(), rebuilt: saved == null);
   }
+  final Set<String> songKeys = <String>{
+    for (final String p in songs) audioPathKey(p),
+  };
+  bool inSongs(String p) => songKeys.contains(audioPathKey(p));
   if (saved == null || saved.order.isEmpty) {
     return RadioSync(
-      _freshPlan(songs, bpmOf, keyOf, const <String>[], const <String>[], random),
+      _freshPlan(
+        songs,
+        bpmOf,
+        keyOf,
+        const <String>[],
+        const <String>[],
+        random,
+        fixedFirst: pinned,
+      ),
       rebuilt: true,
     );
   }
   final List<String> kept = <String>[];
   var removedBefore = 0;
   for (var i = 0; i < saved.order.length; i++) {
-    if (_has(songs, saved.order[i])) {
+    if (inSongs(saved.order[i])) {
       kept.add(saved.order[i]);
     } else if (i < saved.position) {
       removedBefore++;
@@ -395,15 +465,26 @@ RadioSync syncRadioPlan({
         ? saved.pairs
         : radioPairsOf(saved.order);
     return RadioSync(
-      _freshPlan(songs, bpmOf, keyOf, saved.order, prevPairs, random),
+      _freshPlan(
+        songs,
+        bpmOf,
+        keyOf,
+        saved.order,
+        prevPairs,
+        random,
+        fixedFirst: pinned,
+      ),
       rebuilt: true,
     );
   }
   final List<String> prefix = kept.sublist(0, position);
   List<String> tail = kept.sublist(position);
+  final Set<String> keptKeys = <String>{
+    for (final String p in kept) audioPathKey(p),
+  };
   final List<String> fresh = <String>[
     for (final String p in songs)
-      if (!_has(kept, p)) p,
+      if (!keptKeys.contains(audioPathKey(p))) p,
   ];
   if (fresh.isNotEmpty) {
     var lock = 0;
@@ -446,6 +527,53 @@ RadioPlan advanceRadioPlan(RadioPlan plan, String path) {
     }
   }
   return plan;
+}
+
+/// Arma la vuelta fuera del hilo de UI. Solo datos enviables.
+Future<Map<String, Object?>> assembleRadioOffUi(
+  Map<String, Object?> raw,
+) async {
+  try {
+    final List<String> pool = <String>[
+      for (final Object? p in (raw['pool'] as List?) ?? const <Object>[])
+        p.toString(),
+    ];
+    final bool hasSaved = raw['hasSaved'] == true;
+    final RadioPlan? saved = hasSaved
+        ? RadioPlan(
+            order: _strings(raw['order']),
+            position: raw['position'] is int ? raw['position'] as int : 0,
+            pairs: _strings(raw['pairs']),
+            previousPairs: _strings(raw['previousPairs']),
+          )
+        : null;
+    final int seed = raw['seed'] is int ? raw['seed'] as int : 1;
+    final String? pinned = raw['pinned'] as String?;
+    preloadQueueBpmSync(pool);
+    final RadioSync synced = syncRadioPlan(
+      saved: saved,
+      pool: pool,
+      bpmOf: knownBpm,
+      keyOf: harmonicKeyOf,
+      pinned: pinned,
+      rng: Random(seed),
+    );
+    return <String, Object?>{
+      'ok': true,
+      'rebuilt': synced.rebuilt,
+      'order': synced.plan.order,
+      'position': synced.plan.position,
+      'pairs': synced.plan.pairs,
+      'previousPairs': synced.plan.previousPairs,
+    };
+  } catch (e) {
+    return <String, Object?>{'ok': false, 'error': e.toString()};
+  }
+}
+
+List<String> _strings(Object? raw) {
+  if (raw is! List) return const <String>[];
+  return <String>[for (final Object? p in raw) p.toString()];
 }
 
 class GatomixRadio {
@@ -652,7 +780,9 @@ class GatomixRadio {
       return RadioMemory(
         history: _stringList(data['history']),
         plans: plans,
-        carriedPairs: pairs.isNotEmpty ? pairs : _stringList(data['previousPairs']),
+        carriedPairs: pairs.isNotEmpty
+            ? pairs
+            : _stringList(data['previousPairs']),
         waveUp: data['waveUp'] as bool? ?? true,
         inWave: wave is num ? wave.toInt() : 0,
         previousBpm: bpm is num ? bpm.toDouble() : 0,

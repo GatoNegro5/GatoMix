@@ -789,7 +789,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       pinned: _standbyArmedPath,
     );
     final Map<String, File> byKey = <String, File>{
-      for (final File f in <File>[...state.queue, ...fresh]) audioPathKey(f.path): f,
+      for (final File f in <File>[...state.queue, ...fresh])
+        audioPathKey(f.path): f,
     };
     state = state.copyWith(
       queue: <File>[
@@ -964,7 +965,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         _sessionWasPlaying = state.isPlaying;
       }
 
-      if ((posMs - _lastSavedPositionMs).abs() > 15000) {
+      if (sessionPositionShouldSave(posMs, _lastSavedPositionMs)) {
         _lastSavedPositionMs = posMs;
         _saveSnapshot();
       }
@@ -1269,6 +1270,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void>? _radioIndexing;
   String? _radioPending;
   final Random _radioRng = Random();
+  int _radioEpoch = 0;
+  int _radioAssembleEpoch = -1;
+  Future<void>? _radioAssemble;
 
   static const Set<String> _radioExt = {
     'mp3',
@@ -1310,14 +1314,17 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   /// Raíz de Música, donde vive `LiveDj_Radio.json`.
   String _musicRoot() {
     final String base = _musicBase();
-    if (base.isEmpty || base == '/') return File(_sessionFilePath()).parent.path;
+    if (base.isEmpty || base == '/')
+      return File(_sessionFilePath()).parent.path;
     return base;
   }
 
   String _radioMusicRoot() {
     final String base = _musicBase();
     // Las carpetas de género viven en Música/ReGenial; si no existe, en Música.
-    final Directory regenial = Directory('$base${Platform.pathSeparator}ReGenial');
+    final Directory regenial = Directory(
+      '$base${Platform.pathSeparator}ReGenial',
+    );
     return regenial.existsSync() ? regenial.path : base;
   }
 
@@ -1370,19 +1377,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     List<String> from(bool Function(String folder) take) {
       final List<String> out = <String>[];
       final Set<String> seen = <String>{};
-      for (final String folder in idx.keys) {
-        if (!take(folder)) continue;
-        final Directory dir = Directory(folder);
-        if (!dir.existsSync()) continue;
-        try {
-          for (final FileSystemEntity ent in dir.listSync(
-            recursive: true,
-            followLinks: false,
-          )) {
-            if (ent is! File || !_radioAccept(ent.path)) continue;
-            if (seen.add(audioPathKey(ent.path))) out.add(ent.path);
-          }
-        } catch (_) {}
+      for (final MapEntry<String, List<String>> e in idx.entries) {
+        if (!take(e.key)) continue;
+        for (final String path in e.value) {
+          if (!_radioAccept(path)) continue;
+          if (seen.add(audioPathKey(path))) out.add(path);
+        }
       }
       return out;
     }
@@ -1480,46 +1480,165 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
   }
 
-  /// Siguiente de la lista ya armada de la opción actual. No la rearma
-  /// si todavía quedan canciones.
+  /// Siguiente de la lista ya armada. Si hay que armarla, el trabajo pesado
+  /// (BPM de todas las carpetas + Shuffle) va a otro isolate. Esta función
+  /// devuelve enseguida una pista compatible para que la mezcla no espere
+  /// y la ventana no se congele.
   Future<String?> _radioNextPath({int depth = 0}) async {
-    final String? pending = _radioPending;
-    if (pending != null && File(pending).existsSync()) return pending;
-    _radioPending = null;
-    await _radioEnsureIndex();
-    final String? already = _radioPending;
-    if (already != null && File(already).existsSync()) return already;
-    final List<String> pool = _radioPoolNow();
-    if (pool.isEmpty) return _radioQueueFallback();
-    final String key = radioGenreKey(state.radioGenres);
-    final RadioMemory mem = _radioMemory();
-    final RadioPlan? saved = mem.planOf(key);
     try {
-      preloadQueueBpmSync(pool);
-    } catch (_) {}
-    final RadioSync synced = syncRadioPlan(
-      saved: saved,
-      pool: pool,
-      bpmOf: _extractBpm,
-      keyOf: harmonicKeyOf,
-      pinned: pending,
-      rng: _radioRng,
-    );
-    _saveRadio(mem.putPlan(key, synced.plan), activeKey: key);
-    if (synced.plan.finished || synced.plan.order.isEmpty) {
+      final String? pending = _radioPending;
+      if (pending != null && File(pending).existsSync()) return pending;
+      if (pending != null) _radioPending = null;
+      await _radioEnsureIndex();
+      final String? already = _radioPending;
+      if (already != null && File(already).existsSync()) return already;
+      final List<String> pool = _radioPoolNow();
+      if (pool.isEmpty) return _radioQueueFallback();
+      final int epoch = _radioEpoch;
+      final String key = radioGenreKey(state.radioGenres);
+      final RadioMemory mem = _radioMemory();
+      final RadioPlan? saved = mem.planOf(key);
+      if (depth == 0 && radioPlanIsOpen(saved, pool)) {
+        final RadioSync synced = syncRadioPlan(
+          saved: saved,
+          pool: pool,
+          bpmOf: memoryBpm,
+          keyOf: camelotFromPath,
+          pinned: pending,
+          rng: _radioRng,
+        );
+        if (!synced.rebuilt) {
+          _saveRadio(mem.putPlan(key, synced.plan), activeKey: key);
+          final String? kept = _publishRadioPick(synced.plan, mem, key, depth);
+          if (kept != null) return kept;
+        }
+      }
+      final String? quick = radioQuickNext(
+        pool: pool,
+        anchor: state.currentTrackPath,
+        bpmOf: memoryBpm,
+        keyOf: camelotFromPath,
+        rng: _radioRng,
+      );
+      if (quick != null && File(quick).existsSync()) {
+        _radioPending = quick;
+        state = state.copyWith(radioNextPath: quick);
+      }
+      _ensureRadioAssemble(
+        epoch: epoch,
+        key: key,
+        pool: pool,
+        mem: mem,
+        saved: saved,
+        pinned: quick,
+      );
+      if (quick != null && File(quick).existsSync()) return quick;
+      return _radioQueueFallback();
+    } catch (e, st) {
+      debugPrint('🔴 [RADIO] $e\n$st');
       return _radioQueueFallback();
     }
-    final String pick = synced.plan.order[synced.plan.position];
-    if (!File(pick).existsSync()) {
-      if (depth >= 8) return _radioQueueFallback();
-      final RadioPlan skipped = advanceRadioPlan(synced.plan, pick);
-      _saveRadio(mem.putPlan(key, skipped), activeKey: key);
-      return _radioNextPath(depth: depth + 1);
+  }
+
+  String? _publishRadioPick(
+    RadioPlan plan,
+    RadioMemory mem,
+    String key,
+    int depth,
+  ) {
+    var current = plan;
+    for (var n = depth; n < 8; n++) {
+      if (current.finished || current.order.isEmpty) {
+        return _radioQueueFallback();
+      }
+      final String pick = current.order[current.position];
+      if (!File(pick).existsSync()) {
+        current = advanceRadioPlan(current, pick);
+        _saveRadio(mem.putPlan(key, current), activeKey: key);
+        continue;
+      }
+      saveTrackMusic(
+        pick,
+        bpm: _extractBpm(pick),
+        camelot: harmonicKeyOf(pick),
+      );
+      _radioPending = pick;
+      state = state.copyWith(radioNextPath: pick);
+      return pick;
     }
-    saveTrackMusic(pick, bpm: _extractBpm(pick), camelot: harmonicKeyOf(pick));
-    _radioPending = pick;
-    state = state.copyWith(radioNextPath: pick);
-    return pick;
+    return _radioQueueFallback();
+  }
+
+  void _ensureRadioAssemble({
+    required int epoch,
+    required String key,
+    required List<String> pool,
+    required RadioMemory mem,
+    required RadioPlan? saved,
+    required String? pinned,
+  }) {
+    if (_radioAssemble != null && _radioAssembleEpoch == epoch) return;
+    _radioAssembleEpoch = epoch;
+    final Map<String, Object?> msg = <String, Object?>{
+      'pool': List<String>.from(pool),
+      'seed': _radioRng.nextInt(1 << 31),
+      'pinned': pinned,
+      'hasSaved': saved != null,
+      'order': saved?.order ?? const <String>[],
+      'position': saved?.position ?? 0,
+      'pairs': saved?.pairs ?? const <String>[],
+      'previousPairs': saved?.previousPairs ?? const <String>[],
+    };
+    _radioAssemble = compute(assembleRadioOffUi, msg)
+        .timeout(const Duration(seconds: 90))
+        .then((Map<String, Object?> raw) {
+          if (epoch != _radioEpoch || !state.radioOn) return;
+          if (raw['ok'] != true) {
+            debugPrint('🔴 [RADIO] ${raw['error']}');
+            return;
+          }
+          RadioPlan plan = RadioPlan(
+            order: <String>[
+              for (final Object? p
+                  in (raw['order'] as List?) ?? const <Object>[])
+                p.toString(),
+            ],
+            position: raw['position'] is int ? raw['position'] as int : 0,
+            pairs: <String>[
+              for (final Object? p
+                  in (raw['pairs'] as List?) ?? const <Object>[])
+                p.toString(),
+            ],
+            previousPairs: <String>[
+              for (final Object? p
+                  in (raw['previousPairs'] as List?) ?? const <Object>[])
+                p.toString(),
+            ],
+          );
+          if (plan.order.isEmpty) return;
+          if (pinned != null &&
+              _radioPending == null &&
+              state.radioNextPath == null) {
+            plan = advanceRadioPlan(plan, pinned);
+          }
+          final RadioMemory now = _radioMemory();
+          _saveRadio(now.putPlan(key, plan), activeKey: key);
+          if (_isStandbyArmed) return;
+          if (plan.finished || plan.order.isEmpty) return;
+          final String next = plan.order[plan.position];
+          if (_radioPending != null && !sameAudioPath(_radioPending, next)) {
+            return;
+          }
+          if (!File(next).existsSync()) return;
+          _radioPending = next;
+          state = state.copyWith(radioNextPath: next);
+        })
+        .catchError((Object e, StackTrace st) {
+          debugPrint('🔴 [RADIO] $e\n$st');
+        })
+        .whenComplete(() {
+          if (_radioAssembleEpoch == epoch) _radioAssemble = null;
+        });
   }
 
   /// Último recurso: la radio nunca se para; suena una pista de la cola.
@@ -1536,7 +1655,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final RadioMemory mem = _radioMemory();
     final RadioPlan? plan = mem.planOf(key);
     if (plan != null) {
-      _saveRadio(mem.putPlan(key, advanceRadioPlan(plan, path)), activeKey: key);
+      _saveRadio(
+        mem.putPlan(key, advanceRadioPlan(plan, path)),
+        activeKey: key,
+      );
     }
     saveTrackMusic(path, bpm: _extractBpm(path), camelot: harmonicKeyOf(path));
     _radioPending = null;
@@ -1612,6 +1734,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       return;
     }
     _captureRadioFreeze();
+    _radioEpoch++;
     state = state.copyWith(radioOn: true, clearRadioNextPath: true);
     _saveSnapshot();
     unawaited(_radioEnsureIndex());
@@ -1624,6 +1747,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   void clearRadioGenres() {
+    _radioEpoch++;
     state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
     _radioPending = null;
     _saveSnapshot();
@@ -1634,6 +1758,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (!kRadioGenreIds.contains(genre)) return;
     final Set<String> next = Set<String>.from(state.radioGenres);
     if (!next.remove(genre)) next.add(genre);
+    _radioEpoch++;
     state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
     _radioPending = null;
     _saveSnapshot();
@@ -1673,7 +1798,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final bool radioPick = state.radioOn && queueIndex == null;
     final String nextTrack;
     if (radioPick) {
-      final String? picked = await _radioNextPath();
+      String? picked;
+      try {
+        picked = await _radioNextPath();
+      } catch (e, st) {
+        debugPrint('🔴 [RADIO] siguiente: $e\n$st');
+      }
+      picked ??= _radioQueueFallback();
       if (picked == null) {
         _isCrossfading = false;
         await _stopWhenNoNext();

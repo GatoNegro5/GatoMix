@@ -24,11 +24,7 @@ class SessionStore {
     _generation[path] = (_generation[path] ?? 0) + 1;
   }
 
-  static Future<void> writeJson(
-    String path,
-    Object data, {
-    int? generation,
-  }) {
+  static Future<void> writeJson(String path, Object data, {int? generation}) {
     final int stamp = generation ?? (_generation[path] ?? 0);
     final String text = jsonEncode(data);
     final Future<void> prev = _chains[path] ?? Future<void>.value();
@@ -87,6 +83,19 @@ class SessionStore {
     }
     return null;
   }
+}
+
+/// ¿Hace falta volver a escribir la sesión por este movimiento del reloj?
+///
+/// Un avance de más de 15 s, o un seek real hacia atrás. Un glitch a 0
+/// (el reloj de media_kit a veces intercala `Duration.zero`) no cuenta:
+/// si contara, cada tick reescribiría el JSON con fsync y el procesador
+/// se queda caliente.
+bool sessionPositionShouldSave(int posMs, int lastSavedMs) {
+  final int delta = posMs - lastSavedMs;
+  if (delta > 15000) return true;
+  if (delta < -2000 && posMs > 500) return true;
+  return false;
 }
 
 /// Clave de nombre para reencontrar una pista que Masterizar renombró

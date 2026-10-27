@@ -107,6 +107,14 @@ double _bpmValue(dynamic value) {
   return 0;
 }
 
+/// BPM en memoria o en el nombre. No abre el archivo ni el `.gatomix.json`.
+double memoryBpm(String? path) {
+  if (path == null || path.isEmpty) return 0;
+  final double named = _bpmFromName(path);
+  if (named > 0) return named;
+  return TrackTags.peek(path)?.bpm ?? 0;
+}
+
 /// BPM ya conocido. No decodifica.
 ///
 /// Nombre, caché de etiquetas y `.gatomix.json`. La caché y el metadata se

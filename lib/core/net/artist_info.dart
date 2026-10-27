@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../brand_paths.dart';
@@ -57,6 +58,15 @@ String artistFromPath(String path) {
 }
 
 final Map<String, Future<ArtistInfo?>> _mem = {};
+final Map<String, DateTime> _failAt = {};
+
+/// Un fallo no se reintenta en cada rebuild del player (eso disparaba
+/// Deezer/Wikipedia varias veces por segundo y calentaba el proceso).
+@visibleForTesting
+bool artistLookupCoolingDown(DateTime? failedAt, DateTime now) {
+  if (failedAt == null) return false;
+  return now.difference(failedAt) < const Duration(minutes: 3);
+}
 
 Directory _cacheDir() {
   final base = Platform.isWindows
@@ -75,8 +85,12 @@ String _key(String artist) =>
 Future<ArtistInfo?> loadArtistInfo(String artist) {
   final a = artist.trim();
   if (a.isEmpty) return Future.value(null);
+  final String k = a.toLowerCase();
+  if (artistLookupCoolingDown(_failAt[k], DateTime.now())) {
+    return Future<ArtistInfo?>.value(null);
+  }
   return _mem
-      .putIfAbsent(a.toLowerCase(), () async {
+      .putIfAbsent(k, () async {
         final dir = _cacheDir();
         final meta = File(
           '${dir.path}${Platform.pathSeparator}${_key(a)}.json',
@@ -141,10 +155,12 @@ Future<ArtistInfo?> loadArtistInfo(String artist) {
           return null;
         }
       })
-      .then((v) {
+      .then((ArtistInfo? v) {
         if (v == null) {
-          // No se recuerda el fallo: al volver el internet se reintenta.
-          _mem.remove(a.toLowerCase());
+          _mem.remove(k);
+          _failAt[k] = DateTime.now();
+        } else {
+          _failAt.remove(k);
         }
         return v;
       });

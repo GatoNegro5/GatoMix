@@ -49,11 +49,18 @@ class AdaptiveEq {
   /// Interruptor global (por defecto activo).
   static bool enabled = true;
 
-  /// 1.0.19 tipo Sound Check: sonoridad integrada BS.1770 de la pista
-  /// COMPLETA, objetivo −14 LUFS (el mismo de Masterizar). Antes: −16 LUFS
-  /// medido solo en 30 s, por eso canciones masterizadas y no masterizadas
-  /// sonaban distinto.
+  /// 1.0.19 tipo Sound Check: sonoridad integrada BS.1770, objetivo −14 LUFS
+  /// (el mismo de Masterizar). Antes: −16 LUFS medido solo en 30 s.
   static const double targetLufs = -14.0;
+
+  /// Arranques (s) de las ventanas de sonoridad. Vacío si la pista ya trae
+  /// `GMX_LUFS_DONE`: la ganancia de sonoridad queda en 0 y no se decodifica
+  /// el resto del archivo mientras suena.
+  @visibleForTesting
+  static List<int> integratedLoudnessStarts({required bool lufsDone}) {
+    if (lufsDone) return const <int>[];
+    return const <int>[0, 60, 120, 180];
+  }
 
   /// Ganancia (dB) hacia [targetLufs] sin clipping: nunca más arriba que
   /// pico −1,5 dB (no hay limitador en todos los reproductores), tope
@@ -299,13 +306,17 @@ class AdaptiveEq {
       AdaptiveProfile? p = await Isolate.run(
         () => _analyze(data, lufsDone: lufsDone),
       );
-      // 1.0.19 Sound Check: sonoridad integrada de la pista COMPLETA, por
-      // tramos de 30 s (memoria acotada en el celular). El espectro sigue
-      // saliendo de la ventana de 30 s.
-      if (p != null) {
+      // Sonoridad. Una pista con GMX_LUFS_DONE ya está en −14: no se
+      // decodifica entera (eso calentaba el CPU en cada canción de Live DJ).
+      // Sin esa marca, cuatro ventanas y se corta al acabar el archivo.
+      // Antes: cada 30 s hasta 20 min; si el seek fallaba, 40 veces el
+      // mismo tramo inicial.
+      if (p != null && lufsDone) {
+        p = AdaptiveProfile(p.gains, 0);
+      } else if (p != null) {
         final List<double> blocks = <double>[];
         double peak = 0;
-        for (int start = 0; start < 1200; start += 30) {
+        for (final int start in integratedLoudnessStarts(lufsDone: false)) {
           Uint8List chunk;
           try {
             chunk = await rust_dsp.decodeMonoPcm(
