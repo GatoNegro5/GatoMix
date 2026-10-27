@@ -149,6 +149,18 @@ void main() {
     expect(idx.decide(p).skip, isFalse);
   });
 
+  test('1.0.20+39: .lrc APPROX nuevo con tags completos no se reprocesa', () {
+    final Map<String, String> tags = Map.of(_done)..['GMX_LYR'] = 'APPROX';
+    final String p = put('a.mp3', _mp3(tags));
+    final MasterSkipIndex idx = MasterSkipIndex.load(dir.path);
+    idx.record(p);
+    File('${dir.path}/a.lrc').writeAsStringSync('[gmx_approx]\n[00:01.00]hola');
+    final SkipDecision d = idx.decide(p);
+    expect(d.skip, isTrue);
+    expect(d.reason, 'tags');
+    expect(idx.decide(p).reason, 'index');
+  });
+
   group('1.0.20 Indeep (decode_errors) no queda como procesada', () {
     const Map<String, String> indeep = <String, String>{
       'GMX_NAME_OK': '1',

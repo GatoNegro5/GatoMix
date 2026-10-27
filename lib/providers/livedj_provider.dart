@@ -560,12 +560,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           .map((e) => e.toString())
           .toList();
       // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-      final queueFiles = resolveSessionPaths(
+      final queueFiles = resolvePlayableSessionPaths(
         queuePaths,
       ).map((p) => File(p)).toList();
       String? currentTrackPath = data['currentTrackPath'] as String?;
       if (currentTrackPath != null) {
-        final hit = resolveSessionPaths([currentTrackPath]);
+        final hit = resolvePlayableSessionPaths([currentTrackPath]);
         currentTrackPath = hit.isEmpty ? null : hit.first;
       }
       if (currentTrackPath != null) {

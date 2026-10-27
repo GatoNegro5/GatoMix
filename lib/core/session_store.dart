@@ -141,3 +141,18 @@ List<String> resolveSessionPaths(
   }
   return out;
 }
+
+/// Pista _K de Karaoke (solo TV): nunca se restaura en Automix ni Live DJ.
+bool isKaraokeSessionPath(String path) =>
+    RegExp(r'_k\.[a-z0-9]+$', caseSensitive: false).hasMatch(path);
+
+/// Como [resolveSessionPaths] pero sin pistas _K (cola, actual y Shuffle).
+List<String> resolvePlayableSessionPaths(
+  List<String> paths, {
+  bool Function(String path)? exists,
+  List<String> Function(String dir)? listDir,
+}) => resolveSessionPaths(
+  paths.where((p) => !isKaraokeSessionPath(p)).toList(),
+  exists: exists,
+  listDir: listDir,
+).where((p) => !isKaraokeSessionPath(p)).toList();

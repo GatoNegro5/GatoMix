@@ -204,6 +204,22 @@ String? missingWork(
   return null;
 }
 
+bool _lrcIsApproxFile(String mp3) {
+  final File f = File(_lrcOf(mp3));
+  if (!f.existsSync()) return false;
+  RandomAccessFile? raf;
+  try {
+    raf = f.openSync();
+    final String head = latin1.decode(raf.readSync(64), allowInvalid: true);
+    return head.replaceFirst('\uFEFF', '').trimLeft().toLowerCase()
+        .startsWith('[gmx_approx');
+  } catch (_) {
+    return false;
+  } finally {
+    raf?.closeSync();
+  }
+}
+
 bool isKaraokePath(String path) => path.toLowerCase().endsWith('_k.mp3');
 
 String _lrcOf(String mp3) =>
@@ -308,9 +324,11 @@ class MasterSkipIndex {
     if (e != null && (e['size'] != s['size'] || e['mtime'] != s['mtime'])) {
       return const SkipDecision(false, 'changed');
     }
-    if (e != null && e['lrc'] != s['lrc']) {
+    if (e != null && e['lrc'] != s['lrc'] && !_lrcIsApproxFile(path)) {
       return const SkipDecision(false, 'lrc_changed');
     }
+    // 1.0.20+39: un .lrc APPROX que apareció después del índice no fuerza
+    // reproceso; manda el tag (si está completo, se salta y se actualiza).
     final String? miss = missingWork(
       readGmxTagsFromFile(path),
       karaoke: isKaraokePath(path),

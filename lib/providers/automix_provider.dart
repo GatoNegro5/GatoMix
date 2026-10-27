@@ -334,7 +334,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       final playlist = <String>[];
       int? index;
       for (var i = 0; i < rawList.length; i++) {
-        final hit = resolveSessionPaths([rawList[i]]);
+        final hit = resolvePlayableSessionPaths([rawList[i]]);
         if (hit.isEmpty || playlist.contains(hit.first)) continue;
         if (i == rawIndex) index = playlist.length;
         playlist.add(hit.first);
@@ -548,6 +548,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void syncDynamicPlaylist(List<String> newPlaylistOrdered) {
+    newPlaylistOrdered = newPlaylistOrdered
+        .where((p) => !isKaraokeSessionPath(p))
+        .toList();
     final currentSet = state.playlist.toSet();
     final added = <String>[
       for (final path in newPlaylistOrdered)
@@ -2389,7 +2392,7 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
       final data = SessionStore.readJson(_getSessionFilePath());
       if (data is List && state.isEmpty) {
         // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-        state = resolveSessionPaths(
+        state = resolvePlayableSessionPaths(
           data.map((e) => e.toString()).toList(),
         ).map((p) => File(p)).toList();
       }
@@ -2412,7 +2415,7 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
 
   void addAll(List<File> files) {
     var newState = List<File>.from(state);
-    for (var f in files) {
+    for (var f in files.where((f) => !isKaraokeSessionPath(f.path))) {
       newState.removeWhere((existing) => existing.path == f.path);
       newState.add(f);
     }
@@ -2434,6 +2437,7 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   void restoreQueue(List<String> paths) {
     List<File> files = [];
     for (String p in paths) {
+      if (isKaraokeSessionPath(p)) continue;
       if (File(p).existsSync()) files.add(File(p));
     }
     state = files;
