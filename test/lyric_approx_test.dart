@@ -101,4 +101,40 @@ void main() {
     };
     expect(missingWork(tags, karaoke: false), isNull);
   });
+
+  group('1.0.20+38 marca viaja', () {
+    const ap = '[gmx_approx]\n[00:01.00]a\n';
+    const ok = '[00:02.00]a\n';
+    test('_K usa la letra de la canción normal', () {
+      expect(approxLrcPath(r'C:\M\A - B_K.mp3'), r'C:\M\A - B.lrc');
+      expect(approxOwnerAudio('/m/A - B_K.mp3'), '/m/A - B.mp3');
+      expect(approxLrcPath('/m/A - B.mp3'), '/m/A - B.lrc');
+    });
+    test('quitar marca deja la letra', () {
+      expect(stripApproxMark(ap), '[00:01.00]a\n');
+      expect(stripApproxMark(ok), ok);
+    });
+    test('confirmado gana y nunca vuelve a APPROX', () {
+      expect(
+        lrcSyncShouldReplace(existing: ok, incoming: ap, overwrite: true),
+        isFalse,
+      );
+      expect(
+        lrcSyncShouldReplace(existing: ap, incoming: ok, overwrite: false),
+        isTrue,
+      );
+      expect(
+        lrcSyncShouldReplace(existing: null, incoming: ap, overwrite: false),
+        isTrue,
+      );
+      expect(
+        lrcSyncShouldReplace(existing: ap, incoming: ap, overwrite: false),
+        isFalse,
+      );
+      expect(
+        lrcSyncShouldReplace(existing: ok, incoming: ok, overwrite: true),
+        isTrue,
+      );
+    });
+  });
 }

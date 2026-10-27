@@ -20,6 +20,7 @@ import '../core/audio/dj_audio_handler.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_approx.dart';
+import '../ui/widgets/approx_lyric_icon.dart' show approxLyricRevision;
 import 'db_provider.dart';
 import 'nlp_provider.dart';
 import 'equalizer_provider.dart';
@@ -2192,6 +2193,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (ref.read(automixLyricApproxProvider)) {
       // El ajuste del usuario convierte la letra aproximada en MANUAL.
       ref.read(automixLyricApproxProvider.notifier).state = false;
+      approxLyricRevision.value++;
       try {
         await rust_dsp.setGmxMark(
           inputPath: audioPath,

@@ -1,4 +1,6 @@
 import 'dart:io';
+import '../../core/lyric_approx.dart';
+import '../widgets/approx_lyric_icon.dart';
 import 'dart:async';
 import 'dart:convert';
 import '../../djiphone/iphone_library.dart';
@@ -467,6 +469,28 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               if (match != null) {
                 final savePath =
                     '${dir.path}${Platform.pathSeparator}${match.group(1)}';
+                if (savePath.toLowerCase().endsWith('.lrc')) {
+                  // 1.0.20+38: la letra confirmada gana; nunca vuelve a
+                  // aproximada ([gmx_approx]).
+                  final bytes = <int>[];
+                  await for (final c in part) {
+                    bytes.addAll(c);
+                  }
+                  final incoming = utf8.decode(bytes, allowMalformed: true);
+                  final dest = File(savePath);
+                  final existing = dest.existsSync()
+                      ? await dest.readAsString().catchError((_) => '')
+                      : null;
+                  if (lrcSyncShouldReplace(
+                    existing: existing,
+                    incoming: incoming,
+                    overwrite: query['ow'] != '0',
+                  )) {
+                    await dest.writeAsBytes(bytes);
+                    approxLyricRevision.value++;
+                  }
+                  continue;
+                }
                 final sink = File(savePath).openWrite();
                 await part.pipe(sink);
                 await sink.close();
@@ -1185,8 +1209,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           _transferProgress = (_currentFileIndex - 1) / _totalFiles;
         });
 
+        final bool isLrc = fileName.toLowerCase().endsWith('.lrc');
         if (_currentRemoteFiles.any((f) => f['name'] == fileName)) {
-          if (!_overwriteExisting) {
+          if (!_overwriteExisting && !isLrc) {
             setState(() => _currentLog = "⏩ SALTADO (Ya existe): $fileName");
             _skippedTransfers++;
             continue;
@@ -1201,7 +1226,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           final request = http.MultipartRequest(
             'POST',
             Uri.parse(
-              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}',
+              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
             ),
           );
           request.files.add(
@@ -1252,8 +1277,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           '${localDir.path}${Platform.pathSeparator}$fileName',
         );
 
+        final bool isLrc = '$fileName'.toLowerCase().endsWith('.lrc');
         if (saveFile.existsSync()) {
-          if (!_overwriteExisting) {
+          if (!_overwriteExisting && !isLrc) {
             setState(() => _currentLog = "⏩ SALTADO (Ya existe): $fileName");
             _skippedTransfers++;
             continue;
@@ -1272,7 +1298,26 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             ),
           );
           final response = await request.close();
-          if (response.statusCode == 200) {
+          if (response.statusCode == 200 && isLrc) {
+            final bytes = <int>[];
+            await for (final c in response) {
+              bytes.addAll(c);
+            }
+            final existing = saveFile.existsSync()
+                ? await saveFile.readAsString().catchError((_) => '')
+                : null;
+            if (lrcSyncShouldReplace(
+              existing: existing,
+              incoming: utf8.decode(bytes, allowMalformed: true),
+              overwrite: _overwriteExisting,
+            )) {
+              await saveFile.writeAsBytes(bytes);
+              approxLyricRevision.value++;
+              _successfulTransfers++;
+            } else {
+              _skippedTransfers++;
+            }
+          } else if (response.statusCode == 200) {
             await response.pipe(saveFile.openWrite());
             _successfulTransfers++;
           } else {

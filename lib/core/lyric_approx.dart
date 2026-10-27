@@ -110,3 +110,45 @@ Map<String, dynamic>? pickApproxRow(
   }
   return best;
 }
+
+// ---------------------------------------------------------------------------
+// 1.0.20+38: la marca viaja con el `.lrc` (laptop, celular, copia manual).
+
+final RegExp _kTwin = RegExp(r'_K(\.[A-Za-z0-9]+)$', caseSensitive: false);
+
+/// Audio dueño de la letra: el `_K` comparte la de la canción normal.
+String approxOwnerAudio(String audioPath) =>
+    audioPath.replaceFirstMapped(_kTwin, (Match m) => m.group(1)!);
+
+/// `.lrc` que corresponde a [audioPath] (también para `_K`).
+String approxLrcPath(String audioPath) {
+  final String owner = approxOwnerAudio(audioPath);
+  final int dot = owner.lastIndexOf('.');
+  final int sep = owner.lastIndexOf(RegExp(r'[\\/]'));
+  return (dot > sep ? owner.substring(0, dot) : owner) + '.lrc';
+}
+
+/// Texto confirmado: sin la línea de marca, el resto intacto.
+String stripApproxMark(String content) {
+  if (!lrcIsApprox(content)) return content;
+  final String t = content.trimLeft();
+  final int nl = t.indexOf('\n');
+  return nl < 0 ? '' : t.substring(nl + 1);
+}
+
+/// ¿Debe [incoming] reemplazar a [existing] en la sincronización?
+/// - Un confirmado nunca vuelve a aproximado.
+/// - Un confirmado siempre reemplaza a un aproximado.
+/// - En los demás casos decide [overwrite] (la opción del usuario).
+bool lrcSyncShouldReplace({
+  required String? existing,
+  required String incoming,
+  required bool overwrite,
+}) {
+  if (existing == null) return true;
+  final bool inApprox = lrcIsApprox(incoming);
+  final bool exApprox = lrcIsApprox(existing);
+  if (inApprox && !exApprox) return false;
+  if (!inApprox && exApprox) return true;
+  return overwrite;
+}

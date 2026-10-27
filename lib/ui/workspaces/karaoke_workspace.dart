@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/approx_lyric_icon.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -1011,6 +1012,8 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
+                                  ApproxLyricIcon(path: req['song'].toString()),
+                                  const SizedBox(width: 6),
                                   Text(
                                     "#${index + 1}",
                                     style: const TextStyle(
@@ -1164,12 +1167,20 @@ class _KaraokeWorkspaceState extends ConsumerState<KaraokeWorkspace> {
                   style: TextStyle(color: Colors.white38, letterSpacing: 2),
                 );
               }
-              return Text(
-                'MONITOR: ${currentSinger['user']} — ${_displayName('${currentSinger['song']}')}',
-                style: const TextStyle(
-                  color: Color(0xFF00FFFF),
-                  fontWeight: FontWeight.bold,
-                ),
+              return Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      'MONITOR: ${currentSinger['user']} — ${_displayName('${currentSinger['song']}')}',
+                      style: const TextStyle(
+                        color: Color(0xFF00FFFF),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ApproxLyricIcon(path: '${currentSinger['song']}'),
+                ],
               );
             },
           ),

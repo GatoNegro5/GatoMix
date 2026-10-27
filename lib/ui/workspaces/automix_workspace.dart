@@ -10,6 +10,7 @@ import '../../core/brand_paths.dart';
 import '../../djiphone/iphone_library.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/automix_provider.dart';
+import '../widgets/approx_lyric_icon.dart';
 import '../../providers/pipeline_provider.dart';
 import '../../providers/theme_provider.dart';
 
@@ -435,6 +436,8 @@ class FolderContentPanel extends ConsumerWidget {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            ApproxLyricIcon(path: file.path),
+                            const SizedBox(width: 6),
                             Text(
                               bpm > 0 ? bpm.toStringAsFixed(1) : "---",
                               style: TextStyle(
@@ -1024,6 +1027,8 @@ class AutomixPanel extends ConsumerWidget {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            ApproxLyricIcon(path: file.path),
+                            const SizedBox(width: 6),
                             Text(
                               bpm > 0 ? bpm.toStringAsFixed(1) : "---",
                               style: TextStyle(
@@ -2314,7 +2319,17 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
                 ),
                 if (ref.watch(automixLyricApproxProvider)) ...[
                   const SizedBox(width: 10),
-                  const ApproxLyricBadge(),
+                  ApproxLyricBadge(
+                    onTap: () async {
+                      final p = ref.read(automixProvider).currentTrackPath;
+                      if (p == null) return;
+                      await askConfirmApprox(context, p);
+                      if (!isApproxLyric(p)) {
+                        ref.read(automixLyricApproxProvider.notifier).state =
+                            false;
+                      }
+                    },
+                  ),
                 ],
                 const SizedBox(width: 15),
                 IconButton(
@@ -2740,26 +2755,38 @@ class SemanticDeckPainter extends CustomPainter {
 
 /// Aviso de letra aproximada (GMX_LYR=APPROX): ajustar con SYNC.
 class ApproxLyricBadge extends StatelessWidget {
-  const ApproxLyricBadge({super.key});
+  final VoidCallback? onTap;
+  const ApproxLyricBadge({super.key, this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return Tooltip(
       message:
-          'Letra de estudio en una versión DJ. Ajusta con SYNC; al guardar pasa a MANUAL.',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: Colors.amber.withValues(alpha: 0.2),
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: Colors.amber),
-        ),
-        child: const Text(
-          'Letra aproximada – ajustar',
-          style: TextStyle(
-            color: Colors.amber,
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
+          'Letra de estudio en una versión DJ. Ajusta con SYNC o toca para confirmar que está OK.',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: kApproxTomato.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: kApproxTomato),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lyrics, color: kApproxTomato, size: 14),
+              SizedBox(width: 4),
+              Text(
+                'Letra aproximada – ajustar',
+                style: TextStyle(
+                  color: kApproxTomato,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
           ),
         ),
       ),

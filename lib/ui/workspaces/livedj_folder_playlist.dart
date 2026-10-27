@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/approx_lyric_icon.dart';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -588,6 +589,7 @@ class _QueueLine extends StatelessWidget {
           child: Row(
             children: [
               LiveDjBpmBadge(path: path),
+              ApproxLyricIcon(path: path, size: 16),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(

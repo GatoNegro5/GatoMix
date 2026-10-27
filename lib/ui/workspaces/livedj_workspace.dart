@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/approx_lyric_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -188,14 +189,22 @@ class LiveDjFolderPanel extends ConsumerWidget {
                           color: Colors.white24,
                           size: 18,
                         ),
-                        title: Text(
-                          fileName,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 12,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        title: Row(
+                          children: [
+                            ApproxLyricIcon(path: file.path, size: 16),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                fileName,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                         onTap: () async {
                           final notifier = ref.read(liveDjProvider.notifier);
@@ -1418,6 +1427,7 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            ApproxLyricIcon(path: file.path),
                             if (CuePreviewNotifier.supported)
                               IconButton(
                                 icon: Icon(
