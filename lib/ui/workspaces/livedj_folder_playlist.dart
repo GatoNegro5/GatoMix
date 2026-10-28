@@ -102,7 +102,7 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
       bpm: bpm,
       durationMs: live.duration.inMilliseconds,
     );
-    if (formula == MixFormula.phraseGrid) {
+    if (formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy) {
       final int published = ref.read(liveDjProvider.notifier).publishedFadeMs;
       if (published > 0) ms = published;
     }

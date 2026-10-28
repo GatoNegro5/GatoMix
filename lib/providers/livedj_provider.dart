@@ -18,6 +18,7 @@ import '../core/hal/platform_strategy.dart';
 import '../core/mode_session.dart';
 import '../core/livedj_next.dart';
 import '../core/livedj_order.dart';
+import '../core/dna_mix.dart';
 import '../core/phrase_grid.dart';
 import '../core/queue_bpm.dart';
 import '../core/session_restore.dart';
@@ -239,7 +240,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     ref.listen<MixFormula>(mixFormulaProvider, (previous, next) {
       if (previous == next || !_sessionHydrated) return;
       _saveSnapshot();
-      if (next == MixFormula.phraseGrid) _schedulePhraseNeighbors();
+      if (next == MixFormula.phraseGrid || next == MixFormula.dnaEnergy) {
+        _schedulePhraseNeighbors();
+      }
     });
 
     ref.onDispose(() {
@@ -276,8 +279,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   double _extractBpm(String? path) => knownBpm(path);
 
-  /// Lo que usa el relevo visual. Phrase 8 publica el fundido real.
+  /// Lo que usa el relevo visual. Phrase 8 y DNA publican el fundido real.
   int get publishedFadeMs => _publishedFadeMs;
+
+  bool _wantsPhraseProfile() {
+    final MixFormula formula = ref.read(mixFormulaProvider);
+    return formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy;
+  }
 
   int _phraseFallbackCue(String? path, int durMs) {
     final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
@@ -286,7 +294,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   String? _phrasePeerPath() {
-    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return null;
+    if (!_wantsPhraseProfile()) return null;
     if (state.radioOn) {
       final String? drift = _driftNextPath;
       if (drift != null && drift.isNotEmpty) return drift;
@@ -297,14 +305,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _schedulePhraseNeighbors() {
     if (!_sessionHydrated) return;
-    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+    if (!_wantsPhraseProfile()) return;
     _schedulePhraseGrid(state.currentTrackPath);
     _schedulePhraseGrid(_phrasePeerPath());
   }
 
   void _schedulePhraseGrid(String? path) {
     if (path == null || path.isEmpty) return;
-    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+    if (!_wantsPhraseProfile()) return;
     if (!_sessionHydrated) return;
     if (PhraseGridMemory.peek(path) != null || PhraseGridMemory.gaveUp(path)) {
       return;
@@ -381,7 +389,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _refreshPhraseMixOut() {
     try {
-      if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+      if (!_wantsPhraseProfile()) return;
       final String? path = state.currentTrackPath;
       if (path == null || path.isEmpty) return;
       final int dur = state.duration.inMilliseconds;
@@ -406,6 +414,21 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final int fallback = durMs > 30000
         ? (leadMs > 10000 ? leadMs : 10000)
         : (leadMs < durMs ~/ 3 ? leadMs : 0);
+    if (ref.read(mixFormulaProvider) == MixFormula.dnaEnergy) {
+      final String? outPath = state.currentTrackPath;
+      final bool other = outPath != null && !sameAudioPath(outPath, path);
+      final bool locked = other && state.customMixOutMs > 10000;
+      return _dnaPair(
+        outDurationMs: other ? state.duration.inMilliseconds : durMs,
+        outPath: other ? outPath : null,
+        genreMixOutMs: locked ? state.customMixOutMs : 0,
+        exitLocked: locked,
+        inDurationMs: durMs,
+        inPath: path,
+        fallbackCueMs: fallback,
+        outRate: 1,
+      ).cueInMs;
+    }
     if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return fallback;
     final String? outPath = state.currentTrackPath;
     final bool other = outPath != null && !sameAudioPath(outPath, path);
@@ -435,7 +458,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     String key =
         '$durationMs|$path|$formula|'
         '${TrackTags.peek(path)?.tailMs ?? 0}|${TrackTags.peek(path)?.bpm ?? 0}';
-    if (formula == MixFormula.phraseGrid) {
+    if (formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy) {
       final String? peer = _phrasePeerPath();
       key =
           '$key|${PhraseGridMemory.stamp(path)}|${PhraseGridMemory.stamp(peer)}|$peer';
@@ -520,7 +543,47 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         incoming: incoming,
       ).mixOutMs;
     }
-    return safeMixOutMs;
+    final String? peer = _phrasePeerPath();
+    final PhraseTrack? incoming = PhraseGridMemory.peek(peer);
+    final int peerDur = incoming?.durationMs ?? 0;
+    return _dnaPair(
+      outDurationMs: effDurMs,
+      outPath: path,
+      genreMixOutMs: safeMixOutMs,
+      exitLocked: false,
+      inDurationMs: peerDur,
+      inPath: peer,
+      fallbackCueMs: _phraseFallbackCue(peer, peerDur),
+      outRate: 1,
+    ).mixOutMs;
+  }
+
+  DnaDecision _dnaPair({
+    required int outDurationMs,
+    required String? outPath,
+    required int genreMixOutMs,
+    required bool exitLocked,
+    required int inDurationMs,
+    required String? inPath,
+    required int fallbackCueMs,
+    required double outRate,
+  }) {
+    return decideDna(
+      outDurationMs: outDurationMs,
+      inDurationMs: inDurationMs,
+      genreMixOutMs: genreMixOutMs,
+      fallbackCueMs: fallbackCueMs,
+      outBpm: _extractBpm(outPath),
+      inBpm: _extractBpm(inPath),
+      outRate: outRate,
+      outKey: outPath == null || outPath.isEmpty ? null : harmonicKeyOf(outPath),
+      inKey: inPath == null || inPath.isEmpty ? null : harmonicKeyOf(inPath),
+      outgoing: PhraseGridMemory.peek(outPath),
+      incoming: PhraseGridMemory.peek(inPath),
+      echoSupported: AfCaps.has('aecho'),
+      eqSupported: AfCaps.has('equalizer'),
+      exitLocked: exitLocked,
+    );
   }
 
   Future<void> persistSession() => _saveSnapshot();
@@ -2324,13 +2387,33 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
     }
 
+    DnaDecision? dnaPlan;
+    if (!isManualSkip &&
+        nextMode != LiveDjMixMode.longBypass &&
+        ref.read(mixFormulaProvider) == MixFormula.dnaEnergy) {
+      final int lockedOut = state.customMixOutMs;
+      dnaPlan = _dnaPair(
+        outDurationMs: state.duration.inMilliseconds,
+        outPath: state.currentTrackPath,
+        genreMixOutMs: lockedOut > 10000 ? lockedOut : 0,
+        exitLocked: lockedOut > 10000,
+        inDurationMs: trackDur.inMilliseconds,
+        inPath: nextTrack,
+        fallbackCueMs: _phraseFallbackCue(nextTrack, trackDur.inMilliseconds),
+        outRate: outRate,
+      );
+      if (!dnaPlan.lockTempo) incomingRate = 1.0;
+    }
+
     try {
       // Punto de arranque del entrante: su golpe más cercano a partir del cue.
       // Phrase 8, si ya hay perfil, entra en el downbeat de la frase.
       int startMs = cueInMs;
       final PhraseTrack? phraseIn = PhraseGridMemory.peek(nextTrack);
+      final MixFormula downbeatFormula = ref.read(mixFormulaProvider);
       final bool onPhraseDownbeat =
-          ref.read(mixFormulaProvider) == MixFormula.phraseGrid &&
+          (downbeatFormula == MixFormula.phraseGrid ||
+              downbeatFormula == MixFormula.dnaEnergy) &&
           phraseIn != null &&
           phraseIn.hitsDownbeat(cueInMs);
       if (gridIn != null && !onPhraseDownbeat) {
@@ -2344,7 +2427,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
       // Filtros y corrección de tono ANTES de sonar: cambiarlos con el deck ya
       // andando reinicia la cadena de audio y el tempo tarda 2-3 s en asentarse.
-      _prepareIncomingDeck(incomingPlayer, nextMode);
+      _prepareIncomingDeck(
+        incomingPlayer,
+        nextMode,
+        afOverride: dnaPlan == null || dnaPlan.legacy
+            ? null
+            : _dnaIncomingAf(dnaPlan, incomingPlayer),
+      );
       await incomingPlayer.setRate(incomingRate);
       await incomingPlayer.setVolume(0.0);
       if (gridOut != null && gridIn != null) {
@@ -2417,7 +2506,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         durationMs: trackDur.inMilliseconds,
       );
     }
-    _publishedFadeMs = phraseFadeOverride ?? 0;
+    _publishedFadeMs = phraseFadeOverride ??
+        (dnaPlan != null && !dnaPlan.legacy ? dnaPlan.fadeMs : 0);
 
     state = state.copyWith(
       radioOn: autoRadio ? true : null,
@@ -2445,13 +2535,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           ? _planManualMixDurationMs(nextTrack, trackDur.inMilliseconds)
           : null,
       phraseFadeOverride: phraseFadeOverride,
+      dnaKind: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.kind,
+      dnaFadeMs: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.fadeMs,
+      dnaBassSwap: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.bassSwap,
+      dnaEchoDelayMs: dnaPlan?.echoDelayMs ?? 0,
+      dnaEchoFeedback: dnaPlan?.echoFeedback ?? 0,
     );
   }
 
   /// Deja el deck entrante listo ANTES de `play()`: corrección de tono y cadena
   /// `af` (con corte de graves en modo activeSync). Mismos valores que antes
   /// ponía el motor de mezcla ya con el deck sonando.
-  void _prepareIncomingDeck(Player incoming, LiveDjMixMode mode) {
+  void _prepareIncomingDeck(
+    Player incoming,
+    LiveDjMixMode mode, {
+    String? afOverride,
+  }) {
     try {
       final eqN = ref.read(liveDjEqualizerProvider.notifier);
       final String base = eqN.filterFor(incoming);
@@ -2462,9 +2561,23 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       platform?.setProperty('audio-pitch-correction', 'yes');
       platform?.setProperty(
         'af',
-        mode == LiveDjMixMode.activeSync ? lowCut : base,
+        afOverride ?? (mode == LiveDjMixMode.activeSync ? lowCut : base),
       );
     } catch (_) {}
+  }
+
+  String _dnaIncomingAf(DnaDecision plan, Player incoming) {
+    final String base = ref
+        .read(liveDjEqualizerProvider.notifier)
+        .filterFor(incoming);
+    if (plan.kind == DnaKind.longBlend) {
+      return AfCaps.sanitize(
+        [base, _bassKillFilter, dnaHighShelfCut]
+            .where((String s) => s.isNotEmpty)
+            .join(','),
+      );
+    }
+    return AfCaps.sanitize(base);
   }
 
   Future<void> _executeMixEngine({
@@ -2475,6 +2588,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     bool isManualSkip = false,
     int? manualMixDurationMs,
     int? phraseFadeOverride,
+    DnaKind? dnaKind,
+    int? dnaFadeMs,
+    bool? dnaBassSwap,
+    int dnaEchoDelayMs = 0,
+    double dnaEchoFeedback = 0,
   }) async {
     final eqN = ref.read(liveDjEqualizerProvider.notifier);
     String inBase() => eqN.filterFor(incomingPlayer);
@@ -2482,7 +2600,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final platformOut = fadingPlayer.platform as dynamic;
     final platformIn = incomingPlayer.platform as dynamic;
 
-    final bool useBassSwap = mixProfile == LiveDjMixMode.activeSync;
+    final bool useBassSwap =
+        mixProfile == LiveDjMixMode.activeSync && (dnaBassSwap ?? true);
+    final String? dnaOutExtra = dnaKind == DnaKind.longBlend
+        ? dnaHighShelfCut
+        : (dnaKind == DnaKind.filterSweep
+              ? dnaHighpassMild
+              : (dnaKind == DnaKind.echoOut && AfCaps.has('aecho')
+                    ? dnaEchoChain(dnaEchoDelayMs, dnaEchoFeedback)
+                    : null));
+    final String? dnaOutMid = dnaKind == DnaKind.filterSweep
+        ? dnaHighpassHard
+        : null;
     final String lowCutIn = AfCaps.sanitize(
       [inBase(), _bassKillFilter].where((s) => s.isNotEmpty).join(','),
     );
@@ -2494,7 +2623,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     try {
       // El deck entrante ya quedó preparado antes de sonar (_prepareIncomingDeck).
       platformOut?.setProperty('audio-pitch-correction', 'yes');
-      platformOut?.setProperty('af', outBase());
+      platformOut?.setProperty(
+        'af',
+        dnaOutExtra == null
+            ? outBase()
+            : AfCaps.sanitize(
+                [outBase(), dnaOutExtra].where((String s) => s.isNotEmpty).join(','),
+              ),
+      );
 
       await incomingPlayer.setVolume(0.0);
 
@@ -2507,17 +2643,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           ? (manualMixDurationMs ?? 12000)
           : (mixProfile == LiveDjMixMode.longBypass
                 ? 4000
-                : (phraseNow && phraseFadeOverride != null
-                      ? phraseFadeOverride
-                      : (phraseNow || stealthNow
-                            ? phraseFadeMs(
-                                incomingBpm: _extractBpm(
-                                  state.currentTrackPath,
-                                ),
-                                incomingDurationMs:
-                                    state.duration.inMilliseconds,
-                              )
-                            : 18000)));
+                : (dnaFadeMs ??
+                      (phraseNow && phraseFadeOverride != null
+                          ? phraseFadeOverride
+                          : (phraseNow || stealthNow
+                                ? phraseFadeMs(
+                                    incomingBpm: _extractBpm(
+                                      state.currentTrackPath,
+                                    ),
+                                    incomingDurationMs:
+                                        state.duration.inMilliseconds,
+                                  )
+                                : 18000))));
 
       while (fadeStopwatch.elapsedMilliseconds < fadeOutDurationMs) {
         final progress = (fadeStopwatch.elapsedMilliseconds / fadeOutDurationMs)
@@ -2532,8 +2669,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
         if (useBassSwap && !bassSwapped && progress >= 0.5) {
           bassSwapped = true;
-          platformOut?.setProperty('af', lowCutOut);
+          platformOut?.setProperty(
+            'af',
+            dnaOutExtra == null
+                ? lowCutOut
+                : AfCaps.sanitize(
+                    [lowCutOut, dnaOutExtra]
+                        .where((String s) => s.isNotEmpty)
+                        .join(','),
+                  ),
+          );
           platformIn?.setProperty('af', inBase());
+        } else if (dnaOutMid != null && !bassSwapped && progress >= 0.5) {
+          bassSwapped = true;
+          platformOut?.setProperty(
+            'af',
+            AfCaps.sanitize(
+              [outBase(), dnaOutMid].where((String s) => s.isNotEmpty).join(','),
+            ),
+          );
         }
 
         await incomingPlayer.setVolume(
