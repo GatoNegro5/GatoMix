@@ -11,16 +11,16 @@ import 'package:gatomix/ui/widgets/app_version_label.dart';
 void main() {
   const bool win = true;
 
-  test('version visible 3.0.26', () {
+  test('version visible 3.0.27', () {
     final String pub = File('pubspec.yaml').readAsStringSync();
     final RegExpMatch? m = RegExp(
       r'^version:\s*(\S+)',
       multiLine: true,
     ).firstMatch(pub);
-    expect(m?.group(1), '3.0.26+45');
-    final String visible = 'v${AppVersionLabel.format('3.0.26', '45')}';
-    expect(visible.startsWith('v3.0.26'), isTrue);
-    expect(visible, contains('build 45'));
+    expect(m?.group(1), '3.0.27+46');
+    final String visible = 'v${AppVersionLabel.format('3.0.27', '46')}';
+    expect(visible.startsWith('v3.0.27'), isTrue);
+    expect(visible, contains('build 46'));
   });
 
   test('clave absoluta: separadores, mayúsculas y NFC', () {

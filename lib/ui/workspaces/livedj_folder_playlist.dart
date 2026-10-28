@@ -95,13 +95,17 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
     final LiveDjState live = ref.read(liveDjProvider);
     final MixFormula formula = ref.read(mixFormulaProvider);
     final double bpm = relevoBpm(next);
-    final int ms = relevoDurationMs(
+    int ms = relevoDurationMs(
       derive: true,
       mode: live.currentMixMode,
       formula: formula,
       bpm: bpm,
       durationMs: live.duration.inMilliseconds,
     );
+    if (formula == MixFormula.phraseGrid) {
+      final int published = ref.read(liveDjProvider.notifier).publishedFadeMs;
+      if (published > 0) ms = published;
+    }
     setState(() {
       _handoffFrom = prev;
       _handoffTo = next;

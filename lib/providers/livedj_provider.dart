@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
@@ -17,6 +18,7 @@ import '../core/hal/platform_strategy.dart';
 import '../core/mode_session.dart';
 import '../core/livedj_next.dart';
 import '../core/livedj_order.dart';
+import '../core/phrase_grid.dart';
 import '../core/queue_bpm.dart';
 import '../core/session_restore.dart';
 import '../core/session_store.dart';
@@ -210,6 +212,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // entrante (etiqueta/nombre o medido por beat_grid).
   final TempoDrift _drift = TempoDrift();
   double _incomingNatBpm = 0.0;
+  // Análisis de Phrase 8, una pista por vez, fuera del tick.
+  Future<void> _phraseJobs = Future<void>.value();
+  final Set<String> _phrasePending = <String>{};
+  int _publishedFadeMs = 0;
 
   late final PlatformMixStrategy _liveStrategy;
 
@@ -233,6 +239,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     ref.listen<MixFormula>(mixFormulaProvider, (previous, next) {
       if (previous == next || !_sessionHydrated) return;
       _saveSnapshot();
+      if (next == MixFormula.phraseGrid) _schedulePhraseNeighbors();
     });
 
     ref.onDispose(() {
@@ -269,6 +276,125 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   double _extractBpm(String? path) => knownBpm(path);
 
+  /// Lo que usa el relevo visual. Phrase 8 publica el fundido real.
+  int get publishedFadeMs => _publishedFadeMs;
+
+  int _phraseFallbackCue(String? path, int durMs) {
+    final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
+    if (durMs > 30000) return leadMs > 10000 ? leadMs : 10000;
+    return leadMs < durMs ~/ 3 ? leadMs : 0;
+  }
+
+  String? _phrasePeerPath() {
+    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return null;
+    if (state.radioOn) {
+      final String? drift = _driftNextPath;
+      if (drift != null && drift.isNotEmpty) return drift;
+      return null;
+    }
+    return _queueHeadPath();
+  }
+
+  void _schedulePhraseNeighbors() {
+    if (!_sessionHydrated) return;
+    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+    _schedulePhraseGrid(state.currentTrackPath);
+    _schedulePhraseGrid(_phrasePeerPath());
+  }
+
+  void _schedulePhraseGrid(String? path) {
+    if (path == null || path.isEmpty) return;
+    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+    if (!_sessionHydrated) return;
+    if (PhraseGridMemory.peek(path) != null || PhraseGridMemory.gaveUp(path)) {
+      return;
+    }
+    final String key = audioPathKey(path);
+    if (!_phrasePending.add(key)) return;
+    if (!File(path).existsSync()) {
+      PhraseGridMemory.giveUp(path);
+      _phrasePending.remove(key);
+      return;
+    }
+    _phraseJobs = _phraseJobs.then((_) async {
+      try {
+        await _buildPhraseGrid(path);
+      } finally {
+        _phrasePending.remove(key);
+      }
+    });
+  }
+
+  Future<void> _buildPhraseGrid(String path) async {
+    if (PhraseGridMemory.peek(path) != null || PhraseGridMemory.gaveUp(path)) {
+      return;
+    }
+    try {
+      PhraseGridMemory.absorbDir(File(path).parent.path);
+    } catch (_) {}
+    if (PhraseGridMemory.peek(path) != null) {
+      _refreshPhraseMixOut();
+      return;
+    }
+    try {
+      double bpm = _extractBpm(path);
+      var beatMs = 0;
+      try {
+        final rust_dsp.BeatGrid grid = await rust_dsp.beatGrid(
+          inputPath: path,
+          fromMs: BigInt.zero,
+          spanSecs: 24,
+        );
+        if (grid.ok && grid.bpm >= 60 && grid.bpm <= 200) {
+          if (bpm < 60 || bpm > 200) bpm = grid.bpm;
+          beatMs = grid.beatMs.round();
+        }
+      } catch (_) {}
+      if (bpm < 60 || bpm > 200) {
+        PhraseGridMemory.giveUp(path);
+        return;
+      }
+      final Uint8List pcm = await rust_dsp.decodeMonoPcm(
+        inputPath: path,
+        startSecs: 0,
+        lengthSecs: 900,
+        targetRate: 22050,
+      );
+      final PhraseTrack? track = await Isolate.run(
+        () => analyzePhrasePcm(
+          pcm: pcm,
+          sampleRate: 22050,
+          bpm: bpm,
+          beatMs: beatMs,
+        ),
+      );
+      if (track == null) {
+        PhraseGridMemory.giveUp(path);
+        return;
+      }
+      PhraseGridMemory.save(path, track);
+      _refreshPhraseMixOut();
+    } catch (_) {
+      PhraseGridMemory.giveUp(path);
+    }
+  }
+
+  void _refreshPhraseMixOut() {
+    try {
+      if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return;
+      final String? path = state.currentTrackPath;
+      if (path == null || path.isEmpty) return;
+      final int dur = state.duration.inMilliseconds;
+      if (dur <= 0) return;
+      _mixOutCacheKey = null;
+      final int mix = _calculateRadioMixOut(dur, path);
+      if (mix <= 10000) return;
+      if (mix <= state.position.inMilliseconds + 1500) return;
+      if (mix == state.customMixOutMs) return;
+      state = state.copyWith(customMixOutMs: mix);
+    } catch (_) {}
+  }
+
   Future<int> _calculateSmartCueIn(String path, Player player) async {
     if (_isMixTrack(player.state.duration.inMilliseconds)) return 0;
     final int durMs = player.state.duration.inMilliseconds;
@@ -277,8 +403,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     // El silencio inicial medido por el masterizado nunca queda dentro del cue.
     final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
-    if (durMs > 30000) return leadMs > 10000 ? leadMs : 10000;
-    return leadMs < durMs ~/ 3 ? leadMs : 0;
+    final int fallback = durMs > 30000
+        ? (leadMs > 10000 ? leadMs : 10000)
+        : (leadMs < durMs ~/ 3 ? leadMs : 0);
+    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return fallback;
+    final String? outPath = state.currentTrackPath;
+    final bool other = outPath != null && !sameAudioPath(outPath, path);
+    final PhraseTrack? incoming = PhraseGridMemory.peek(path);
+    final double bpm = _extractBpm(path);
+    return planPhrase8(
+      outDurationMs: other ? state.duration.inMilliseconds : durMs,
+      inDurationMs: durMs,
+      fallbackMixOutMs: other ? state.customMixOutMs : 0,
+      fallbackCueMs: fallback,
+      incomingBpm: bpm >= 60 ? bpm : (incoming?.bpm ?? 0),
+      incomingRate: 1,
+      outgoing: other ? PhraseGridMemory.peek(outPath) : null,
+      incoming: incoming,
+      lockExit: other,
+    ).cueInMs;
   }
 
   // 🎛️ INYECCIÓN ADN DJ: Ahora el Cartridge aplica la regla 65%-80%
@@ -288,9 +431,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   int _mixOutCacheVal = 0;
 
   int _calculateRadioMixOut(int durationMs, String? path) {
-    final String key =
-        '$durationMs|$path|${ref.read(mixFormulaProvider)}|'
+    final MixFormula formula = ref.read(mixFormulaProvider);
+    String key =
+        '$durationMs|$path|$formula|'
         '${TrackTags.peek(path)?.tailMs ?? 0}|${TrackTags.peek(path)?.bpm ?? 0}';
+    if (formula == MixFormula.phraseGrid) {
+      final String? peer = _phrasePeerPath();
+      key =
+          '$key|${PhraseGridMemory.stamp(path)}|${PhraseGridMemory.stamp(peer)}|$peer';
+    }
     if (key == _mixOutCacheKey) return _mixOutCacheVal;
     final int v = _calculateRadioMixOutRaw(durationMs, path);
     _mixOutCacheKey = key;
@@ -351,11 +500,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
     }
     if (ref.read(mixFormulaProvider) == MixFormula.phraseGrid) {
-      return snapPhraseGridMixOut(
+      final int snapped = snapPhraseGridMixOut(
         durationMs: effDurMs,
         dnaMixOutMs: safeMixOutMs,
         bpm: _extractBpm(path),
       );
+      final String? peer = _phrasePeerPath();
+      final PhraseTrack? incoming = PhraseGridMemory.peek(peer);
+      final double peerBpm = _extractBpm(peer);
+      final int peerDur = incoming?.durationMs ?? 0;
+      return planPhrase8(
+        outDurationMs: effDurMs,
+        inDurationMs: peerDur,
+        fallbackMixOutMs: snapped,
+        fallbackCueMs: _phraseFallbackCue(peer, peerDur),
+        incomingBpm: peerBpm >= 60 ? peerBpm : (incoming?.bpm ?? 0),
+        incomingRate: 1,
+        outgoing: PhraseGridMemory.peek(path),
+        incoming: incoming,
+      ).mixOutMs;
     }
     return safeMixOutMs;
   }
@@ -697,6 +860,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (_) {
     } finally {
       _sessionHydrated = true;
+      _schedulePhraseNeighbors();
     }
   }
 
@@ -1059,6 +1223,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           }
           // Solo se da por precargada cuando la carga terminó de verdad.
           _standbyArmedPath = armPath;
+          _schedulePhraseNeighbors();
           ref
               .read(liveDjEqualizerProvider.notifier)
               .adapt(_standbyPlayer, armPath);
@@ -2161,8 +2326,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     try {
       // Punto de arranque del entrante: su golpe más cercano a partir del cue.
+      // Phrase 8, si ya hay perfil, entra en el downbeat de la frase.
       int startMs = cueInMs;
-      if (gridIn != null) {
+      final PhraseTrack? phraseIn = PhraseGridMemory.peek(nextTrack);
+      final bool onPhraseDownbeat =
+          ref.read(mixFormulaProvider) == MixFormula.phraseGrid &&
+          phraseIn != null &&
+          phraseIn.hitsDownbeat(cueInMs);
+      if (gridIn != null && !onPhraseDownbeat) {
         final double pIn = 60000.0 / gridIn.bpm;
         final double ki = ((cueInMs - gridIn.beatMs) / pIn).ceilToDouble();
         startMs = (gridIn.beatMs + ki * pIn).round();
@@ -2226,6 +2397,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     if (radioPick) _radioConsumed(nextTrack);
 
+    final String? fadingPath = state.currentTrackPath;
+    final int fadingMixOut = state.customMixOutMs;
+    int? phraseFadeOverride;
+    if (!isManualSkip &&
+        nextMode != LiveDjMixMode.longBypass &&
+        ref.read(mixFormulaProvider) == MixFormula.phraseGrid) {
+      phraseFadeOverride = phraseGridFadeMs(
+        bpm: phraseSoundingBpm(
+          incomingBpm: incomingBpm,
+          incomingRate: incomingRate,
+        ),
+        instrumental: phraseCrossIsInstrumental(
+          outgoing: PhraseGridMemory.peek(fadingPath),
+          incoming: PhraseGridMemory.peek(nextTrack),
+          outMs: fadingMixOut,
+          inMs: cueInMs,
+        ),
+        durationMs: trackDur.inMilliseconds,
+      );
+    }
+    _publishedFadeMs = phraseFadeOverride ?? 0;
+
     state = state.copyWith(
       radioOn: autoRadio ? true : null,
       queue: newQueue,
@@ -2238,6 +2431,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
 
     _saveSnapshot();
+    _schedulePhraseNeighbors();
     // Con la Radio encendida el siguiente se elige apenas empieza esta pista.
     if (state.radioOn) unawaited(_radioNextPath());
 
@@ -2250,6 +2444,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       manualMixDurationMs: isManualSkip
           ? _planManualMixDurationMs(nextTrack, trackDur.inMilliseconds)
           : null,
+      phraseFadeOverride: phraseFadeOverride,
     );
   }
 
@@ -2279,6 +2474,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     double incomingRate = 1.0,
     bool isManualSkip = false,
     int? manualMixDurationMs,
+    int? phraseFadeOverride,
   }) async {
     final eqN = ref.read(liveDjEqualizerProvider.notifier);
     String inBase() => eqN.filterFor(incomingPlayer);
@@ -2303,17 +2499,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       await incomingPlayer.setVolume(0.0);
 
       final fadeStopwatch = Stopwatch()..start();
+      final bool phraseNow =
+          ref.read(mixFormulaProvider) == MixFormula.phraseGrid;
+      final bool stealthNow =
+          ref.read(mixFormulaProvider) == MixFormula.stealthGap;
       final fadeOutDurationMs = isManualSkip
           ? (manualMixDurationMs ?? 12000)
           : (mixProfile == LiveDjMixMode.longBypass
                 ? 4000
-                : (ref.read(mixFormulaProvider) == MixFormula.phraseGrid ||
-                          ref.read(mixFormulaProvider) == MixFormula.stealthGap
-                      ? phraseFadeMs(
-                          incomingBpm: _extractBpm(state.currentTrackPath),
-                          incomingDurationMs: state.duration.inMilliseconds,
-                        )
-                      : 18000));
+                : (phraseNow && phraseFadeOverride != null
+                      ? phraseFadeOverride
+                      : (phraseNow || stealthNow
+                            ? phraseFadeMs(
+                                incomingBpm: _extractBpm(
+                                  state.currentTrackPath,
+                                ),
+                                incomingDurationMs:
+                                    state.duration.inMilliseconds,
+                              )
+                            : 18000)));
 
       while (fadeStopwatch.elapsedMilliseconds < fadeOutDurationMs) {
         final progress = (fadeStopwatch.elapsedMilliseconds / fadeOutDurationMs)
