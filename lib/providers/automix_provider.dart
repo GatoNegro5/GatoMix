@@ -14,6 +14,8 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import '../core/hal/platform_strategy.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
+import '../core/audio/mix_pause.dart';
+import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
 import '../core/dj_trace.dart';
 import '../core/audio/dj_audio_handler.dart';
@@ -178,6 +180,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
   String? _lastDurationPlanKey;
   int _lastUiPosMs = -1;
   final TempoDrift _drift = TempoDrift();
+  final MixPause _mix = MixPause();
+  PhaseLockSession? _phaseLock;
+  bool _deckAWasOn = false;
+  bool _deckBWasOn = false;
   int _lastLyricIndex = -2;
   String? _shownLyricsPath;
   List<LyricLine>? _lyricUndo;
@@ -292,6 +298,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (!state.isPlaying) return false;
     _pausedByInterruption = true;
     _cancelOutroProbe();
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) djTrace(line);
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -306,6 +315,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
   Future<void> resumeAfterInterruption() async {
     if (!_pausedByInterruption) return;
     _pausedByInterruption = false;
+    if (_mix.armed) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) djTrace(line);
+      return;
+    }
+    _mix.resumeAll();
     try {
       await _activeAutomix.play();
     } catch (_) {}
@@ -316,6 +332,85 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
     unawaited(_planVariableMixWindow());
   }
+
+  void _releaseMix() {
+    _isCrossfading = false;
+    _mix.end();
+  }
+
+  Future<void> _dropPhase() async {
+    final PhaseLockSession? phase = _phaseLock;
+    _phaseLock = null;
+    if (phase == null) return;
+    await phase.finish();
+    phase.logLater(djTrace);
+  }
+
+  bool _deckPlaying(Player Function() read) {
+    try {
+      return read().state.playing;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _captureDecks() {
+    _deckAWasOn = _deckPlaying(() => _playerA);
+    _deckBWasOn = _deckPlaying(() => _playerB);
+  }
+
+  Future<void> _playDecksHeld() async {
+    if (_deckAWasOn) {
+      try {
+        await _playerA.play();
+      } catch (_) {}
+    }
+    if (_deckBWasOn) {
+      try {
+        await _playerB.play();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _toggleMixHold() async {
+    if (_mix.paused) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) djTrace(line);
+      return;
+    }
+    _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    await _saveSnapshot();
+  }
+
+  @visibleForTesting
+  void armMixForTest({
+    required int fadeMs,
+    required double rampBpm,
+    int elapsedMs = 0,
+  }) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+    _mix.beginFade(fadeMs, elapsedMs: elapsedMs);
+  }
+
+  @visibleForTesting
+  bool get mixPaused => _mix.paused;
+
+  @visibleForTesting
+  bool get crossfadeHeld => _isCrossfading;
+
+  @visibleForTesting
+  String? get lastMixHoldLine => _mix.lastLine;
 
   int? _readSavedUiRoute() {
     try {
@@ -1020,7 +1115,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> _stopWhenNoNext() async {
-    _isCrossfading = false;
+    _releaseMix();
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -1094,7 +1189,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _freezePersist = false;
 
     final String nextTrack = newPlaylist[startIndex];
-    if (_isCrossfading && !_deckHot) _isCrossfading = false;
+    if (_isCrossfading && !_deckHot) _releaseMix();
 
     if (!_deckHot || state.currentTrackPath == null) {
       state = state.copyWith(
@@ -1129,6 +1224,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (!_isCrossfading) {
       _isCrossfading = true;
+      _mix.arm();
       _isPrepModeBypass = false;
 
       final Player fadingPlayer = _activeAutomix;
@@ -1141,7 +1237,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
             .read(automixEqualizerProvider.notifier)
             .adapt(incomingPlayer, nextTrack);
       } catch (e) {
-        _isCrossfading = false;
+        _releaseMix();
         return;
       }
 
@@ -1159,9 +1255,21 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       try {
         await incomingPlayer.setRate(incomingRate);
-        await incomingPlayer.play();
+        await _playIncomingInPhase(
+          fading: fadingPlayer,
+          incoming: incomingPlayer,
+          inPath: nextTrack,
+          cueMs: cueInMs,
+          inBpm: incomingBpm,
+          rampRate: incomingRate,
+        );
+        if (!_mix.armed) {
+          await _dropPhase();
+          return;
+        }
       } catch (e) {
-        _isCrossfading = false;
+        await _dropPhase();
+        _releaseMix();
         return;
       }
 
@@ -1210,7 +1318,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (!_deckHot) {
       final String coldTrack = state.playlist[index];
-      _isCrossfading = false;
+      _releaseMix();
       state = state.copyWith(
         currentIndex: index,
         currentTrackPath: coldTrack,
@@ -1229,6 +1337,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     _isCrossfading = true;
+    _mix.arm();
     _isPrepModeBypass = false;
 
     final String nextTrack = state.playlist[index];
@@ -1242,7 +1351,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           .read(automixEqualizerProvider.notifier)
           .adapt(incomingPlayer, nextTrack);
     } catch (e) {
-      _isCrossfading = false;
+      _releaseMix();
       return;
     }
 
@@ -1261,9 +1370,21 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     try {
       await incomingPlayer.setRate(incomingRate);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: nextTrack,
+        cueMs: cueInMs,
+        inBpm: incomingBpm,
+        rampRate: incomingRate,
+      );
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
@@ -1310,6 +1431,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
   Future<void> _triggerCrossfade() async {
     if (_isCrossfading || state.nextTrackPath == null) return;
     _isCrossfading = true;
+    _mix.arm();
 
     final String nextTrack = state.nextTrackPath!;
     await _primeLyrics(nextTrack);
@@ -1327,7 +1449,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           .read(automixEqualizerProvider.notifier)
           .adapt(incomingPlayer, nextTrack);
     } catch (e) {
-      _isCrossfading = false;
+      _releaseMix();
       return;
     }
 
@@ -1346,9 +1468,21 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     try {
       await incomingPlayer.setRate(incomingRate);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: nextTrack,
+        cueMs: cueInMs,
+        inBpm: incomingBpm,
+        rampRate: incomingRate,
+      );
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
@@ -1424,11 +1558,19 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       await incomingPlayer.setVolume(0.0);
 
-      final fadeStopwatch = Stopwatch()..start();
+      final int mixEpoch = _mix.epoch;
+      final MixRunClock fadeClock = _mix.beginFade(mixDurationMs);
       final actualDuration = mixDurationMs;
 
-      while (fadeStopwatch.elapsedMilliseconds < actualDuration) {
-        final progress = (fadeStopwatch.elapsedMilliseconds / actualDuration)
+      while (
+        fadeClock.elapsedMilliseconds < actualDuration &&
+        _mix.epoch == mixEpoch
+      ) {
+        if (_mix.paused) {
+          await _mix.untilRunning();
+          continue;
+        }
+        final progress = (fadeClock.elapsedMilliseconds / actualDuration)
             .clamp(0.0, 1.0);
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
@@ -1450,11 +1592,12 @@ class AutomixNotifier extends Notifier<AutomixState> {
         );
         await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
 
-        await Future.delayed(const Duration(milliseconds: 32));
+        await _mix.slice(32, fadeClock);
       }
     } catch (e) {
       debugPrint("🔴 [ERROR DSP AUTOMIX]: $e");
     } finally {
+      await _dropPhase();
       // B arrancó en el punto medio. La vuelta a su BPM la hace TempoDrift.
       _drift.begin(_extractBpm(state.currentTrackPath), incomingRate);
       final String? blocked = _drift.takeBlockedReport();
@@ -1469,8 +1612,66 @@ class AutomixNotifier extends Notifier<AutomixState> {
         await fadingPlayer.stop();
       } catch (_) {}
 
-      _isCrossfading = false;
+      _releaseMix();
     }
+  }
+
+  Future<void> _playIncomingInPhase({
+    required Player fading,
+    required Player incoming,
+    required String inPath,
+    required int cueMs,
+    required double inBpm,
+    required double rampRate,
+  }) async {
+    final String? outPath = state.currentTrackPath;
+    rust_dsp.BeatGrid? gridOut;
+    rust_dsp.BeatGrid? gridIn;
+    if (outPath != null) {
+      try {
+        final int outPos = fading.state.position.inMilliseconds;
+        final List<rust_dsp.BeatGrid> grids =
+            await Future.wait<rust_dsp.BeatGrid>(<Future<rust_dsp.BeatGrid>>[
+              rust_dsp.beatGrid(
+                inputPath: outPath,
+                fromMs: BigInt.from(outPos + 1000),
+                spanSecs: 12,
+              ),
+              rust_dsp.beatGrid(
+                inputPath: inPath,
+                fromMs: BigInt.from(cueMs < 0 ? 0 : cueMs),
+                spanSecs: 12,
+              ),
+            ]).timeout(const Duration(seconds: 5));
+        if (grids[0].ok &&
+            grids[1].ok &&
+            grids[0].bpm > 0 &&
+            grids[1].bpm > 0) {
+          gridOut = grids[0];
+          gridIn = grids[1];
+        }
+      } catch (_) {}
+    }
+    _mix.setRampBpm(inBpm > 0 && rampRate > 0 ? inBpm * rampRate : 0);
+    if (gridOut == null || gridIn == null) {
+      await incoming.play();
+      return;
+    }
+    final double liveOut = fading.state.rate;
+    _phaseLock = await engageBeatLock(
+      outgoing: fading,
+      incoming: incoming,
+      outBeatMs: gridOut.beatMs,
+      outBpm: gridOut.bpm,
+      outRate: liveOut > 0 ? liveOut : 1,
+      inBeatMs: gridIn.beatMs,
+      inBpm: gridIn.bpm,
+      cueMs: (cueMs < 0 ? 0 : cueMs).toDouble(),
+      inRate: rampRate > 0 ? rampRate : 1,
+      rampRate: rampRate > 0 ? rampRate : 1,
+      incomingOnBeat: false,
+      hold: _mix,
+    );
   }
 
   double _midpointRate(double fadingBpm, double incomingBpm) {
@@ -1549,7 +1750,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _positionSub = player.stream.position.listen((Duration pos) {
       final posMs = pos.inMilliseconds;
 
-      if (!_isCrossfading && state.duration.inMilliseconds > 0) {
+      if (!_isCrossfading && !_mix.paused && state.duration.inMilliseconds > 0) {
         final double curRate = player.state.rate;
         final String? blocked = _drift.takeBlockedReport();
         if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
@@ -1563,7 +1764,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
         final String? blockedAfter = _drift.takeBlockedReport();
         if (blockedAfter != null) djTrace('MIDPOINT FUERA $blockedAfter');
         if (tgt != null) {
-          unawaited(_drift.ramp(player, curRate, tgt, ms: _drift.rampMs));
+          unawaited(
+            _drift.ramp(player, curRate, tgt, ms: _drift.rampMs, hold: _mix),
+          );
         }
       }
 
@@ -1586,7 +1789,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           state.customMixOutMs,
         );
         if (posMs >= (triggerMs - 150)) {
-          if (!_isCrossfading && !_isPrepModeBypass) {
+          if (!_isCrossfading && !_isPrepModeBypass && !_mix.paused) {
             _triggerCrossfade();
           }
         }
@@ -1812,10 +2015,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> togglePlayPause() async {
+    if (_mix.armed) {
+      await _toggleMixHold();
+      return;
+    }
     if (state.currentTrackPath == null) return;
     _isPrepModeBypass = false;
     _freezePersist = false;
-    _isCrossfading = false;
+    if (_isCrossfading) _releaseMix();
 
     final String path = state.currentTrackPath!;
     final bool deckEmpty = _activeAutomix.state.duration.inMilliseconds <= 0;
@@ -1837,6 +2044,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (state.isPlaying) {
       _cancelOutroProbe();
+      _mix.pauseAll();
       await _activeAutomix.pause();
       _saveSnapshot();
       return;
@@ -1846,6 +2054,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
         state.position.inMilliseconds < state.customCueInMs) {
       await _activeAutomix.seek(Duration(milliseconds: state.customCueInMs));
     }
+    _mix.resumeAll();
     await _activeAutomix.play();
     unawaited(_planVariableMixWindow());
     await Future.delayed(const Duration(milliseconds: 80));
@@ -1861,8 +2070,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> pause() async {
+    if (_mix.armed) {
+      if (!_mix.paused) await _toggleMixHold();
+      return;
+    }
     if (state.isPlaying) {
       _cancelOutroProbe();
+      _mix.pauseAll();
       await _activeAutomix.pause();
       _saveSnapshot();
     }
@@ -1910,6 +2124,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     _isCrossfading = true;
+    _mix.arm();
     try {
       await incomingPlayer.setVolume(0.0);
       await incomingPlayer.open(Media(newPath), play: false);
@@ -1920,9 +2135,17 @@ class AutomixNotifier extends Notifier<AutomixState> {
         await incomingPlayer.seek(Duration(milliseconds: state.customCueInMs));
       }
       await incomingPlayer.setRate(1.0);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: newPath,
+        cueMs: state.customCueInMs > 0 ? state.customCueInMs : 0,
+        inBpm: _extractBpm(newPath),
+        rampRate: 1.0,
+      );
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       debugPrint('🔴 [AUTOMIX SWAP] $e');
       return;
     }
@@ -1951,14 +2174,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await _playerB.stop();
     } catch (_) {}
-    _isCrossfading = false;
+    _releaseMix();
     await Future.delayed(const Duration(milliseconds: 600));
   }
 
   /// El deck activo a veces queda vacío (restore / park). La 2ª pista suena
   /// porque abre el standby; la 1ª reutilizaba el muerto. Siempre el otro.
   Future<void> _forceOpenAndPlay(String path, {int seekMs = 0}) async {
-    _isCrossfading = false;
+    _releaseMix();
     final Player incoming = _standbyPlayer;
     _drift.begin(_extractBpm(path), 1.0);
     try {
@@ -2000,7 +2223,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (!force && (state.isPlaying || _isCrossfading)) return;
     _parking = true;
     try {
-      if (force) _isCrossfading = false;
+      if (force) _releaseMix();
       _cancelOutroProbe();
       _sessionWasPlaying = state.isPlaying;
       if (state.position.inMilliseconds > 0) {

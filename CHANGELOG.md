@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 3.0.30+49 — empate de golpe en lazo cerrado y pausa total en la mezcla
+
+- **Fase.** Live DJ (DNA, Phrase 8 y Stealth) y Automix leen la posición oída (`audio-pts`, si no `time-pos`, si no el último dato más el tiempo medido). La espera al golpe resta la latencia de arranque medida en ese dispositivo (promedio móvil). Sin medida todavía, usa el retardo de salida de libmpv (`time-pos − audio-pts`) o cero, y el lazo corrige. Durante la mezcla se mide el desfase de los dos decks y, si pasa de 5 ms, la entrante se mueve como mucho un 1 % encima del rate de la rampa, sin sustituirlo. La bitácora anota `PHASE inicial=… final=… latencia=… pasos=…`.
+- **Pausa.** En medio de la mezcla, pausa congela los dos decks, el fundido, la rampa de BPM, el lazo de fase y el resto de relojes de la mezcla en ese instante. Play sigue desde ese punto: mismos volúmenes y rates, con el tiempo de pausa fuera de los relojes. No abre otra mezcla ni salta de canción. La bitácora anota `PAUSA en mezcla t=… fade=… rampa=…` y `REANUDA …`. Fuera de la mezcla, la pausa, la reanudación tras una llamada, la Radio, el seek y el salto manual siguen como estaban.
+- API Dart–Rust: no cambia.
+- Igual en Windows, Android, macOS e iPhone: el código vive en `lib/providers` y `lib/core/audio`, y el iPhone entra por `lib/djiphone/`.
+
 ## 3.0.29+48 — rampa de BPM al punto medio, duración real, lista de Radio
 
 - **Tempo.** Live DJ (DNA, incluido eco y filtro, Phrase 8 y Stealth) y Automix igualan en el punto medio: la saliente llega ahí antes del cruce y la entrante arranca ahí, en fase, y vuelve a su BPM después. Si el rate queda fuera de 0.88–1.12 se anota en la bitácora y no se recorta. `setRate` no cambia el volumen; el cruce sigue con la curva `pow`.

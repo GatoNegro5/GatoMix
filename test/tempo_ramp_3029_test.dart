@@ -189,18 +189,46 @@ void main() {
     );
   });
 
-  test('el golpe espera al siguiente beat, menos 20 ms', () {
+  test('el golpe espera al siguiente beat, menos la latencia medida', () {
     expect(
-      beatPhaseWaitMs(nowOutMs: 1000, beatMs: 0, bpm: 120, outRate: 1),
+      beatPhaseWaitMs(
+        nowOutMs: 1000,
+        beatMs: 0,
+        bpm: 120,
+        outRate: 1,
+        startupMs: 20,
+      ),
       480,
     );
     expect(
-      beatPhaseWaitMs(nowOutMs: 1000, beatMs: 0, bpm: 120, outRate: 1.25),
+      beatPhaseWaitMs(
+        nowOutMs: 1000,
+        beatMs: 0,
+        bpm: 120,
+        outRate: 1.25,
+        startupMs: 20,
+      ),
       ((1500 - 1000) / 1.25).round() - 20,
     );
     expect(
-      beatPhaseWaitMs(nowOutMs: 1000, beatMs: 0, bpm: 0, outRate: 1),
+      beatPhaseWaitMs(
+        nowOutMs: 1000,
+        beatMs: 0,
+        bpm: 0,
+        outRate: 1,
+        startupMs: 20,
+      ),
       0,
+    );
+    expect(
+      beatPhaseWaitMs(
+        nowOutMs: 1000,
+        beatMs: 0,
+        bpm: 120,
+        outRate: 1,
+        startupMs: 40,
+      ),
+      460,
     );
   });
 }

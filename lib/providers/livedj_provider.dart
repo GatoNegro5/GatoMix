@@ -24,6 +24,8 @@ import '../core/queue_bpm.dart';
 import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
+import '../core/audio/mix_pause.dart';
+import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
 import '../core/dj_trace.dart';
 import '../core/exact_mix.dart';
@@ -202,6 +204,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // Regulación sutil de tempo (ver tempo_drift.dart) y BPM real de la pista
   // entrante (etiqueta/nombre o medido por beat_grid).
   final TempoDrift _drift = TempoDrift();
+  final MixPause _mix = MixPause();
+  PhaseLockSession? _phaseLock;
+  bool _deckAWasOn = false;
+  bool _deckBWasOn = false;
   double _incomingNatBpm = 0.0;
   // Análisis de Phrase 8, una pista por vez, fuera del tick.
   Future<void> _phraseJobs = Future<void>.value();
@@ -585,6 +591,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<bool> pauseForInterruption() async {
     if (!state.isPlaying) return false;
     _pausedByInterruption = true;
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) _djTrace(line);
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -599,6 +608,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> resumeAfterInterruption() async {
     if (!_pausedByInterruption) return;
     _pausedByInterruption = false;
+    if (_mix.armed) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) _djTrace(line);
+      return;
+    }
+    _mix.resumeAll();
     try {
       await _activePlayer.play();
     } catch (_) {}
@@ -608,6 +624,86 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       } catch (_) {}
     }
   }
+
+  void _releaseMix() {
+    _isCrossfading = false;
+    _mix.end();
+  }
+
+  Future<void> _dropPhase() async {
+    final PhaseLockSession? phase = _phaseLock;
+    _phaseLock = null;
+    if (phase == null) return;
+    await phase.finish();
+    phase.logLater(_djTrace);
+  }
+
+  bool _deckPlaying(Player Function() read) {
+    try {
+      return read().state.playing;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _captureDecks() {
+    _deckAWasOn = _deckPlaying(() => _playerA);
+    _deckBWasOn = _deckPlaying(() => _playerB);
+  }
+
+  Future<void> _playDecksHeld() async {
+    if (_deckAWasOn) {
+      try {
+        await _playerA.play();
+      } catch (_) {}
+    }
+    if (_deckBWasOn) {
+      try {
+        await _playerB.play();
+      } catch (_) {}
+    }
+  }
+
+  /// Pausa o reanuda la mezcla en el acto: relojes primero, decks después.
+  Future<void> _toggleMixHold() async {
+    if (_mix.paused) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) _djTrace(line);
+      return;
+    }
+    _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) _djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    await _saveSnapshot();
+  }
+
+  @visibleForTesting
+  void armMixForTest({
+    required int fadeMs,
+    required double rampBpm,
+    int elapsedMs = 0,
+  }) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+    _mix.beginFade(fadeMs, elapsedMs: elapsedMs);
+  }
+
+  @visibleForTesting
+  bool get mixPaused => _mix.paused;
+
+  @visibleForTesting
+  bool get crossfadeHeld => _isCrossfading;
+
+  @visibleForTesting
+  String? get lastMixHoldLine => _mix.lastLine;
 
   int? _readSavedUiRoute() {
     try {
@@ -1227,7 +1323,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             ? state.customMixOutMs
             : _calculateRadioMixOut(durMs, state.currentTrackPath);
 
-        if (!_isCrossfading) {
+        if (!_isCrossfading && !_mix.paused) {
           final double curRate = player.state.rate;
           final String? blocked = _drift.takeBlockedReport();
           if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
@@ -1241,7 +1337,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           final String? blockedAfter = _drift.takeBlockedReport();
           if (blockedAfter != null) _djTrace('MIDPOINT FUERA $blockedAfter');
           if (tgt != null) {
-            unawaited(_drift.ramp(player, curRate, tgt, ms: _drift.rampMs));
+            unawaited(
+              _drift.ramp(player, curRate, tgt, ms: _drift.rampMs, hold: _mix),
+            );
           }
         }
 
@@ -1249,6 +1347,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         // (saliendo); recargarlo mete pistas fantasma y deja el armado huérfano.
         if (!_isStandbyArmed &&
             !_isCrossfading &&
+            !_mix.paused &&
             posMs >= (barMixOut - 10000) &&
             barMixOut > 10000) {
           _isStandbyArmed = true;
@@ -1311,7 +1410,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           exactMs: durMs,
           mixOutMs: barMixOut,
         )) {
-          if (!_isCrossfading && !_isPrepModeBypass) {
+          if (!_isCrossfading && !_isPrepModeBypass && !_mix.paused) {
             _djTrace(
               'TRIGGER pos=$posMs dur=$durMs bar=$barMixOut '
               'cur=${state.currentTrackPath} armed=$_standbyArmedPath q0=${state.queue.isNotEmpty ? state.queue.first.path : null}',
@@ -1407,6 +1506,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<void> togglePlayPause() async {
+    if (_mix.armed) {
+      await _toggleMixHold();
+      return;
+    }
     if (state.queue.isEmpty &&
         state.currentTrackPath == null &&
         !state.radioOn) {
@@ -1447,7 +1550,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       return;
     }
 
+    final bool playingNow = _deckPlaying(() => _activePlayer);
+    if (playingNow) _mix.pauseAll();
     await _activePlayer.playOrPause();
+    if (!playingNow) _mix.resumeAll();
     if (!state.isPlaying) _saveSnapshot();
   }
 
@@ -1471,7 +1577,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<void> _stopWhenNoNext() async {
-    _isCrossfading = false;
+    _releaseMix();
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -2306,6 +2412,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }) async {
     if (_isCrossfading || (state.queue.isEmpty && !state.radioOn)) return;
     _isCrossfading = true;
+    _mix.arm();
 
     // Radio encendida y sin pista elegida a mano: la sigue la radio (la cola
     // queda congelada). Un toque explícito a una fila (queueIndex) sí suena.
@@ -2320,7 +2427,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
       picked ??= _radioQueueFallback();
       if (picked == null) {
-        _isCrossfading = false;
         await _stopWhenNoNext();
         return;
       }
@@ -2342,7 +2448,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         'NEXT elegido idx=$nextIdx de ${state.queue.length} jit=$forceJit',
       );
       if (nextIdx < 0 || nextIdx >= state.queue.length) {
-        _isCrossfading = false;
         await _stopWhenNoNext();
         return;
       }
@@ -2367,7 +2472,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           );
         }
       }
-      _isCrossfading = false;
+      _releaseMix();
       _isStandbyArmed = false;
       _standbyArmedPath = null;
       return;
@@ -2416,7 +2521,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         );
         _isStandbyArmed = false;
         _standbyArmedPath = null;
-        _isCrossfading = false;
+        _releaseMix();
         return;
       }
     }
@@ -2480,6 +2585,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } else {
       incomingRate = entry.incomingRate;
     }
+    _mix.setRampBpm(
+      _incomingNatBpm > 0 && incomingRate > 0
+          ? _incomingNatBpm * incomingRate
+          : 0,
+    );
 
     DnaDecision? dnaPlan;
     if (!isManualSkip &&
@@ -2529,29 +2639,36 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       await incomingPlayer.setRate(incomingRate);
       await incomingPlayer.setVolume(0.0);
-      if (gridOut != null && gridIn != null) {
-        // Espera al próximo golpe del saliente (≤ 1 compás de pulso) y arranca ahí.
-        final Duration fresh = await fadingPlayer.stream.position.first.timeout(
-          const Duration(seconds: 1),
+      if (gridOut != null &&
+          gridIn != null &&
+          gridOut.bpm > 0 &&
+          gridIn.bpm > 0 &&
+          incomingRate > 0) {
+        final double liveOut = fadingPlayer.state.rate;
+        _phaseLock = await engageBeatLock(
+          outgoing: fadingPlayer,
+          incoming: incomingPlayer,
+          outBeatMs: gridOut.beatMs,
+          outBpm: gridOut.bpm,
+          outRate: liveOut > 0 ? liveOut : outRate,
+          inBeatMs: gridIn.beatMs,
+          inBpm: gridIn.bpm,
+          cueMs: startMs.toDouble(),
+          inRate: incomingRate,
+          rampRate: incomingRate,
+          incomingOnBeat: true,
+          hold: _mix,
         );
-        final Stopwatch sw = Stopwatch()..start();
-        final double nowOut = fresh.inMilliseconds.toDouble();
-        // 20 ms: latencia de arranque del deck entrante.
-        // El saliente avanza `outRate` ms de pista por cada ms real.
-        final int waitMs = beatPhaseWaitMs(
-          nowOutMs: nowOut,
-          beatMs: gridOut.beatMs,
-          bpm: gridOut.bpm,
-          outRate: outRate,
-        );
-        final int left = waitMs - sw.elapsedMilliseconds;
-        if (left > 0 && left < 1500) {
-          await Future.delayed(Duration(milliseconds: left));
-        }
+      } else {
+        await incomingPlayer.play();
       }
-      await incomingPlayer.play();
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
@@ -2732,7 +2849,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
       await incomingPlayer.setVolume(0.0);
 
-      final fadeStopwatch = Stopwatch()..start();
       final bool phraseNow =
           ref.read(mixFormulaProvider) == MixFormula.phraseGrid;
       final bool stealthNow =
@@ -2760,10 +2876,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       if (fitted.shortened) _djTrace(fitted.note);
       final int fadeMs = fitted.fadeMs;
+      final int mixEpoch = _mix.epoch;
+      final MixRunClock fadeClock = _mix.beginFade(fadeMs);
 
-      while (fadeStopwatch.elapsedMilliseconds < fadeMs) {
-        final progress = (fadeStopwatch.elapsedMilliseconds / fadeMs)
-            .clamp(0.0, 1.0);
+      while (fadeClock.elapsedMilliseconds < fadeMs && _mix.epoch == mixEpoch) {
+        if (_mix.paused) {
+          await _mix.untilRunning();
+          continue;
+        }
+        final progress = (fadeClock.elapsedMilliseconds / fadeMs).clamp(
+          0.0,
+          1.0,
+        );
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
         final smoothRateIn = dawnCrossfadeGain(progress);
@@ -2797,11 +2921,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         );
         await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
 
-        await Future.delayed(const Duration(milliseconds: 32));
+        await _mix.slice(32, fadeClock);
       }
     } catch (e) {
       debugPrint("🔴 [ERROR DSP]: $e");
     } finally {
+      await _dropPhase();
       // B arrancó en el punto medio. Los pasos de vuelta los aplica TempoDrift.
       _drift.begin(_incomingNatBpm, incomingRate);
       final String? blocked = _drift.takeBlockedReport();
@@ -2819,7 +2944,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       _standbyArmedPath = null;
       _driftNextPath = null;
 
-      _isCrossfading = false;
+      _releaseMix();
       if (_radioOffAfterFade) {
         _radioOffAfterFade = false;
         if (state.radioOn || _radioFreeze != null) _turnRadioOff();
@@ -2832,7 +2957,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (!force && (state.isPlaying || _isCrossfading)) return;
     _parking = true;
     try {
-      if (force) _isCrossfading = false;
+      if (force) _releaseMix();
       _sessionWasPlaying = state.isPlaying;
       if (state.position.inMilliseconds > 0) {
         _sessionPositionMs = state.position.inMilliseconds;

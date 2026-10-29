@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:media_kit/media_kit.dart';
 
+import 'mix_pause.dart';
+
 /// Un paso de la rampa: [offsetMs] desde el punto de mezcla (negativo = antes)
 /// y el BPM con el que la pista queda sonando al completar el paso.
 class TempoMark {
@@ -364,17 +366,34 @@ class TempoDrift {
 
   /// Rampa lenta (senoidal) del rate. El temporizador es propio: no depende
   /// del reloj de la UI (250 ms) ni de los rebuilds de la carátula.
-  Future<void> ramp(Player p, double from, double to, {int? ms}) async {
+  /// [hold] congela ese reloj si el usuario pausa; la curva no cambia.
+  Future<void> ramp(
+    Player p,
+    double from,
+    double to, {
+    int? ms,
+    MixPause? hold,
+  }) async {
     final int g = _gen;
     final int r = _rampGen;
     final int dur = ms ?? rampMs;
-    final Stopwatch sw = Stopwatch()..start();
+    final int epoch = hold?.epoch ?? 0;
+    final MixRunClock clock = hold?.clock() ?? MixRunClock();
     try {
-      while (sw.elapsedMilliseconds < dur) {
+      while (clock.elapsedMilliseconds < dur) {
         if (g != _gen || r != _rampGen) return;
-        final double t = sw.elapsedMilliseconds / dur;
+        if (hold != null && hold.epoch != epoch) return;
+        if (hold != null && hold.paused) {
+          await hold.untilRunning();
+          continue;
+        }
+        final double t = clock.elapsedMilliseconds / dur;
         await p.setRate(tempoRampValue(from, to, t));
-        await Future.delayed(const Duration(milliseconds: 100));
+        if (hold != null) {
+          await hold.slice(100, clock);
+        } else {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
       }
       if (g == _gen && r == _rampGen) await p.setRate(to);
     } catch (_) {}
@@ -382,20 +401,22 @@ class TempoDrift {
 }
 
 /// Curva de la rampa: seno de cuarto de ciclo, de [from] a [to].
-/// Espera hasta el próximo golpe del saliente, menos 20 ms de arranque.
-/// El saliente avanza [outRate] ms de pista por cada ms real.
-/// Cero si no hay que esperar. El llamador solo demora si queda entre 0 y 1500.
+/// Espera hasta el próximo golpe del saliente, menos la latencia de arranque
+/// medida ([startupMs]). El saliente avanza [outRate] ms de pista por cada ms
+/// real. Cero si no hay que esperar. El llamador solo demora si queda entre
+/// 0 y 1500.
 int beatPhaseWaitMs({
   required double nowOutMs,
   required double beatMs,
   required double bpm,
   required double outRate,
+  required int startupMs,
 }) {
   if (bpm <= 0 || outRate <= 0) return 0;
   final double period = 60000.0 / bpm;
   final double k = ((nowOutMs + 60 - beatMs) / period).ceilToDouble();
   final double nextBeat = beatMs + k * period;
-  return ((nextBeat - nowOutMs) / outRate).round() - 20;
+  return ((nextBeat - nowOutMs) / outRate).round() - startupMs;
 }
 
 double tempoRampValue(double from, double to, double t) {
