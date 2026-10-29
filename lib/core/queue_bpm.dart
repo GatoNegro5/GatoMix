@@ -20,6 +20,16 @@ Future<void> preloadQueueBpm(List<String> paths) async {
 }
 
 void preloadQueueBpmSync(List<String> paths) {
+  _preloadQueueBpm(paths, readTags: true);
+}
+
+/// Nombre y `.gatomix.json`. No abre cada MP3: el armado de Radio con toda
+/// la biblioteca no se queda esperando el TBPM de miles de archivos.
+void preloadQueueBpmFromStore(List<String> paths) {
+  _preloadQueueBpm(paths, readTags: false);
+}
+
+void _preloadQueueBpm(List<String> paths, {required bool readTags}) {
   final Map<String, List<Map<String, dynamic>>> meta =
       <String, List<Map<String, dynamic>>>{};
   for (final String path in paths) {
@@ -35,6 +45,7 @@ void preloadQueueBpmSync(List<String> paths) {
       TrackTags.rememberBpm(path, fromMeta);
       continue;
     }
+    if (!readTags) continue;
     final double fromTag = readTbpmSync(path);
     if (fromTag > 0) TrackTags.rememberBpm(path, fromTag);
   }

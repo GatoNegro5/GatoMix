@@ -25,6 +25,8 @@ import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
+import '../core/dj_trace.dart';
+import '../core/exact_mix.dart';
 import '../services/track_tags.dart';
 import '../core/audio/dj_audio_handler.dart';
 import 'equalizer_provider.dart';
@@ -34,19 +36,7 @@ import '../djiphone/iphone_library.dart';
 enum LiveDjMixStrategy { sequential, random }
 
 /// Bitácora de decisiones del mezclador (solo diagnóstico, no toca el audio).
-/// Archivo: <temp>/gatomix_livedj_trace.txt (se recorta solo al pasar 300 KB).
-void _djTrace(String msg) {
-  try {
-    final f = File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}gatomix_livedj_trace.txt',
-    );
-    if (f.existsSync() && f.lengthSync() > 300000) f.writeAsStringSync('');
-    f.writeAsStringSync(
-      '${DateTime.now().toIso8601String()} $msg\n',
-      mode: FileMode.append,
-    );
-  } catch (_) {}
-}
+void _djTrace(String msg) => djTrace(msg);
 
 enum LiveDjMixMode { activeSync, longBypass }
 
@@ -404,8 +394,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
-    if (_isMixTrack(player.state.duration.inMilliseconds)) return 0;
-    final int durMs = player.state.duration.inMilliseconds;
+    // La duración la mide Rust. El deck no decide el cue.
+    final int durMs = _exactDurCache[path] ?? 0;
+    if (durMs <= 0) {
+      return 0;
+    }
+    if (_isMixTrack(durMs)) return 0;
     if (ref.read(mixFormulaProvider) == MixFormula.stealthGap) {
       return stealthCueInMs(durMs, const []);
     }
@@ -1153,25 +1147,40 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   final Map<String, int> _exactDurCache = {};
 
-  /// Duración real del archivo (Rust/symphonia). Si difiere de la estimada por
-  /// libmpv en más de 1.5 s, manda la real. Sin dato: la de libmpv.
+  /// Duración decodificada (`exact_duration_ms`). Ni TLEN ni la estimación
+  /// de libmpv deciden la barra ni el disparo. Sin medición, duración 0.
   Future<Duration> _trueDuration(String path, Duration mpv) async {
-    // Etiquetas del masterizado (silencios, BPM) listas antes de calcular la mezcla.
     await TrackTags.load(path);
     try {
       int? ms = _exactDurCache[path];
-      if (ms == null) {
+      if (ms == null || ms <= 0) {
         ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
-        _exactDurCache[path] = ms;
+        if (ms > 0) _exactDurCache[path] = ms;
       }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint(
-          '⏱️ [LIVEDJ] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
-        );
+      if (ms > 0) {
+        if (ms != mpv.inMilliseconds) {
+          debugPrint(
+            '⏱️ [LIVEDJ] Duración decodificada ${ms ~/ 1000}s '
+            '(libmpv ${mpv.inSeconds}s): $path',
+          );
+        }
         return Duration(milliseconds: ms);
       }
-    } catch (_) {}
-    return mpv;
+    } catch (e) {
+      _djTrace('DURACION FALLO $path $e');
+    }
+    _djTrace('DURACION SIN MEDIR $path mpv=${mpv.inMilliseconds}');
+    return Duration.zero;
+  }
+
+  void _rememberDriftNext() {
+    if (_isCrossfading) return;
+    final String? next = state.radioOn
+        ? ((state.radioNextPath != null && state.radioNextPath!.isNotEmpty)
+              ? state.radioNextPath
+              : _radioPending)
+        : _queueHeadPath();
+    if (next != null && next.isNotEmpty) _driftNextPath = next;
   }
 
   void _attachListeners(Player player) {
@@ -1224,6 +1233,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
         if (!_isCrossfading) {
           final double curRate = player.state.rate;
+          final String? blocked = _drift.takeBlockedReport();
+          if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
           final double? tgt = _drift.tick(
             posMs: posMs,
             durMs: durMs,
@@ -1231,7 +1242,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             rate: curRate,
             nextBpm: _extractBpm(_driftNextPath ?? _standbyArmedPath),
           );
-          if (tgt != null) unawaited(_drift.ramp(player, curRate, tgt));
+          final String? blockedAfter = _drift.takeBlockedReport();
+          if (blockedAfter != null) _djTrace('MIDPOINT FUERA $blockedAfter');
+          if (tgt != null) {
+            unawaited(_drift.ramp(player, curRate, tgt, ms: _drift.rampMs));
+          }
         }
 
         // No se arma durante un cruce: el deck "standby" es el que aún suena
@@ -1295,20 +1310,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         if (state.currentTrackPath != tickPath || player != _activePlayer) {
           return;
         }
-        // Red de seguridad: si el deck va a acabar antes que la duración de la
-        // barra (cabecera larga), se mezcla ~25 s antes de ese final real.
-        // Una estimación corta de arranque (menor que la mitad) no cuenta.
-        int endMs = durMs;
-        final int deckDur = player.state.duration.inMilliseconds;
-        if (deckDur > 45000 && deckDur + 1500 < durMs && deckDur > durMs ~/ 2) {
-          endMs = deckDur;
-        }
-        final bool nearEnd =
-            endMs > 60000 && posMs >= endMs - 25000 && posMs > 20000;
-        if ((posMs >= barMixOut && barMixOut > 10000) || nearEnd) {
+        if (mixTriggerDue(
+          posMs: posMs,
+          exactMs: durMs,
+          mixOutMs: barMixOut,
+        )) {
           if (!_isCrossfading && !_isPrepModeBypass) {
             _djTrace(
-              'TRIGGER pos=$posMs dur=$durMs end=$endMs bar=$barMixOut nearEnd=$nearEnd '
+              'TRIGGER pos=$posMs dur=$durMs bar=$barMixOut '
               'cur=${state.currentTrackPath} armed=$_standbyArmedPath q0=${state.queue.isNotEmpty ? state.queue.first.path : null}',
             );
             _triggerCrossfade();
@@ -1318,20 +1327,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     });
 
     _durationSub = player.stream.duration.listen((mpvDur) async {
-      // No publicar la estimación corta de libmpv antes de la duración real:
-      // si no, el punto de mezcla cae a los pocos segundos y el cruce arranca.
+      // La barra y el punto de mezcla esperan la duración decodificada.
+      // La estimación de libmpv no se publica.
       final String? durPath = state.currentTrackPath;
-      Duration dur = mpvDur;
-      if (durPath != null && mpvDur.inMilliseconds > 0) {
-        dur = await _trueDuration(durPath, mpvDur);
-        if (state.currentTrackPath != durPath) return;
-      }
+      if (durPath == null) return;
+      final Duration dur = await _trueDuration(durPath, mpvDur);
+      if (state.currentTrackPath != durPath) return;
       if (dur.inMilliseconds <= 0 || state.currentTrackPath == null) return;
-      // Una estimación posterior más corta no achica la duración ya corregida.
-      if (state.currentTrackPath == durPath &&
-          state.duration.inMilliseconds > dur.inMilliseconds + 1500) {
-        dur = state.duration;
-      }
       state = state.copyWith(duration: dur);
       globalAudioHandler.syncOs(
         owner: 'livedj',
@@ -1357,6 +1359,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         customMixOutMs: triggerMs,
         currentMixMode: mode,
       );
+      _rememberDriftNext();
     });
 
     _playingSub = player.stream.playing.listen((playing) {
@@ -1394,7 +1397,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       if (_isCrossfading) return;
       _isPrepModeBypass = false;
       _djTrace(
-        'COMPLETED SIN MEZCLA pos=${state.position.inMilliseconds} '
+        'NO DISPARO pos=${state.position.inMilliseconds} '
         'dur=${state.duration.inMilliseconds} trigger=${state.customMixOutMs} '
         'cur=${state.currentTrackPath} armed=$_standbyArmedPath radio=${state.radioOn}',
       );
@@ -1831,6 +1834,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       if (!live()) return null;
       if (next != null && next.isNotEmpty && !_radioBanned(next)) {
         _radioPending = next;
+        _driftNextPath = next;
         state = state.copyWith(radioNextPath: next);
         _publishRadioUpcoming();
         if (resolve.needsAssemble) {
@@ -1870,14 +1874,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     required RadioPlan? saved,
     required String? pinned,
   }) {
-    if (!state.radioOn || epoch != _radioEpoch) return;
-    // Mientras quede lista no se rearma: rearmar clavaba la pista actual
-    // en el puesto 0 y la radio se quedaba en dos canciones.
-    if (saved != null && !saved.finished) return;
+    if (!state.radioOn || epoch != _radioEpoch) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP antes de arrancar epoch=$epoch ahora=$_radioEpoch '
+        'on=${state.radioOn} pool=${pool.length}',
+      );
+      return;
+    }
+    // Solo se salta si la lista guardada todavía cubre este pool. Un plan
+    // corto (o ninguno) no puede dejar el panel en una sola canción.
     if (!radioAssembleShouldStart(
       inFlight: _radioAssemble != null && _radioAssembleEpoch == epoch,
-      planOpen: radioPlanIsOpen(saved, pool),
+      planOpen: saved != null &&
+          !saved.finished &&
+          radioPlanIsOpen(saved, pool),
     )) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP en curso o lista abierta pool=${pool.length} '
+        'hist=${mem.history.length}',
+      );
       return;
     }
     _radioAssembleEpoch = epoch;
@@ -1885,72 +1900,155 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       'pool': List<String>.from(pool),
       'seed': _radioRng.nextInt(1 << 31),
       'pinned': pinned,
+      'playing': state.currentTrackPath,
       'hasSaved': saved != null,
       'order': saved?.order ?? const <String>[],
       'position': saved?.position ?? 0,
       'pairs': saved?.pairs ?? const <String>[],
       'previousPairs': saved?.previousPairs ?? const <String>[],
+      'readTags': false,
     };
+    final Stopwatch sw = Stopwatch()..start();
+    _djTrace(
+      'RADIO ASSEMBLE START pool=${pool.length} key=$key epoch=$epoch '
+      'hist=${mem.history.length}',
+    );
     _radioAssemble = compute(assembleRadioOffUi, msg)
-        .timeout(const Duration(seconds: 90))
-        .then((Map<String, Object?> raw) {
-          if (epoch != _radioEpoch || !state.radioOn) return;
-          if (raw['ok'] != true) {
-            debugPrint('🔴 [RADIO] ${raw['error']}');
-            return;
-          }
-          RadioPlan plan = RadioPlan(
-            order: <String>[
-              for (final Object? p
-                  in (raw['order'] as List?) ?? const <Object>[])
-                p.toString(),
-            ],
-            position: raw['position'] is int ? raw['position'] as int : 0,
-            pairs: <String>[
-              for (final Object? p
-                  in (raw['pairs'] as List?) ?? const <Object>[])
-                p.toString(),
-            ],
-            previousPairs: <String>[
-              for (final Object? p
-                  in (raw['previousPairs'] as List?) ?? const <Object>[])
-                p.toString(),
-            ],
+        .then((Map<String, Object?> raw) async {
+          sw.stop();
+          final bool applied = _applyRadioPlan(
+            raw: raw,
+            epoch: epoch,
+            key: key,
+            pool: pool,
+            replace: false,
+            elapsedMs: sw.elapsedMilliseconds,
           );
-          if (plan.order.isEmpty) return;
-          final RadioPlan? have = _radioMemory().planOf(key);
-          if (have != null && !have.finished) return;
-          final String? onAir = state.currentTrackPath;
-          if (onAir != null &&
-              !plan.finished &&
-              sameAudioPath(plan.order[plan.position], onAir)) {
-            plan = advanceRadioPlan(plan, onAir);
-          }
-          if (_radioPrevious != null &&
-              !plan.finished &&
-              sameAudioPath(plan.order[plan.position], _radioPrevious!)) {
-            plan = advanceRadioPlan(plan, _radioPrevious!);
-          }
-          final RadioMemory now = _radioMemory();
-          _saveRadio(now.putPlan(key, plan), activeKey: key);
-          if (_isStandbyArmed) return;
-          if (plan.finished || plan.order.isEmpty) return;
-          final String next = plan.order[plan.position];
-          if (_radioPending != null && !sameAudioPath(_radioPending, next)) {
+          if (!applied) return;
+          final List<String> untagged = <String>[
+            for (final Object? p in (raw['untagged'] as List?) ?? const <Object>[])
+              p.toString(),
+          ];
+          if (untagged.isEmpty || epoch != _radioEpoch || !state.radioOn) {
             return;
           }
-          if (!state.radioOn || epoch != _radioEpoch) return;
-          if (!File(next).existsSync()) return;
-          _radioPending = next;
-          state = state.copyWith(radioNextPath: next);
-          _publishRadioUpcoming();
+          final Stopwatch sw2 = Stopwatch()..start();
+          _djTrace(
+            'RADIO REFINE START pool=${pool.length} sinBpm=${untagged.length} key=$key',
+          );
+          final Map<String, Object?> tagged = Map<String, Object?>.from(msg);
+          tagged['readTags'] = true;
+          final Map<String, Object?> raw2 = await compute(
+            assembleRadioOffUi,
+            tagged,
+          );
+          sw2.stop();
+          _applyRadioPlan(
+            raw: raw2,
+            epoch: epoch,
+            key: key,
+            pool: pool,
+            replace: true,
+            elapsedMs: sw2.elapsedMilliseconds,
+          );
         })
         .catchError((Object e, StackTrace st) {
+          _djTrace(
+            'RADIO ASSEMBLE FALLO pool=${pool.length} ${sw.elapsedMilliseconds}ms $e',
+          );
           debugPrint('🔴 [RADIO] $e\n$st');
         })
         .whenComplete(() {
           if (_radioAssembleEpoch == epoch) _radioAssemble = null;
         });
+  }
+
+  bool _applyRadioPlan({
+    required Map<String, Object?> raw,
+    required int epoch,
+    required String key,
+    required List<String> pool,
+    required bool replace,
+    required int elapsedMs,
+  }) {
+    if (epoch != _radioEpoch || !state.radioOn) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP epoca epoch=$epoch ahora=$_radioEpoch '
+        'on=${state.radioOn} pool=${pool.length} ${elapsedMs}ms',
+      );
+      return false;
+    }
+    if (raw['ok'] != true) {
+      _djTrace(
+        'RADIO ASSEMBLE FALLO pool=${pool.length} ${elapsedMs}ms ${raw['error']}',
+      );
+      return false;
+    }
+    RadioPlan plan = RadioPlan(
+      order: <String>[
+        for (final Object? p in (raw['order'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+      position: raw['position'] is int ? raw['position'] as int : 0,
+      pairs: <String>[
+        for (final Object? p in (raw['pairs'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+      previousPairs: <String>[
+        for (final Object? p
+            in (raw['previousPairs'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+    );
+    if (plan.order.isEmpty) {
+      _djTrace(
+        'RADIO ASSEMBLE FALLO pool=${pool.length} orden vacía ${elapsedMs}ms',
+      );
+      return false;
+    }
+    final RadioPlan? have = _radioMemory().planOf(key);
+    if (!replace &&
+        have != null &&
+        !have.finished &&
+        radioPlanIsOpen(have, pool)) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP plan ya abierto lista=${have.order.length} '
+        'pool=${pool.length} ${elapsedMs}ms',
+      );
+      return false;
+    }
+    final String? onAir = state.currentTrackPath;
+    if (onAir != null &&
+        !plan.finished &&
+        plan.position < plan.order.length &&
+        sameAudioPath(plan.order[plan.position], onAir)) {
+      plan = advanceRadioPlan(plan, onAir);
+    }
+    if (_radioPrevious != null &&
+        !plan.finished &&
+        plan.position < plan.order.length &&
+        sameAudioPath(plan.order[plan.position], _radioPrevious!)) {
+      plan = advanceRadioPlan(plan, _radioPrevious!);
+    }
+    _djTrace(
+      'RADIO ASSEMBLE FIN pool=${pool.length} lista=${plan.order.length} '
+      '${elapsedMs}ms key=$key',
+    );
+    _saveRadio(_radioMemory().putPlan(key, plan), activeKey: key);
+    if (_isStandbyArmed) return true;
+    if (plan.finished || plan.order.isEmpty) return true;
+    if (plan.position < 0 || plan.position >= plan.order.length) return true;
+    final String next = plan.order[plan.position];
+    if (_radioPending != null && !sameAudioPath(_radioPending, next)) {
+      return true;
+    }
+    if (!state.radioOn || epoch != _radioEpoch) return true;
+    if (!File(next).existsSync()) return true;
+    _radioPending = next;
+    _driftNextPath = next;
+    state = state.copyWith(radioNextPath: next);
+    _publishRadioUpcoming();
+    return true;
   }
 
   /// Último recurso: la radio nunca se para; suena una pista de la cola.
@@ -2378,13 +2476,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
 
     _incomingNatBpm = incomingBpm;
-    // BPM con el que SUENA ahora el saliente (puede ir regulado, ver TempoDrift).
+    // En el cruce las dos suenan en el punto medio. Vale también para eco y filtro.
     final double outRate = fadingPlayer.state.rate;
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * outRate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
+    final MidpointEntry entry = midpointEntry(fadingBpm, incomingBpm);
+    if (entry.blocked) {
+      _djTrace('MIDPOINT FUERA ${entry.note}');
+    } else {
+      incomingRate = entry.incomingRate;
     }
 
     DnaDecision? dnaPlan;
@@ -2402,7 +2500,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         fallbackCueMs: _phraseFallbackCue(nextTrack, trackDur.inMilliseconds),
         outRate: outRate,
       );
-      if (!dnaPlan.lockTempo) incomingRate = 1.0;
     }
 
     try {
@@ -2661,11 +2758,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             .clamp(0.0, 1.0);
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final rateIn = (progress * 1.8).clamp(0.0, 1.0);
-        final rateOut = ((1.0 - progress) * 1.8).clamp(0.0, 1.0);
-
-        final smoothRateIn = pow(rateIn, 1.2).toDouble();
-        final smoothRateOut = pow(rateOut, 1.2).toDouble();
+        final smoothRateIn = dawnCrossfadeGain(progress);
+        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
 
         if (useBassSwap && !bassSwapped && progress >= 0.5) {
           bassSwapped = true;
@@ -2700,15 +2794,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (e) {
       debugPrint("🔴 [ERROR DSP]: $e");
     } finally {
-      // La diferencia entre el BPM de entrada y el real se reparte en 5
-      // (10 %–50 %). Al 50 % la canción va en su BPM. Vale para Stealth.
+      // B arrancó en el punto medio. Los pasos de vuelta los aplica TempoDrift.
       _drift.begin(_incomingNatBpm, incomingRate);
-      final bool keepRate = _drift.active && incomingRate != 1.0;
-      final bool willGlideRate = incomingRate != 1.0 && !keepRate;
+      final String? blocked = _drift.takeBlockedReport();
+      if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
 
       try {
         await incomingPlayer.setVolume(100.0);
-        if (!willGlideRate && !keepRate) await incomingPlayer.setRate(1.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
         await fadingPlayer.setVolume(0.0);
@@ -2718,25 +2810,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       // El deck saliente quedó vacío: ningún armado previo sigue siendo válido.
       _standbyArmedPath = null;
       _driftNextPath = null;
-
-      if (willGlideRate) {
-        try {
-          final pitchStopwatch = Stopwatch()..start();
-          final double rateDiff = 1.0 - incomingRate;
-          while (pitchStopwatch.elapsedMilliseconds < 3000) {
-            final double p = (pitchStopwatch.elapsedMilliseconds / 3000).clamp(
-              0.0,
-              1.0,
-            );
-            final double curve = sin(p * (pi / 2));
-            await incomingPlayer.setRate(incomingRate + (rateDiff * curve));
-            await Future.delayed(const Duration(milliseconds: 50));
-          }
-        } catch (_) {}
-        try {
-          await incomingPlayer.setRate(1.0);
-        } catch (_) {}
-      }
 
       _isCrossfading = false;
       if (_radioOffAfterFade) {

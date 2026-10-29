@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/audio_path.dart';
 import 'package:gatomix/core/gatomix_radio.dart';
+import 'package:gatomix/core/livedj_next.dart';
 import 'package:gatomix/core/net/artist_info.dart';
 import 'package:gatomix/core/session_store.dart';
 import 'package:gatomix/services/adaptive_eq.dart';
@@ -184,6 +185,51 @@ void main() {
       lessThan(15000),
       reason: '${sw.elapsedMilliseconds} ms',
     );
+  });
+
+  test('Todo arma la lista completa y deja fuera la que suena', () async {
+    final List<String> pool = spread(40);
+    final String playing = pool[3];
+    final String pinned = pool[7];
+    final Map<String, Object?> raw = await assembleRadioOffUi(<String, Object?>{
+      'pool': pool,
+      'hasSaved': false,
+      'seed': 3,
+      'playing': playing,
+      'pinned': pinned,
+      'readTags': false,
+    });
+    expect(raw['ok'], isTrue, reason: '${raw['error']}');
+    final List<String> order = <String>[
+      for (final Object? p in raw['order'] as List) p.toString(),
+    ];
+    expect(order.contains(playing), isFalse);
+    expect(order.length, pool.length - 1);
+    expect(order.first, pinned);
+    final List<String> upcoming = radioUpcomingPaths(
+      plan: RadioPlan(order: order, position: 0),
+      nextPath: pinned,
+    );
+    expect(upcoming.length, order.length);
+    expect(upcoming, isNot(<String>[pinned]));
+  });
+
+  test('un plan de una canción no impide armar Todo', () {
+    final List<String> pool = spread(12);
+    final RadioPlan stub = RadioPlan(order: <String>[pool.first]);
+    expect(radioPlanIsOpen(stub, pool), isFalse);
+    final RadioResolve resolve = radioResolveNext(
+      memory: RadioMemory.empty.putPlan('todo', stub),
+      key: 'todo',
+      pool: pool,
+      playing: pool.first,
+      bpmOf: bpmOf,
+      allowRebuild: false,
+      rng: Random(1),
+    );
+    expect(resolve.needsAssemble, isTrue);
+    expect(resolve.next, isNot(pool.first));
+    expect(resolve.followedPlan, isFalse);
   });
 
   test('un glitch de posición 0 no reescribe la sesión en bucle', () {

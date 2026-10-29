@@ -15,6 +15,7 @@ import '../core/hal/platform_strategy.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/tempo_drift.dart';
+import '../core/dj_trace.dart';
 import '../core/audio/dj_audio_handler.dart';
 
 import '../core/audio_path.dart';
@@ -755,7 +756,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return meta.cueInMs!;
     }
 
-    final int durMs = player.state.duration.inMilliseconds;
+    final int durMs =
+        (await _trueDuration(path, player.state.duration)).inMilliseconds;
     if (durMs > 30000) return 10000;
     return 0;
   }
@@ -1158,11 +1160,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       final fadingBpm = _extractBpm(state.currentTrackPath);
       final incomingBpm = _extractBpm(nextTrack);
-      double incomingRate = 1.0;
-      if (fadingBpm > 60 && incomingBpm > 60) {
-        final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-        if (ratio >= 0.88 && ratio <= 1.12) incomingRate = ratio;
-      }
+      final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
       try {
         await incomingPlayer.setRate(incomingRate);
@@ -1264,14 +1262,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     final fadingBpm = _extractBpm(state.currentTrackPath);
     final incomingBpm = _extractBpm(nextTrack);
-    double incomingRate = 1.0;
-
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
-    }
+    final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
     try {
       await incomingPlayer.setRate(incomingRate);
@@ -1356,14 +1347,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     final fadingBpm = _extractBpm(state.currentTrackPath);
     final incomingBpm = _extractBpm(nextTrack);
-    double incomingRate = 1.0;
-
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
-    }
+    final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
     try {
       await incomingPlayer.setRate(incomingRate);
@@ -1453,11 +1437,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
             .clamp(0.0, 1.0);
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final rateIn = (progress * 1.8).clamp(0.0, 1.0);
-        final rateOut = ((1.0 - progress) * 1.8).clamp(0.0, 1.0);
-
-        final smoothRateIn = pow(rateIn, 1.2).toDouble();
-        final smoothRateOut = pow(rateOut, 1.2).toDouble();
+        final smoothRateIn = dawnCrossfadeGain(progress);
+        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
 
         // 🔀 PERMUTA DE GRAVES en el cruce, donde ambas rondan el 0.9: la
         // saliente cede el bajo y la entrante lo recupera. Una única
@@ -1479,17 +1460,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
     } catch (e) {
       debugPrint("🔴 [ERROR DSP AUTOMIX]: $e");
     } finally {
-      // 🛡️ FIX: el glide de tempo arranca en incomingRate. Fijar aquí el rate a
-      // 1.0 provocaba un salto de velocidad hacia atrás al iniciar la rampa.
-      // Mucha corrección: se queda en el BPM de entrada y TempoDrift reparte
-      // la diferencia en 5 pasos (10 %–50 %) hasta su BPM real.
+      // B arrancó en el punto medio. La vuelta a su BPM la hace TempoDrift.
       _drift.begin(_extractBpm(state.currentTrackPath), incomingRate);
-      final bool keepRate = _drift.active && incomingRate != 1.0;
-      final bool willGlideRate = incomingRate != 1.0 && !keepRate;
+      final String? blocked = _drift.takeBlockedReport();
+      if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
 
       try {
         await incomingPlayer.setVolume(100.0);
-        if (!willGlideRate && !keepRate) await incomingPlayer.setRate(1.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
         await fadingPlayer.setVolume(0.0);
@@ -1497,57 +1474,53 @@ class AutomixNotifier extends Notifier<AutomixState> {
         await fadingPlayer.stop();
       } catch (_) {}
 
-      if (willGlideRate) {
-        try {
-          final pitchStopwatch = Stopwatch()..start();
-          final double rateDiff = 1.0 - incomingRate;
-          while (pitchStopwatch.elapsedMilliseconds < 3000) {
-            final double p = (pitchStopwatch.elapsedMilliseconds / 3000).clamp(
-              0.0,
-              1.0,
-            );
-            final double curve = sin(p * (pi / 2));
-            await incomingPlayer.setRate(incomingRate + (rateDiff * curve));
-            await Future.delayed(const Duration(milliseconds: 50));
-          }
-        } catch (_) {}
-        try {
-          await incomingPlayer.setRate(1.0);
-        } catch (_) {}
-      }
-
       _isCrossfading = false;
     }
   }
 
-  final Map<String, int> _exactDurCache = {};
-
-  /// Duración real del archivo (Rust). Si difiere de la de libmpv en más de
-  /// 1.5 s manda la real: evita la barra que termina al 70-80 % y daña la mezcla.
-  Future<Duration> _trueDuration(String? path, Duration mpv) async {
-    if (path == null) return mpv;
-    try {
-      int? ms = _exactDurCache[path];
-      if (ms == null) {
-        ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
-        _exactDurCache[path] = ms;
-      }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint(
-          '⏱️ [AUTOMIX] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
-        );
-        return Duration(milliseconds: ms);
-      }
-    } catch (_) {}
-    return mpv;
+  double _midpointRate(double fadingBpm, double incomingBpm) {
+    final MidpointEntry entry = midpointEntry(fadingBpm, incomingBpm);
+    if (entry.blocked) djTrace('MIDPOINT FUERA ${entry.note}');
+    return entry.incomingRate;
   }
 
-  /// Aplica la duración real a la pista actual y recalcula la ventana de mezcla.
+  final Map<String, int> _exactDurCache = {};
+
+  /// Duración decodificada. Ni TLEN ni libmpv deciden la barra ni el disparo.
+  Future<Duration> _trueDuration(String? path, Duration mpv) async {
+    if (path == null) return Duration.zero;
+    try {
+      int? ms = _exactDurCache[path];
+      if (ms == null || ms <= 0) {
+        ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
+        if (ms > 0) _exactDurCache[path] = ms;
+      }
+      if (ms > 0) {
+        if (ms != mpv.inMilliseconds) {
+          debugPrint(
+            '⏱️ [AUTOMIX] Duración decodificada ${ms ~/ 1000}s '
+            '(libmpv ${mpv.inSeconds}s): $path',
+          );
+        }
+        return Duration(milliseconds: ms);
+      }
+    } catch (e) {
+      djTrace('DURACION FALLO $path $e');
+    }
+    djTrace('DURACION SIN MEDIR $path mpv=${mpv.inMilliseconds}');
+    return Duration.zero;
+  }
+
+  /// La ventana espera la duración decodificada. La estimación no se publica.
   Future<void> _applyTrueDuration(String? path, Duration mpv) async {
-    if (path == null || mpv.inMilliseconds <= 0) return;
+    if (path == null) return;
     final Duration real = await _trueDuration(path, mpv);
-    if (real == mpv || state.currentTrackPath != path) return;
-    if (state.duration == real) return;
+    if (state.currentTrackPath != path) return;
+    if (real.inMilliseconds <= 0) return;
+    if (state.duration == real &&
+        _lastDurationPlanKey == '$path|${real.inMilliseconds}') {
+      return;
+    }
     _lastDurationPlanKey = '$path|${real.inMilliseconds}';
     state = state.copyWith(duration: real);
     try {
@@ -1569,16 +1542,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
     final Duration livePos = player.state.position;
     final bool livePlaying = player.state.playing;
     if (liveDur.inMilliseconds > 0) {
-      _lastDurationPlanKey =
-          '${state.currentTrackPath}|${liveDur.inMilliseconds}';
       state = state.copyWith(
-        duration: liveDur,
         position: livePos,
         isPlaying: livePlaying,
       );
-      try {
-        _recalculateMixWindow();
-      } catch (_) {}
       unawaited(_applyTrueDuration(state.currentTrackPath, liveDur));
     } else if (livePlaying || livePos.inMilliseconds > 0) {
       state = state.copyWith(isPlaying: livePlaying, position: livePos);
@@ -1589,6 +1556,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       if (!_isCrossfading && state.duration.inMilliseconds > 0) {
         final double curRate = player.state.rate;
+        final String? blocked = _drift.takeBlockedReport();
+        if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
         final double? tgt = _drift.tick(
           posMs: posMs,
           durMs: state.duration.inMilliseconds,
@@ -1596,7 +1565,11 @@ class AutomixNotifier extends Notifier<AutomixState> {
           rate: curRate,
           nextBpm: _extractBpm(state.nextTrackPath),
         );
-        if (tgt != null) unawaited(_drift.ramp(player, curRate, tgt));
+        final String? blockedAfter = _drift.takeBlockedReport();
+        if (blockedAfter != null) djTrace('MIDPOINT FUERA $blockedAfter');
+        if (tgt != null) {
+          unawaited(_drift.ramp(player, curRate, tgt, ms: _drift.rampMs));
+        }
       }
 
       if (state.customCueInMs > 0 &&
@@ -1606,8 +1579,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
         return;
       }
 
-      // Red de seguridad: si el plan no quedó listo, igual se mezcla al pasar
-      // el punto de salida (nunca antes), en vez de llegar al final de la pista.
+      // El disparo es el punto de mezcla ya medido. No se adelanta.
       if (state.autoMixArmed &&
           (_mixPlanReady ||
               (state.customMixOutMs > 0 && posMs >= state.customMixOutMs)) &&
@@ -1684,22 +1656,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     });
 
     _durationSub = player.stream.duration.listen((dur) {
-      final key = '${state.currentTrackPath}|${dur.inMilliseconds}';
-      if (key == _lastDurationPlanKey) return;
-      _lastDurationPlanKey = key;
-      state = state.copyWith(duration: dur);
-      _recalculateMixWindow();
       unawaited(_applyTrueDuration(state.currentTrackPath, dur));
-
-      if (state.currentTrackPath != null) {
-        globalAudioHandler.syncOs(
-          owner: 'automix',
-          path: state.currentTrackPath,
-          duration: dur,
-          playing: state.isPlaying,
-          position: state.position,
-        );
-      }
     });
 
     _playingSub = player.stream.playing.listen((playing) {

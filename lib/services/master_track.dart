@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../core/exact_mix.dart';
 import '../core/gatomix_store.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_ai_align.dart';
@@ -30,6 +31,9 @@ class MasterOutcome {
   final String? lyricCheck;
   final String lyricCheckReason;
 
+  /// Vacío, o la línea «posible audio pegado / versión distinta».
+  final String lenNote;
+
   const MasterOutcome({
     required this.path,
     required this.trimHeadMs,
@@ -38,6 +42,7 @@ class MasterOutcome {
     this.stopped = false,
     this.lyricCheck,
     this.lyricCheckReason = '',
+    this.lenNote = '',
   });
 }
 
@@ -235,6 +240,25 @@ class MasterTrack {
       onStage?.call('DB_ISAR');
       await _assignCues(ref, current);
     }
+    if (stop()) return abortedAt(current);
+
+    onStage?.call('TLEN');
+    var lenNote = '';
+    try {
+      final TlenReport report = await rewriteDurationTag(current);
+      final String? line = stuckAudioLine(
+        name: File(current).uri.pathSegments.last,
+        tlenMs: report.tlenMs,
+        audioMs: report.audioMs,
+        mismatch: report.mismatch,
+      );
+      if (line != null) {
+        lenNote = line;
+        detail = detail.isEmpty ? line : '$detail · $line';
+      }
+    } catch (e) {
+      debugPrint('🔴 [TLEN] $e');
+    }
 
     return MasterOutcome(
       path: current,
@@ -243,7 +267,14 @@ class MasterTrack {
       detail: detail,
       lyricCheck: check.mark,
       lyricCheckReason: check.reason,
+      lenNote: lenNote,
     );
+  }
+
+  /// Respalda una vez en `.gatomix_original/` y reescribe solo el TLEN.
+  static Future<TlenReport> rewriteDurationTag(String path) async {
+    await _ensureBackup(path);
+    return TlenReport.parse(await rust_dsp.rewriteTlen(inputPath: path));
   }
 
   /// OK / FIXED / REVIEW. Nunca toca una letra manual ([gmx_manual]): si

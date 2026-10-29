@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 3.0.29+48 — rampa de BPM al punto medio, duración real, lista de Radio
+
+- **Tempo.** Live DJ (DNA, incluido eco y filtro, Phrase 8 y Stealth) y Automix igualan en el punto medio: la saliente llega ahí antes del cruce y la entrante arranca ahí, en fase, y vuelve a su BPM después. Si el rate queda fuera de 0.88–1.12 se anota en la bitácora y no se recorta. `setRate` no cambia el volumen; el cruce sigue con la curva `pow`.
+- **Duración.** La barra, la línea roja y el disparo usan solo `exact_duration_ms`. Se quitó la red que mezclaba a 25 s del final. Si la pista termina sin mezcla, suena la precargada y queda en `gatomix_livedj_trace.txt`. Masterizar reescribe el TLEN con la duración medida. Si difiere más de 10 s, marca `GMX_LEN_MISMATCH` y el resumen lista «posible audio pegado / versión distinta». No recorta el audio. «Revisar duraciones» recorre la carpeta, respalda en `.gatomix_original/` y solo escribe la etiqueta.
+- **Radio.** Al encender «Todo» el panel muestra la lista completa. El armado ya no se descarta a los 90 s ni por un plan que no cubre la biblioteca. La bitácora anota inicio, fin y fallo con tiempo y tamaño del pool. Apagar Radio no corta el audio.
+- API Dart–Rust: nueva `rewrite_tlen` (solo TLEN). El resto de la API no cambia.
+- Igual en Windows, Android, macOS e iPhone: el código vive en `lib/providers`, `lib/core` y Rust, y el iPhone entra por `lib/djiphone/`.
+
+
+
 ![GatoMix](assets/branding/gatomix_logo.png)
 
 ## 1.0.14+28 — LOG CAMBIO (Masterizar: ninguna canción cuelga un lote)

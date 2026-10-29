@@ -45,8 +45,8 @@ class DnaDecision {
 /// el outro y la intro: 16 compases, bass swap y corte de agudos.
 /// (b) Compatible, con voz cerca: 8 compases y las frases vocales no coinciden.
 /// (c) BPM fuera de ±12 % o tonalidades incompatibles: eco al beat o barrido
-/// pasa-altos; la entrante no se acelera. Si el libmpv no tiene esos filtros,
-/// [DnaKind.blendFallback].
+/// pasa-altos. El tempo igual se encuentra en el punto medio. Si el libmpv no
+/// tiene esos filtros, [DnaKind.blendFallback].
 DnaDecision decideDna({
   required int outDurationMs,
   required int inDurationMs,

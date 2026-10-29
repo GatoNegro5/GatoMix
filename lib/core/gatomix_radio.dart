@@ -388,7 +388,9 @@ RadioResolve radioResolveNext({
 }) {
   final List<String> recent = radioRecent(memory.history);
   final RadioPlan? saved = memory.planOf(key);
-  if (saved != null && !saved.finished) {
+  // Un plan que no cubre este pool no se fusiona aquí: con «Todo» eso
+  // recorría toda la biblioteca en el hilo que suena y el armado no llegaba.
+  if (saved != null && !saved.finished && radioPlanIsOpen(saved, pool)) {
     final RadioSync synced = syncRadioPlan(
       saved: saved,
       pool: pool,
@@ -782,6 +784,29 @@ RadioPlan advanceRadioPlan(RadioPlan plan, String path) {
   return plan;
 }
 
+/// La pista ya elegida para mezclar queda en el puesto visible.
+RadioPlan _pinFirst(RadioPlan plan, String? pinned) {
+  if (pinned == null || pinned.isEmpty || plan.order.isEmpty) return plan;
+  final int pos = plan.position < 0
+      ? 0
+      : (plan.position > plan.order.length ? plan.order.length : plan.position);
+  if (pos < plan.order.length && sameAudioPath(plan.order[pos], pinned)) {
+    return plan;
+  }
+  final int i = plan.order.indexWhere((String p) => sameAudioPath(p, pinned));
+  if (i < 0) return plan;
+  final List<String> order = List<String>.from(plan.order);
+  final String head = order.removeAt(i);
+  final int at = pos > order.length ? order.length : pos;
+  order.insert(at, head);
+  return RadioPlan(
+    order: order,
+    position: at,
+    pairs: radioPairsOf(order),
+    previousPairs: plan.previousPairs,
+  );
+}
+
 /// Arma la vuelta fuera del hilo de UI. Solo datos enviables.
 Future<Map<String, Object?>> assembleRadioOffUi(
   Map<String, Object?> raw,
@@ -802,22 +827,34 @@ Future<Map<String, Object?>> assembleRadioOffUi(
         : null;
     final int seed = raw['seed'] is int ? raw['seed'] as int : 1;
     final String? pinned = raw['pinned'] as String?;
-    preloadQueueBpmSync(pool);
+    final String? playing = raw['playing'] as String?;
+    if (raw['readTags'] == true) {
+      preloadQueueBpmSync(pool);
+    } else {
+      preloadQueueBpmFromStore(pool);
+    }
     final RadioSync synced = syncRadioPlan(
       saved: saved,
       pool: pool,
       bpmOf: knownBpm,
       keyOf: harmonicKeyOf,
       pinned: pinned,
+      playing: playing,
       rng: Random(seed),
     );
+    final RadioPlan plan = _pinFirst(synced.plan, pinned);
+    final List<String> untagged = <String>[
+      for (final String p in pool)
+        if (p.isNotEmpty && knownBpm(p) <= 0) p,
+    ];
     return <String, Object?>{
       'ok': true,
       'rebuilt': synced.rebuilt,
-      'order': synced.plan.order,
-      'position': synced.plan.position,
-      'pairs': synced.plan.pairs,
-      'previousPairs': synced.plan.previousPairs,
+      'order': plan.order,
+      'position': plan.position,
+      'pairs': plan.pairs,
+      'previousPairs': plan.previousPairs,
+      'untagged': untagged,
     };
   } catch (e) {
     return <String, Object?>{'ok': false, 'error': e.toString()};

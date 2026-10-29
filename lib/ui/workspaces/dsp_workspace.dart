@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../core/brand_paths.dart';
+import '../../core/exact_mix.dart';
 import '../../core/gatomix_store.dart';
 import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
@@ -107,6 +108,7 @@ class DspNlpWorkspace extends ConsumerWidget {
     List<String> failedTracks, {
     bool isAborted = false,
     int current = 0,
+    List<String> lenMismatch = const <String>[],
   }) {
     final int processed = isAborted ? current : (total - failedTracks.length);
 
@@ -142,7 +144,7 @@ class DspNlpWorkspace extends ConsumerWidget {
         ),
         content: SizedBox(
           width: 500,
-          height: failedTracks.isEmpty ? 100 : 300,
+          height: (failedTracks.isEmpty && lenMismatch.isEmpty) ? 100 : 300,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -152,6 +154,40 @@ class DspNlpWorkspace extends ConsumerWidget {
                     : "✅ Procesados con éxito: $processed / $total",
                 style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
+              if (lenMismatch.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  "posible audio pegado / versión distinta",
+                  style: TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                SizedBox(
+                  height: 100,
+                  child: ListView.builder(
+                    itemCount: lenMismatch.length,
+                    itemBuilder: (context, index) {
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        child: Text(
+                          "• ${lenMismatch[index]}",
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11,
+                            fontFamily: 'Consolas',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
               if (failedTracks.isNotEmpty) ...[
                 const SizedBox(height: 10),
                 const Text(
@@ -441,6 +477,7 @@ class DspNlpWorkspace extends ConsumerWidget {
 
     int consecutiveErrors = 0;
     final List<String> lyricReview = <String>[];
+    final List<String> lenMismatch = <String>[];
     int lyricFixed = 0;
     String? criticalFailureMessage;
     bool isThermalThrottling = false;
@@ -682,6 +719,9 @@ class DspNlpWorkspace extends ConsumerWidget {
                   },
                 );
                 currentPath = outcome.path;
+                if (outcome.lenNote.isNotEmpty) {
+                  lenMismatch.add(outcome.lenNote);
+                }
                 if (outcome.lyricCheck == 'REVIEW') {
                   lyricReview.add(
                     '${File(outcome.path).uri.pathSegments.last} — ${outcome.lyricCheckReason}',
@@ -957,6 +997,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             state.quarantinedTracks,
             isAborted: state.isAborted,
             current: state.current,
+            lenMismatch: lenMismatch,
           );
         }
         if (lyricReview.isNotEmpty || lyricFixed > 0) {
@@ -2183,6 +2224,21 @@ class DspNlpWorkspace extends ConsumerWidget {
         OutlinedButton.icon(
           onPressed: blocked
               ? null
+              : () => _executeDurationSweep(context, ref, targetPath),
+          icon: const Icon(Icons.timer_outlined, size: 16),
+          label: const Text(
+            'REVISAR DURACIONES',
+            style: TextStyle(fontSize: 10),
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.orangeAccent,
+            side: const BorderSide(color: Colors.orangeAccent),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: blocked
+              ? null
               : () => _executeRestore(context, ref, targetPath),
           icon: const Icon(Icons.restore, size: 16),
           label: const Text(
@@ -2195,6 +2251,105 @@ class DspNlpWorkspace extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> _executeDurationSweep(
+    BuildContext context,
+    WidgetRef ref,
+    String targetPath,
+  ) async {
+    final pipe = ref.read(pipelineProvider.notifier);
+    final Directory root = Directory(targetPath);
+    if (!root.existsSync()) return;
+    final List<File> files = root.listSync(recursive: true).whereType<File>().where((
+      File f,
+    ) {
+      final String lower = f.path.toLowerCase().replaceAll('\\', '/');
+      if (!lower.endsWith('.mp3')) return false;
+      if (lower.contains('/.gatomix_original/')) return false;
+      return true;
+    }).toList();
+    if (files.isEmpty) return;
+    final List<String> marked = <String>[];
+    try {
+      for (int i = 0; i < files.length; i++) {
+        if (ref.read(pipelineProvider).isAborted) break;
+        final File file = files[i];
+        final String name = file.uri.pathSegments.last;
+        pipe.updateProgress(
+          i + 1,
+          files.length,
+          name,
+          'Revisando duración (solo etiqueta)...',
+        );
+        try {
+          final TlenReport report = await MasterTrack.rewriteDurationTag(
+            file.path,
+          );
+          final String? line = stuckAudioLine(
+            name: name,
+            tlenMs: report.tlenMs,
+            audioMs: report.audioMs,
+            mismatch: report.mismatch,
+          );
+          if (line != null) marked.add(line);
+        } catch (e) {
+          debugPrint('🔴 [TLEN] $name $e');
+        }
+      }
+    } finally {
+      pipe.reset();
+    }
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF121212),
+        title: Text(
+          'Duraciones (${marked.length})',
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: SizedBox(
+          width: 520,
+          height: marked.isEmpty ? 80 : 360,
+          child: marked.isEmpty
+              ? const Text(
+                  'Ninguna pista con TLEN y audio separados más de 10 s. '
+                  'El audio no se recortó.',
+                  style: TextStyle(color: Colors.white70),
+                )
+              : ListView(
+                  children: [
+                    const Text(
+                      'posible audio pegado / versión distinta',
+                      style: TextStyle(
+                        color: Colors.orangeAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final String line in marked)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          line,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('CERRAR'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2408,6 +2563,8 @@ String _masterStageLabel(String stage) {
       return '🎧 Calculando la mezcla...';
     case 'LYRIC_CHECK':
       return '⏱️ Revisando tiempo de la letra...';
+    case 'TLEN':
+      return '⏱️ Duración real en la etiqueta...';
     default:
       return stage;
   }

@@ -238,15 +238,18 @@ pub async fn decode_mono_pcm(
 /// Duración EXACTA en ms. Un MP3 sin cabecera Xing (o con carátula grande)
 /// hace que libmpv la ESTIME por tamaño/bitrate y se pase. Si el contenedor
 /// trae el total de cuadros se usa; si no, se suman las duraciones de los
-/// paquetes (sin decodificar). Devuelve 0 si no se puede determinar.
+/// paquetes. En MP3 se cuentan los frames reales: la cabecera Xing miente
+/// cuando hay otro audio pegado al final. Devuelve 0 si no se puede determinar.
 pub async fn exact_duration_ms(input_path: String) -> Result<u64, String> {
-    let (mut format, track_id, params) = open_format(&input_path)?;
+    decoded_duration_ms(&input_path)
+}
+
+fn decoded_duration_ms(input_path: &str) -> Result<u64, String> {
+    let (mut format, track_id, params) = open_format(input_path)?;
     let tb = match params.time_base {
         Some(tb) => tb,
         None => return Ok(0),
     };
-    // MP3: la cabecera Xing/Info suele mentir (archivos recortados, unidos o
-    // re-etiquetados) y libmpv la cree. En MP3 se cuentan los frames reales.
     let is_mp3 = params.codec == symphonia::core::codecs::CODEC_TYPE_MP3;
     if !is_mp3 {
         if let Some(n) = params.n_frames {
@@ -262,6 +265,70 @@ pub async fn exact_duration_ms(input_path: String) -> Result<u64, String> {
     }
     let t = tb.calc_time(total);
     Ok(t.seconds * 1000 + (t.frac * 1000.0) as u64)
+}
+
+/// Marca si el TLEN original y el audio medido difieren más de 10 s.
+/// El valor es `tlen=<ms>,audio=<ms>`. Sin TLEN previo no hay marca.
+pub fn len_mismatch_value(previous_tlen_ms: Option<u64>, audio_ms: u64) -> Option<String> {
+    let prev = previous_tlen_ms?;
+    if audio_ms.abs_diff(prev) > 10_000 {
+        Some(format!("tlen={prev},audio={audio_ms}"))
+    } else {
+        None
+    }
+}
+
+/// Reescribe el TLEN con la duración decodificada. No toca el audio.
+/// `audio=<ms>,tlen=<ms|none>,mismatch=<0|1>,wrote=<0|1>`.
+/// `tlen` es el valor que había antes de escribir.
+pub fn rewrite_tlen(input_path: String) -> Result<String, String> {
+    if !Path::new(&input_path).exists() {
+        return Err("Archivo no encontrado en I/O.".to_string());
+    }
+    if !is_mp3(&input_path) {
+        return Err("Solo MP3.".to_string());
+    }
+    let audio = decoded_duration_ms(&input_path)?;
+    if audio == 0 {
+        return Err("Sin duración decodificada.".to_string());
+    }
+    let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+    let prev = tag.duration().map(|d| d as u64);
+    let mismatch = len_mismatch_value(prev, audio);
+    let same = prev == Some(audio);
+    if !same {
+        tag.set_duration(audio as u32);
+        if let Some(value) = mismatch.clone() {
+            set_ext(&mut tag, "GMX_LEN_MISMATCH", value);
+        }
+        tag.write_to_path(&input_path, Version::Id3v24)
+            .map_err(|e| e.to_string())?;
+    }
+    let tlen = match prev {
+        Some(v) => v.to_string(),
+        None => "none".to_string(),
+    };
+    let mis = if mismatch.is_some() { "1" } else { "0" };
+    let wrote = if same { "0" } else { "1" };
+    Ok(format!(
+        "audio={audio},tlen={tlen},mismatch={mis},wrote={wrote}"
+    ))
+}
+
+#[cfg(test)]
+mod tlen_mark_tests {
+    use super::len_mismatch_value;
+
+    #[test]
+    fn marca_si_difiere_mas_de_10_s() {
+        assert_eq!(
+            len_mismatch_value(Some(224_209), 283_000).as_deref(),
+            Some("tlen=224209,audio=283000")
+        );
+        assert!(len_mismatch_value(Some(224_209), 230_000).is_none());
+        assert!(len_mismatch_value(None, 283_000).is_none());
+        assert!(len_mismatch_value(Some(283_000), 283_000).is_none());
+    }
 }
 
 /// Duración en ms para quien ya la usaba (mismo nombre). Ahora es exacta.
