@@ -18,6 +18,7 @@ import '../core/audio/tempo_drift.dart';
 import '../core/audio/dj_audio_handler.dart';
 
 import '../core/audio_path.dart';
+import '../core/deck_duration.dart';
 import '../core/gatomix_store.dart';
 import '../core/livedj_order.dart';
 import '../core/mode_session.dart';
@@ -797,6 +798,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
         safeMixOutMs >= state.duration.inMilliseconds - 4000) {
       safeMixOutMs = state.duration.inMilliseconds - 4000;
     }
+    if (safeMixOutMs > 0 &&
+        (safeMixOutMs >= state.duration.inMilliseconds || !_mixOutIsManual)) {
+      safeMixOutMs = clampMixTriggerMs(
+        triggerMs: safeMixOutMs,
+        realDurationMs: state.duration.inMilliseconds,
+      );
+    }
     if (!_cueInIsManual &&
         safeCueInMs > 0 &&
         safeCueInMs > state.duration.inMilliseconds ~/ 2) {
@@ -1521,10 +1529,16 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   final Map<String, int> _exactDurCache = {};
+  final PlaybackStallWatch _stallWatch = PlaybackStallWatch();
 
-  /// Duración real del archivo (Rust). Si difiere de la de libmpv en más de
-  /// 1.5 s manda la real: evita la barra que termina al 70-80 % y daña la mezcla.
-  Future<Duration> _trueDuration(String? path, Duration mpv) async {
+  /// Duración del deck. Si el conteo de frames y el reproductor discrepan,
+  /// manda la más corta (salvo una estimación de arranque). [heldMs] es la ya
+  /// publicada: una corta creíble no se vuelve a estirar.
+  Future<Duration> _trueDuration(
+    String? path,
+    Duration mpv, {
+    int heldMs = 0,
+  }) async {
     if (path == null) return mpv;
     try {
       int? ms = _exactDurCache[path];
@@ -1532,21 +1546,32 @@ class AutomixNotifier extends Notifier<AutomixState> {
         ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
         _exactDurCache[path] = ms;
       }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
+      final int chosen = resolveDeckDurationMs(
+        frameMs: ms,
+        playerMs: mpv.inMilliseconds,
+        heldMs: heldMs,
+      );
+      if (chosen > 0 && (chosen - mpv.inMilliseconds).abs() > 1500) {
         debugPrint(
-          '⏱️ [AUTOMIX] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
+          '⏱️ [AUTOMIX] Duración ${mpv.inSeconds}s → ${chosen ~/ 1000}s: $path',
         );
-        return Duration(milliseconds: ms);
       }
+      if (chosen <= 0) return mpv;
+      return Duration(milliseconds: chosen);
     } catch (_) {}
     return mpv;
   }
 
   /// Aplica la duración real a la pista actual y recalcula la ventana de mezcla.
-  Future<void> _applyTrueDuration(String? path, Duration mpv) async {
+  Future<void> _applyTrueDuration(
+    String? path,
+    Duration mpv, {
+    int heldMs = 0,
+  }) async {
     if (path == null || mpv.inMilliseconds <= 0) return;
-    final Duration real = await _trueDuration(path, mpv);
-    if (real == mpv || state.currentTrackPath != path) return;
+    final Duration real = await _trueDuration(path, mpv, heldMs: heldMs);
+    if (state.currentTrackPath != path) return;
+    if (real.inMilliseconds <= 0) return;
     if (state.duration == real) return;
     _lastDurationPlanKey = '$path|${real.inMilliseconds}';
     state = state.copyWith(duration: real);
@@ -1555,10 +1580,28 @@ class AutomixNotifier extends Notifier<AutomixState> {
     } catch (_) {}
   }
 
+  /// El audio acabó (o el reproductor mide) antes del final calculado.
+  void _adoptAutomixRealEnd(int endMs) {
+    final int held = state.duration.inMilliseconds;
+    if (endMs <= 0 || (held > 0 && endMs + kDurationDisagreeMs >= held)) {
+      return;
+    }
+    int mix = state.customMixOutMs;
+    if (mix > 0 && (mix >= endMs || !_mixOutIsManual)) {
+      mix = clampMixTriggerMs(triggerMs: mix, realDurationMs: endMs);
+    }
+    state = state.copyWith(
+      duration: Duration(milliseconds: endMs),
+      customMixOutMs: mix > 0 ? mix : state.customMixOutMs,
+    );
+    unawaited(_recalculateMixWindow());
+  }
+
   void _attachListeners(Player player) {
     _lastUiPosMs = -1;
     _lastLyricIndex = -2;
     _lastDurationPlanKey = null;
+    _stallWatch.reset();
     _positionSub?.cancel();
     _durationSub?.cancel();
     _playingSub?.cancel();
@@ -1586,6 +1629,23 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     _positionSub = player.stream.position.listen((Duration pos) {
       final posMs = pos.inMilliseconds;
+
+      if (!_isCrossfading && state.currentTrackPath != null) {
+        final bool stalled = _stallWatch.stalled(
+          positionMs: posMs,
+          playing: player.state.playing,
+          buffering: player.state.buffering,
+          nowMs: DateTime.now().millisecondsSinceEpoch,
+        );
+        final int? early = earlyPlaybackEndMs(
+          computedEndMs: state.duration.inMilliseconds,
+          positionMs: posMs,
+          playerDurationMs: player.state.duration.inMilliseconds,
+          deckCompleted: player.state.completed,
+          positionStalled: stalled,
+        );
+        if (early != null) _adoptAutomixRealEnd(early);
+      }
 
       if (!_isCrossfading && state.duration.inMilliseconds > 0) {
         final double curRate = player.state.rate;
@@ -1686,10 +1746,12 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _durationSub = player.stream.duration.listen((dur) {
       final key = '${state.currentTrackPath}|${dur.inMilliseconds}';
       if (key == _lastDurationPlanKey) return;
+      final int heldBefore = state.duration.inMilliseconds;
+      final String? path = state.currentTrackPath;
       _lastDurationPlanKey = key;
       state = state.copyWith(duration: dur);
       _recalculateMixWindow();
-      unawaited(_applyTrueDuration(state.currentTrackPath, dur));
+      unawaited(_applyTrueDuration(path, dur, heldMs: heldBefore));
 
       if (state.currentTrackPath != null) {
         globalAudioHandler.syncOs(

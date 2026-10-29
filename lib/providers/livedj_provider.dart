@@ -18,6 +18,7 @@ import '../core/hal/platform_strategy.dart';
 import '../core/mode_session.dart';
 import '../core/livedj_next.dart';
 import '../core/livedj_order.dart';
+import '../core/deck_duration.dart';
 import '../core/dna_mix.dart';
 import '../core/phrase_grid.dart';
 import '../core/queue_bpm.dart';
@@ -1152,10 +1153,16 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   final Map<String, int> _exactDurCache = {};
+  final PlaybackStallWatch _stallWatch = PlaybackStallWatch();
 
-  /// Duración real del archivo (Rust/symphonia). Si difiere de la estimada por
-  /// libmpv en más de 1.5 s, manda la real. Sin dato: la de libmpv.
-  Future<Duration> _trueDuration(String path, Duration mpv) async {
+  /// Duración del deck. Si el conteo de frames y el reproductor discrepan,
+  /// manda la más corta (salvo una estimación de arranque). [heldMs] es la ya
+  /// publicada para esta pista: una corta creíble no se vuelve a estirar.
+  Future<Duration> _trueDuration(
+    String path,
+    Duration mpv, {
+    int heldMs = 0,
+  }) async {
     // Etiquetas del masterizado (silencios, BPM) listas antes de calcular la mezcla.
     await TrackTags.load(path);
     try {
@@ -1164,18 +1171,64 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
         _exactDurCache[path] = ms;
       }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
+      final int chosen = resolveDeckDurationMs(
+        frameMs: ms,
+        playerMs: mpv.inMilliseconds,
+        heldMs: heldMs,
+      );
+      if (chosen > 0 && (chosen - mpv.inMilliseconds).abs() > 1500) {
         debugPrint(
-          '⏱️ [LIVEDJ] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
+          '⏱️ [LIVEDJ] Duración ${mpv.inSeconds}s → ${chosen ~/ 1000}s: $path',
         );
-        return Duration(milliseconds: ms);
       }
+      if (chosen <= 0) return mpv;
+      return Duration(milliseconds: chosen);
     } catch (_) {}
     return mpv;
   }
 
+  /// El audio acabó (o el reproductor mide) antes del final calculado.
+  /// Publica ese final y recalcula el disparo sobre él.
+  void _adoptRealEnd(int endMs, String path) {
+    if (state.currentTrackPath != path || endMs <= 0) return;
+    final int held = state.duration.inMilliseconds;
+    if (held > 0 && endMs + kDurationDisagreeMs >= held) return;
+    final int mix = clampMixTriggerMs(
+      triggerMs: _calculateRadioMixOut(endMs, path),
+      realDurationMs: endMs,
+    );
+    state = state.copyWith(
+      duration: Duration(milliseconds: endMs),
+      customMixOutMs: mix > 10000 ? mix : state.customMixOutMs,
+    );
+    globalAudioHandler.syncOs(
+      owner: 'livedj',
+      path: path,
+      duration: state.duration,
+      playing: state.isPlaying,
+      position: state.position,
+    );
+  }
+
+  bool _handoffArmedNow() {
+    final String? armed = _standbyArmedPath;
+    return handoffToArmedDeck(
+      standbyArmed: _isStandbyArmed,
+      armedPath: armed,
+      radioOn: state.radioOn,
+      armedIsCurrent:
+          armed != null &&
+          state.currentTrackPath != null &&
+          sameAudioPath(armed, state.currentTrackPath),
+      armedInQueue:
+          armed != null &&
+          state.queue.any((File f) => sameAudioPath(f.path, armed)),
+    );
+  }
+
   void _attachListeners(Player player) {
     _lastUiPosMs = -1;
+    _stallWatch.reset();
     _positionSub?.cancel();
     _durationSub?.cancel();
     _playingSub?.cancel();
@@ -1218,15 +1271,41 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       if (durMs > 0 &&
           state.currentTrackPath != null &&
           (state.queue.isNotEmpty || state.radioOn)) {
-        final int barMixOut = state.customMixOutMs > 10000
+        final bool playingNow = player.state.playing && !_isCrossfading;
+        final bool stalled = _stallWatch.stalled(
+          positionMs: posMs,
+          playing: playingNow,
+          buffering: player.state.buffering,
+          nowMs: DateTime.now().millisecondsSinceEpoch,
+        );
+        final bool deckEnded = player.state.completed;
+        final int? early = earlyPlaybackEndMs(
+          computedEndMs: durMs,
+          positionMs: posMs,
+          playerDurationMs: player.state.duration.inMilliseconds,
+          deckCompleted: deckEnded,
+          positionStalled: stalled,
+        );
+        if (early != null) {
+          final String? adoptPath = state.currentTrackPath;
+          if (adoptPath != null) _adoptRealEnd(early, adoptPath);
+        }
+        final int planDur = state.duration.inMilliseconds > 0
+            ? state.duration.inMilliseconds
+            : durMs;
+        int barMixOut = state.customMixOutMs > 10000
             ? state.customMixOutMs
-            : _calculateRadioMixOut(durMs, state.currentTrackPath);
+            : _calculateRadioMixOut(planDur, state.currentTrackPath);
+        barMixOut = clampMixTriggerMs(
+          triggerMs: barMixOut,
+          realDurationMs: planDur,
+        );
 
         if (!_isCrossfading) {
           final double curRate = player.state.rate;
           final double? tgt = _drift.tick(
             posMs: posMs,
-            durMs: durMs,
+            durMs: planDur,
             mixOutMs: barMixOut,
             rate: curRate,
             nextBpm: _extractBpm(_driftNextPath ?? _standbyArmedPath),
@@ -1295,23 +1374,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         if (state.currentTrackPath != tickPath || player != _activePlayer) {
           return;
         }
-        // Red de seguridad: si el deck va a acabar antes que la duración de la
-        // barra (cabecera larga), se mezcla ~25 s antes de ese final real.
-        // Una estimación corta de arranque (menor que la mitad) no cuenta.
-        int endMs = durMs;
-        final int deckDur = player.state.duration.inMilliseconds;
-        if (deckDur > 45000 && deckDur + 1500 < durMs && deckDur > durMs ~/ 2) {
-          endMs = deckDur;
-        }
+        // Red de seguridad: el disparo ya está topado a (final real − mezcla
+        // mínima). Si aun así el deck va a acabar, se mezcla ~25 s antes de
+        // ese final. Una estimación corta de arranque no cuenta: [early] ya
+        // la descartó.
+        final int endMs = planDur;
         final bool nearEnd =
             endMs > 60000 && posMs >= endMs - 25000 && posMs > 20000;
+        final bool stoppedEarly =
+            (deckEnded || stalled) && endMs + kDurationDisagreeMs < durMs;
         if ((posMs >= barMixOut && barMixOut > 10000) || nearEnd) {
           if (!_isCrossfading && !_isPrepModeBypass) {
+            final bool takeArmed = stoppedEarly && _handoffArmedNow();
             _djTrace(
               'TRIGGER pos=$posMs dur=$durMs end=$endMs bar=$barMixOut nearEnd=$nearEnd '
+              'armedHandoff=$takeArmed '
               'cur=${state.currentTrackPath} armed=$_standbyArmedPath q0=${state.queue.isNotEmpty ? state.queue.first.path : null}',
             );
-            _triggerCrossfade();
+            if (takeArmed) {
+              _triggerCrossfade(handoffArmed: true);
+            } else {
+              _triggerCrossfade();
+            }
           }
         }
       }
@@ -1321,17 +1405,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       // No publicar la estimación corta de libmpv antes de la duración real:
       // si no, el punto de mezcla cae a los pocos segundos y el cruce arranca.
       final String? durPath = state.currentTrackPath;
+      final int heldBefore = state.duration.inMilliseconds;
       Duration dur = mpvDur;
       if (durPath != null && mpvDur.inMilliseconds > 0) {
-        dur = await _trueDuration(durPath, mpvDur);
+        dur = await _trueDuration(durPath, mpvDur, heldMs: heldBefore);
         if (state.currentTrackPath != durPath) return;
       }
       if (dur.inMilliseconds <= 0 || state.currentTrackPath == null) return;
-      // Una estimación posterior más corta no achica la duración ya corregida.
-      if (state.currentTrackPath == durPath &&
-          state.duration.inMilliseconds > dur.inMilliseconds + 1500) {
-        dur = state.duration;
-      }
+      // Durante el await el tick pudo adoptar un final más corto. No estirarlo.
+      final int resolved = resolveDeckDurationMs(
+        frameMs: durPath == null ? 0 : (_exactDurCache[durPath] ?? 0),
+        playerMs: dur.inMilliseconds,
+        heldMs: state.currentTrackPath == durPath
+            ? state.duration.inMilliseconds
+            : 0,
+      );
+      if (resolved > 0) dur = Duration(milliseconds: resolved);
       state = state.copyWith(duration: dur);
       globalAudioHandler.syncOs(
         owner: 'livedj',
@@ -1340,9 +1429,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         playing: state.isPlaying,
         position: state.position,
       );
-      final triggerMs = _calculateRadioMixOut(
-        dur.inMilliseconds,
-        state.currentTrackPath,
+      final triggerMs = clampMixTriggerMs(
+        triggerMs: _calculateRadioMixOut(
+          dur.inMilliseconds,
+          state.currentTrackPath,
+        ),
+        realDurationMs: dur.inMilliseconds,
       );
       final cueInMs = await _calculateSmartCueIn(
         state.currentTrackPath!,
@@ -1398,7 +1490,23 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         'dur=${state.duration.inMilliseconds} trigger=${state.customMixOutMs} '
         'cur=${state.currentTrackPath} armed=$_standbyArmedPath radio=${state.radioOn}',
       );
-      if (state.queue.isNotEmpty || state.radioOn) {
+      final int endPos = player.state.position.inMilliseconds;
+      final int endDur = state.duration.inMilliseconds;
+      final String? endPath = state.currentTrackPath;
+      if (endPath != null &&
+          endPos > 20000 &&
+          endDur > endPos + kDurationDisagreeMs) {
+        _adoptRealEnd(endPos, endPath);
+      }
+      // El deck de espera ya tiene la siguiente: se cruza a ESA pista.
+      // forceNext solo si no hay nada armado (abre otra y salta el empate).
+      if (_handoffArmedNow()) {
+        _djTrace(
+          'COMPLETED con deck armado → cruce a $_standbyArmedPath '
+          'cur=${state.currentTrackPath} radio=${state.radioOn}',
+        );
+        unawaited(_triggerCrossfade(handoffArmed: true));
+      } else if (state.queue.isNotEmpty || state.radioOn) {
         _nextFromCompletion = true;
         forceNext();
       } else {
@@ -2117,8 +2225,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
     _radioFreeze = null;
     final bool sameQueue =
-        live.length == effect.queue.length &&
-        listEquals(live, effect.queue);
+        live.length == effect.queue.length && listEquals(live, effect.queue);
     state = state.copyWith(
       radioOn: false,
       clearRadioNextPath: true,
@@ -2209,15 +2316,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     bool forceJit = false,
     bool isManualSkip = false,
     int? queueIndex,
+    bool handoffArmed = false,
   }) async {
     if (_isCrossfading || (state.queue.isEmpty && !state.radioOn)) return;
+    final bool useArmed = handoffArmed && _handoffArmedNow();
     _isCrossfading = true;
 
     // Radio encendida y sin pista elegida a mano: la sigue la radio (la cola
     // queda congelada). Un toque explícito a una fila (queueIndex) sí suena.
-    final bool radioPick = state.radioOn && queueIndex == null;
+    // Fin sin mezcla con el deck ya armado: esa pista, no una recién elegida.
+    final bool radioPick = useArmed
+        ? state.radioOn
+        : state.radioOn && queueIndex == null;
     final String nextTrack;
-    if (radioPick) {
+    if (useArmed) {
+      nextTrack = _standbyArmedPath!;
+    } else if (radioPick) {
       String? picked;
       try {
         picked = await _radioNextPath();
@@ -2334,9 +2448,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     trackDur = await _trueDuration(nextTrack, trackDur);
 
     final int cueInMs = await _calculateSmartCueIn(nextTrack, incomingPlayer);
-    final int triggerMs = _calculateRadioMixOut(
-      trackDur.inMilliseconds,
-      nextTrack,
+    final int triggerMs = clampMixTriggerMs(
+      triggerMs: _calculateRadioMixOut(trackDur.inMilliseconds, nextTrack),
+      realDurationMs: trackDur.inMilliseconds,
     );
     final LiveDjMixMode nextMode = _isMixTrack(trackDur.inMilliseconds)
         ? LiveDjMixMode.longBypass
@@ -2506,7 +2620,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         durationMs: trackDur.inMilliseconds,
       );
     }
-    _publishedFadeMs = phraseFadeOverride ??
+    _publishedFadeMs =
+        phraseFadeOverride ??
         (dnaPlan != null && !dnaPlan.legacy ? dnaPlan.fadeMs : 0);
 
     state = state.copyWith(
@@ -2572,9 +2687,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         .filterFor(incoming);
     if (plan.kind == DnaKind.longBlend) {
       return AfCaps.sanitize(
-        [base, _bassKillFilter, dnaHighShelfCut]
-            .where((String s) => s.isNotEmpty)
-            .join(','),
+        [
+          base,
+          _bassKillFilter,
+          dnaHighShelfCut,
+        ].where((String s) => s.isNotEmpty).join(','),
       );
     }
     return AfCaps.sanitize(base);
@@ -2628,7 +2745,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         dnaOutExtra == null
             ? outBase()
             : AfCaps.sanitize(
-                [outBase(), dnaOutExtra].where((String s) => s.isNotEmpty).join(','),
+                [
+                  outBase(),
+                  dnaOutExtra,
+                ].where((String s) => s.isNotEmpty).join(','),
               ),
       );
 
@@ -2674,9 +2794,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             dnaOutExtra == null
                 ? lowCutOut
                 : AfCaps.sanitize(
-                    [lowCutOut, dnaOutExtra]
-                        .where((String s) => s.isNotEmpty)
-                        .join(','),
+                    [
+                      lowCutOut,
+                      dnaOutExtra,
+                    ].where((String s) => s.isNotEmpty).join(','),
                   ),
           );
           platformIn?.setProperty('af', inBase());
@@ -2685,7 +2806,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           platformOut?.setProperty(
             'af',
             AfCaps.sanitize(
-              [outBase(), dnaOutMid].where((String s) => s.isNotEmpty).join(','),
+              [
+                outBase(),
+                dnaOutMid,
+              ].where((String s) => s.isNotEmpty).join(','),
             ),
           );
         }

@@ -146,6 +146,26 @@ bool radioArmStillValid({
   return radioOn && epoch == armEpoch;
 }
 
+/// Fin sin mezcla: si el deck de espera ya tiene la siguiente, se cruza a ESA
+/// pista. Sin armado, el que llama usa forceNext.
+///
+/// Radio apagada: la pista armada tiene que seguir en la cola de Live DJ y no
+/// puede ser la que está sonando. Radio encendida: la armada es la de la radio
+/// (no tiene que estar en la cola).
+bool handoffToArmedDeck({
+  required bool standbyArmed,
+  required String? armedPath,
+  required bool radioOn,
+  required bool armedIsCurrent,
+  required bool armedInQueue,
+}) {
+  if (!standbyArmed) return false;
+  if (armedPath == null || armedPath.isEmpty) return false;
+  if (armedIsCurrent) return false;
+  if (!radioOn && !armedInQueue) return false;
+  return true;
+}
+
 /// Efecto de apagar la radio. No toca el deck: la canción que suena sigue
 /// y la cola congelada vuelve a ser la visible. [nextPath] es la cabeza de
 /// esa cola; si el tipo es Stealth el motor vuelve a elegir por BPM.
