@@ -505,10 +505,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       safeMixOutMs = (safeMixOutMs * effDurMs / durationMs).toInt();
     }
 
-    if (safeMixOutMs >= effDurMs - 4000) {
-      safeMixOutMs = effDurMs - 4000;
-    }
-
     if (ref.read(mixFormulaProvider) == MixFormula.stealthGap) {
       return stealthMixOutMs(
         durationMs: effDurMs,
@@ -2585,6 +2581,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     final String? fadingPath = state.currentTrackPath;
     final int fadingMixOut = state.customMixOutMs;
+    final int fadingDurMs = state.duration.inMilliseconds;
     int? phraseFadeOverride;
     if (!isManualSkip &&
         nextMode != LiveDjMixMode.longBypass &&
@@ -2637,6 +2634,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       dnaBassSwap: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.bassSwap,
       dnaEchoDelayMs: dnaPlan?.echoDelayMs ?? 0,
       dnaEchoFeedback: dnaPlan?.echoFeedback ?? 0,
+      outgoingDurationMs: fadingDurMs,
+      outgoingMixOutMs: fadingMixOut,
     );
   }
 
@@ -2690,6 +2689,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     bool? dnaBassSwap,
     int dnaEchoDelayMs = 0,
     double dnaEchoFeedback = 0,
+    int outgoingDurationMs = 0,
+    int outgoingMixOutMs = 0,
   }) async {
     final eqN = ref.read(liveDjEqualizerProvider.notifier);
     String inBase() => eqN.filterFor(incomingPlayer);
@@ -2752,9 +2753,16 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
                                         state.duration.inMilliseconds,
                                   )
                                 : 18000))));
+      final FittedFade fitted = fitMixFade(
+        exactDurationMs: outgoingDurationMs,
+        mixOutMs: outgoingMixOutMs,
+        wantedFadeMs: fadeOutDurationMs,
+      );
+      if (fitted.shortened) _djTrace(fitted.note);
+      final int fadeMs = fitted.fadeMs;
 
-      while (fadeStopwatch.elapsedMilliseconds < fadeOutDurationMs) {
-        final progress = (fadeStopwatch.elapsedMilliseconds / fadeOutDurationMs)
+      while (fadeStopwatch.elapsedMilliseconds < fadeMs) {
+        final progress = (fadeStopwatch.elapsedMilliseconds / fadeMs)
             .clamp(0.0, 1.0);
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)

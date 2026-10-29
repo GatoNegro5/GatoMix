@@ -185,9 +185,10 @@ class PhrasePlan {
 
 /// Punto de salida, entrada y duración de Phrase 8.
 ///
-/// Sin perfil, o con el outro fuera de 60 %..(fin−8 s), [mixOutMs] es
-/// [fallbackMixOutMs] (el DNA ya ajustado a 8 compases). La entrada, si hay
-/// perfil, es el primer downbeat de frase en o después de ~10 s o del fin
+/// Sin perfil, o con el outro fuera del 60 % o ya en el final medido,
+/// [mixOutMs] es [fallbackMixOutMs] (el DNA ya ajustado a 8 compases).
+/// La entrada, si hay perfil, es el primer downbeat de frase en o después
+/// de ~10 s o del fin
 /// de la intro. [lockExit] deja la salida quieta (el cruce ya se disparó)
 /// y solo mueve la entrada para no juntar dos frases vocales.
 PhrasePlan planPhrase8({
@@ -202,14 +203,14 @@ PhrasePlan planPhrase8({
   bool lockExit = false,
 }) {
   final int mixLo = outDurationMs <= 0 ? 0 : (outDurationMs * 0.60).round();
-  final int mixHi = outDurationMs - phraseFadeMinMs;
+  final int mixHi = outDurationMs;
   var mixOut = fallbackMixOutMs;
   var energyExit = false;
   if (!lockExit &&
       outgoing != null &&
       outgoing.outroMs >= mixLo &&
       mixHi > mixLo &&
-      outgoing.outroMs <= mixHi) {
+      outgoing.outroMs < mixHi) {
     mixOut = outgoing.outroMs;
     energyExit = true;
   }
@@ -306,7 +307,7 @@ int _entryDownbeat({
   }
   final int snapped = _snapUp(anchor, track.beatMs, bpm);
   final int cap = (durationMs * 0.45).round();
-  if (snapped < 8000 || snapped > cap || snapped >= durationMs - phraseFadeMinMs) {
+  if (snapped < 8000 || snapped > cap || snapped >= durationMs) {
     return -1;
   }
   return snapped;

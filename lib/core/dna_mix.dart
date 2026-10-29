@@ -99,7 +99,7 @@ DnaDecision decideDna({
         outgoing,
         mixOut,
         (outDurationMs * 0.50).round(),
-        outDurationMs - 4000,
+        outDurationMs,
       );
       if (moved != null && moved != mixOut) mixOut = moved;
     }
@@ -186,10 +186,9 @@ DnaDecision decideDna({
 }
 
 bool _outroFits(int outroMs, int durationMs) {
-  if (outroMs < 0 || durationMs <= 8000) return false;
-  final int cap = durationMs - 4000;
+  if (outroMs < 0 || durationMs <= 0) return false;
   final int floor = (durationMs * 0.50).round();
-  return outroMs >= floor && outroMs <= cap;
+  return outroMs >= floor && outroMs < durationMs;
 }
 
 bool _bpmClose(double outBpm, double inBpm, double outRate) {
@@ -241,7 +240,7 @@ int? _entryPoint(PhraseTrack track, double bpm, int durationMs) {
       ? beat
       : beat + ((anchor - beat + phraseMs - 1) ~/ phraseMs) * phraseMs;
   final int cap = (durationMs * 0.45).round();
-  if (start < 0 || start > cap || start >= durationMs - 8000) return null;
+  if (start < 0 || start > cap || start >= durationMs) return null;
   return start;
 }
 

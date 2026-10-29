@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/dna_mix.dart';
+import 'package:gatomix/core/exact_mix.dart';
 import 'package:gatomix/core/phrase_grid.dart';
 import 'package:gatomix/providers/livedj_provider.dart';
 import 'package:gatomix/providers/mix_formula.dart';
@@ -144,7 +145,7 @@ void main() {
     expect(plain.bassSwap, isFalse);
   });
 
-  test('el outro fuera de la segunda mitad o a menos de 4 s usa el género', () {
+  test('el outro de la segunda mitad se usa aunque quede poco audio', () {
     final PhraseTrack early = _body(outro: 20000);
     final DnaDecision tooSoon = decideDna(
       outDurationMs: 180000,
@@ -175,7 +176,16 @@ void main() {
       echoSupported: false,
       eqSupported: true,
     );
-    expect(tooLate.mixOutMs, 135000);
+    expect(tooLate.mixOutMs, 178000);
+    final FittedFade lateFade = fitMixFade(
+      exactDurationMs: 180000,
+      mixOutMs: tooLate.mixOutMs,
+      wantedFadeMs: tooLate.fadeMs,
+    );
+    expect(lateFade.mixOutMs, 178000);
+    expect(lateFade.mixOutMs, isNot(180000 - 4000));
+    expect(lateFade.fadeMs, 2000);
+    expect(lateFade.shortened, isTrue);
 
     final PhraseTrack drop = _body(outro: 100000);
     final DnaDecision used = decideDna(

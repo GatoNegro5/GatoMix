@@ -794,11 +794,6 @@ class AutomixNotifier extends Notifier<AutomixState> {
       }
     }
 
-    if (!_mixOutIsManual &&
-        safeMixOutMs > 0 &&
-        safeMixOutMs >= state.duration.inMilliseconds - 4000) {
-      safeMixOutMs = state.duration.inMilliseconds - 4000;
-    }
     if (!_cueInIsManual &&
         safeCueInMs > 0 &&
         safeCueInMs > state.duration.inMilliseconds ~/ 2) {

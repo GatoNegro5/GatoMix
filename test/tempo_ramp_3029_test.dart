@@ -114,6 +114,35 @@ void main() {
     expect(dawnCrossfadeGain(0.5), mid);
   });
 
+  test('un punto a 2 s del final no se corre a 4 s', () {
+    const int dur = 10000;
+    final int point = (dur * 0.75).round();
+    final FittedFade fit = fitMixFade(
+      exactDurationMs: dur,
+      mixOutMs: point,
+      wantedFadeMs: 8000,
+      structuralMs: const <int>[8000, 9000],
+    );
+    expect(point, 7500);
+    expect(fit.mixOutMs, 7500);
+    expect(fit.mixOutMs, isNot(dur - 4000));
+    expect(fit.fadeMs, 2500);
+    expect(fit.shortened, isTrue);
+    expect(fit.note, contains('wanted=8000'));
+    expect(fit.note, contains('fade=2500'));
+
+    final FittedFade roomy = fitMixFade(
+      exactDurationMs: 180000,
+      mixOutMs: 178000,
+      wantedFadeMs: 18000,
+      structuralMs: const <int>[135000],
+    );
+    expect(roomy.mixOutMs, 135000);
+    expect(roomy.fadeMs, 18000);
+    expect(roomy.shortened, isFalse);
+    expect(roomy.mixOutMs, isNot(180000 - 4000));
+  });
+
   test('el disparo no se adelanta 25 s ni usa una duración sin medir', () {
     const int exact = 283000;
     const int mixOut = 270000;
