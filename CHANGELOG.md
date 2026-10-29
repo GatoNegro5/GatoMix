@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 3.0.31+50 — BPM por la recta de los golpes y DNA entre 60 % y 80 %
+
+- **BPM.** El peine y la autocorrelación solo eligen la métrica (×2, ×1/2, ×4/3, ×3/4) según la envolvente de onsets (hop 256). El número es 60 dividido por la pendiente de la recta de mínimos cuadrados de los golpes de Ellis, afinados con parábola, sobre la canción. TBPM queda con 2 decimales y punto (`146.67`). `GMX_GRID` guarda ancla y periodo, y tramos si el residuo pasa de 60 ms o el tempo se mueve más de 0,02 BPM. La etiqueta previa no sesga la medida. `17312`, `09548` y `146,70` se leen como 173,12, 95,48 y 146,70. `GMX_ANALYSIS=3031`: si el audio ya está masterizado y la versión es vieja, solo se reescriben BPM, rejilla y duración. La versión actual se salta. Un archivo nuevo sigue el masterizado completo.
+- **DNA.** La salida se busca entre el 60 % y el 80 % de la duración efectiva. Orden: outro, hueco sin voz, golpe de frase del género. El fundido termina antes del final. Phrase 8 y Stealth no cambian. Log: `DNA mixOut=<ms> (<%>) fuente=outro|hueco|frase fadeFin=<ms>`.
+- **Barrido.** «Revisar BPM» re-mide la biblioteca tocando solo etiquetas y anota `BPM_FIX archivo viejo->nuevo`.
+- API Dart–Rust: no cambia.
+- Igual en Windows, Android, macOS e iPhone: el medidor está en Rust y lo usan Masterizar, Descargas, LAB, Live DJ y Automix. El iPhone entra por `lib/djiphone/`.
+
 ## 3.0.30+49 — empate de golpe en lazo cerrado y pausa total en la mezcla
 
 - **Fase.** Live DJ (DNA, Phrase 8 y Stealth) y Automix leen la posición oída (`audio-pts`, si no `time-pos`, si no el último dato más el tiempo medido). La espera al golpe resta la latencia de arranque medida en ese dispositivo (promedio móvil). Sin medida todavía, usa el retardo de salida de libmpv (`time-pos − audio-pts`) o cero, y el lazo corrige. Durante la mezcla se mide el desfase de los dos decks y, si pasa de 5 ms, la entrante se mueve como mucho un 1 % encima del rate de la rampa, sin sustituirlo. La bitácora anota `PHASE inicial=… final=… latencia=… pasos=…`.

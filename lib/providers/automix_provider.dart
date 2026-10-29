@@ -21,10 +21,13 @@ import '../core/dj_trace.dart';
 import '../core/audio/dj_audio_handler.dart';
 
 import '../core/audio_path.dart';
+import '../core/dna_mix.dart';
 import '../core/gatomix_store.dart';
+import '../services/track_tags.dart';
 import '../core/livedj_order.dart';
 import '../core/mode_session.dart';
 import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
 import '../core/lyric_files.dart' hide sameAudioPath;
 import '../core/session_restore.dart';
 import '../core/lyric_match.dart';
@@ -880,12 +883,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
       if (state.lyrics.isNotEmpty) {
         final lastLyricMs = state.lyrics.last.timestamp.inMilliseconds;
         safeMixOutMs = lastLyricMs + 1500;
-      } else if (isRemix || isEdm) {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.65).toInt();
-      } else if (isTropical) {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.80).toInt();
       } else {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.75).toInt();
+        final int tailMs = TrackTags.peek(state.currentTrackPath)?.tailMs ?? 0;
+        final int dur = state.duration.inMilliseconds;
+        final int eff = (tailMs > 0 && tailMs < dur ~/ 3) ? dur - tailMs : dur;
+        final double fraction = (isRemix || isEdm)
+            ? 0.65
+            : (isTropical ? 0.80 : 0.75);
+        safeMixOutMs = dnaPercentPoint(eff, fraction);
       }
     }
 
@@ -1630,19 +1635,23 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (outPath != null) {
       try {
         final int outPos = fading.state.position.inMilliseconds;
-        final List<rust_dsp.BeatGrid> grids =
-            await Future.wait<rust_dsp.BeatGrid>(<Future<rust_dsp.BeatGrid>>[
-              rust_dsp.beatGrid(
-                inputPath: outPath,
-                fromMs: BigInt.from(outPos + 1000),
-                spanSecs: 12,
-              ),
-              rust_dsp.beatGrid(
-                inputPath: inPath,
-                fromMs: BigInt.from(cueMs < 0 ? 0 : cueMs),
-                spanSecs: 12,
-              ),
-            ]).timeout(const Duration(seconds: 5));
+        final int cue = cueMs < 0 ? 0 : cueMs;
+        final rust_dsp.BeatGrid? tagOut = beatFromTag(outPath, outPos + 1000);
+        final rust_dsp.BeatGrid? tagIn = beatFromTag(inPath, cue);
+        final List<rust_dsp.BeatGrid> grids = tagOut != null && tagIn != null
+            ? <rust_dsp.BeatGrid>[tagOut, tagIn]
+            : await Future.wait<rust_dsp.BeatGrid>(<Future<rust_dsp.BeatGrid>>[
+                rust_dsp.beatGrid(
+                  inputPath: outPath,
+                  fromMs: BigInt.from(outPos + 1000),
+                  spanSecs: 12,
+                ),
+                rust_dsp.beatGrid(
+                  inputPath: inPath,
+                  fromMs: BigInt.from(cue),
+                  spanSecs: 12,
+                ),
+              ]).timeout(const Duration(seconds: 5));
         if (grids[0].ok &&
             grids[1].ok &&
             grids[0].bpm > 0 &&

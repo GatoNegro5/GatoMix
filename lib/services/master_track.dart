@@ -6,6 +6,11 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/exact_mix.dart';
 import '../core/gatomix_store.dart';
+import '../core/master_skip.dart';
+import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
+import '../services/track_tags.dart';
+import '../ui/workspaces/livedj_bpm_badge.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_ai_align.dart';
 import '../core/lab_quarantine.dart';
@@ -77,6 +82,43 @@ class MasterTrack {
     }
 
     await _ensureBackup(current);
+
+    final Map<String, String> earlyTags = readGmxTagsFromFile(current);
+    final AnalysisPlan earlyPlan = planAnalysis(
+      earlyTags,
+      karaoke: isKaraokePath(current),
+    );
+    if (earlyPlan == AnalysisPlan.skip) {
+      return MasterOutcome(
+        path: current,
+        trimHeadMs: 0,
+        lyric: null,
+        detail: 'analisis $kGmxAnalysis',
+      );
+    }
+    if (earlyPlan == AnalysisPlan.retag) {
+      final double oldBpm = readTbpmSync(current);
+      final double neu = await rust_dsp.autoDetectAndInjectBpm(inputPath: current);
+      try {
+        await rewriteDurationTag(current);
+      } catch (e) {
+        debugPrint('🔴 [TLEN] $e');
+      }
+      final String name = File(current).uri.pathSegments.last;
+      debugPrint('BPM_FIX $name $oldBpm->$neu');
+      TrackTags.forget(current);
+      if (neu > 0) TrackTags.rememberBpm(current, neu);
+      forgetKnownBpm(current);
+      forgetLiveDjBpm(current);
+      forgetStoredGrid(current);
+      if (neu > 0) saveTrackMusic(current, bpm: neu);
+      return MasterOutcome(
+        path: current,
+        trimHeadMs: 0,
+        lyric: null,
+        detail: 'BPM_FIX $name $oldBpm->$neu',
+      );
+    }
 
     final int durMs = (await rust_dsp.getAudioDurationMs(inputPath: current))
         .toInt();

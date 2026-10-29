@@ -21,6 +21,7 @@ import '../core/livedj_order.dart';
 import '../core/dna_mix.dart';
 import '../core/phrase_grid.dart';
 import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
 import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
@@ -344,11 +345,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       double bpm = _extractBpm(path);
       var beatMs = 0;
       try {
-        final rust_dsp.BeatGrid grid = await rust_dsp.beatGrid(
-          inputPath: path,
-          fromMs: BigInt.zero,
-          spanSecs: 24,
-        );
+        final rust_dsp.BeatGrid grid =
+            beatFromTag(path, 0) ??
+            await rust_dsp.beatGrid(
+              inputPath: path,
+              fromMs: BigInt.zero,
+              spanSecs: 24,
+            );
         if (grid.ok && grid.bpm >= 60 && grid.bpm <= 200) {
           if (bpm < 60 || bpm > 200) bpm = grid.bpm;
           beatMs = grid.beatMs.round();
@@ -542,7 +545,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final String? peer = _phrasePeerPath();
     final PhraseTrack? incoming = PhraseGridMemory.peek(peer);
     final int peerDur = incoming?.durationMs ?? 0;
-    return _dnaPair(
+    final DnaDecision dna = _dnaPair(
       outDurationMs: effDurMs,
       outPath: path,
       genreMixOutMs: safeMixOutMs,
@@ -551,7 +554,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       inPath: peer,
       fallbackCueMs: _phraseFallbackCue(peer, peerDur),
       outRate: 1,
-    ).mixOutMs;
+    );
+    if (effDurMs > 0) {
+      final double pct = dna.mixOutMs * 100.0 / effDurMs;
+      debugPrint(
+        'DNA mixOut=${dna.mixOutMs} (${pct.toStringAsFixed(1)}%) '
+        'fuente=${dna.mixSource} fadeFin=${dna.mixOutMs + dna.fadeMs}',
+      );
+    }
+    return dna.mixOutMs;
   }
 
   DnaDecision _dnaPair({
@@ -2554,18 +2565,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         final String? outPath = state.currentTrackPath;
         if (outPath != null) {
           final int outPos = fadingPlayer.state.position.inMilliseconds;
-          final res = await Future.wait([
-            rust_dsp.beatGrid(
-              inputPath: outPath,
-              fromMs: BigInt.from(outPos + 1000),
-              spanSecs: 12,
-            ),
-            rust_dsp.beatGrid(
-              inputPath: nextTrack,
-              fromMs: BigInt.from(cueInMs),
-              spanSecs: 12,
-            ),
-          ]).timeout(const Duration(seconds: 5));
+          final rust_dsp.BeatGrid? tagOut = beatFromTag(outPath, outPos + 1000);
+          final rust_dsp.BeatGrid? tagIn = beatFromTag(nextTrack, cueInMs);
+          final List<rust_dsp.BeatGrid> res = tagOut != null && tagIn != null
+              ? <rust_dsp.BeatGrid>[tagOut, tagIn]
+              : await Future.wait([
+                  rust_dsp.beatGrid(
+                    inputPath: outPath,
+                    fromMs: BigInt.from(outPos + 1000),
+                    spanSecs: 12,
+                  ),
+                  rust_dsp.beatGrid(
+                    inputPath: nextTrack,
+                    fromMs: BigInt.from(cueInMs),
+                    spanSecs: 12,
+                  ),
+                ]).timeout(const Duration(seconds: 5));
           if (res[0].ok && res[1].ok) {
             gridOut = res[0];
             gridIn = res[1];

@@ -113,7 +113,7 @@ class TrackTags {
   static void clear() => _cache.clear();
 
   /// BPM de una canción: entre 40 y 250. Si el archivo lo guardó × 100
-  /// (14109 = 141.09), se divide. Un valor fuera de eso no es un BPM.
+  /// (14109 = 141.09, 17312 = 173.12), se divide. Un valor fuera de eso no es un BPM.
   static double musicalBpm(double v) {
     if (v >= 40 && v <= 250) return v;
     if (v >= 4000 && v <= 25000) {
@@ -121,5 +121,24 @@ class TrackTags {
       if (scaled >= 40 && scaled <= 250) return scaled;
     }
     return 0.0;
+  }
+
+  /// TBPM viejo o nuevo.
+  ///
+  /// `146.70` y `146,70` son 146,70. Sin separador, `17312`, `09548`,
+  /// `08635` y `08571` son centésimas. `144` se queda en 144.
+  static double decodeTbpm(String raw) {
+    final String text = raw.replaceAll(',', '.');
+    final RegExpMatch? match = RegExp(r'(\d{1,6}(?:\.\d+)?)').firstMatch(text);
+    if (match == null) return 0;
+    final String token = match.group(1)!;
+    final double value = double.tryParse(token) ?? 0;
+    if (value <= 0) return 0;
+    final bool sep = raw.contains('.') || raw.contains(',');
+    if (!sep && value > 300) {
+      final double scaled = value / 100.0;
+      if (scaled >= 40 && scaled <= 250) return scaled;
+    }
+    return musicalBpm(value);
   }
 }

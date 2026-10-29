@@ -14,6 +14,10 @@ import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/master_cool.dart';
 import '../../core/master_skip.dart';
+import '../../core/queue_bpm.dart';
+import '../../core/stored_grid.dart';
+import '../../services/track_tags.dart';
+import 'livedj_bpm_badge.dart';
 import '../../core/thermal_status.dart';
 import '../../core/master_pause.dart';
 import '../../core/master_profile.dart';
@@ -2239,6 +2243,21 @@ class DspNlpWorkspace extends ConsumerWidget {
         OutlinedButton.icon(
           onPressed: blocked
               ? null
+              : () => _executeBpmSweep(context, ref, targetPath),
+          icon: const Icon(Icons.speed_outlined, size: 16),
+          label: const Text(
+            'REVISAR BPM',
+            style: TextStyle(fontSize: 10),
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.orangeAccent,
+            side: const BorderSide(color: Colors.orangeAccent),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: blocked
+              ? null
               : () => _executeRestore(context, ref, targetPath),
           icon: const Icon(Icons.restore, size: 16),
           label: const Text(
@@ -2348,6 +2367,95 @@ class DspNlpWorkspace extends ConsumerWidget {
             onPressed: () => Navigator.pop(ctx),
             child: const Text('CERRAR'),
           ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _executeBpmSweep(
+    BuildContext context,
+    WidgetRef ref,
+    String targetPath,
+  ) async {
+    final pipe = ref.read(pipelineProvider.notifier);
+    final Directory root = Directory(targetPath);
+    if (!root.existsSync()) return;
+    final List<File> files = root.listSync(recursive: true).whereType<File>().where((
+      File f,
+    ) {
+      final String lower = f.path.toLowerCase().replaceAll('\\', '/');
+      if (!lower.endsWith('.mp3')) return false;
+      if (lower.contains('/.gatomix_original/')) return false;
+      return true;
+    }).toList();
+    if (files.isEmpty) return;
+    final List<String> lines = <String>[];
+    var skipped = 0;
+    try {
+      for (int i = 0; i < files.length; i++) {
+        if (ref.read(pipelineProvider).isAborted) break;
+        final File file = files[i];
+        final String name = file.uri.pathSegments.last;
+        final Map<String, String> tags = readGmxTagsFromFile(file.path);
+        if (tags['GMX_ANALYSIS'] == kGmxAnalysis) {
+          skipped++;
+          pipe.updateProgress(i + 1, files.length, name, 'BPM ya medido');
+          continue;
+        }
+        pipe.updateProgress(i + 1, files.length, name, 'Re-midiendo BPM (solo etiqueta)...');
+        try {
+          final double oldBpm = readTbpmSync(file.path);
+          final double neu = await rust_dsp.autoDetectAndInjectBpm(inputPath: file.path);
+          final String line = 'BPM_FIX $name $oldBpm->$neu';
+          debugPrint(line);
+          lines.add(line);
+          TrackTags.forget(file.path);
+          if (neu > 0) {
+            TrackTags.rememberBpm(file.path, neu);
+            saveTrackMusic(file.path, bpm: neu);
+          }
+          forgetKnownBpm(file.path);
+          forgetLiveDjBpm(file.path);
+          forgetStoredGrid(file.path);
+        } catch (e) {
+          debugPrint('🔴 [BPM] $name $e');
+        }
+      }
+    } finally {
+      pipe.reset();
+    }
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF121212),
+        title: Text(
+          'BPM (${lines.length})',
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: SizedBox(
+          width: 520,
+          height: lines.isEmpty ? 80 : 360,
+          child: lines.isEmpty
+              ? Text(
+                  'Nada que re-medir. $skipped ya tenían el análisis $kGmxAnalysis. El audio no se tocó.',
+                  style: const TextStyle(color: Colors.white70),
+                )
+              : ListView(
+                  children: [
+                    for (final String line in lines)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          line,
+                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CERRAR')),
         ],
       ),
     );

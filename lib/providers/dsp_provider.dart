@@ -6,7 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/bpm_range.dart';
+import '../services/track_tags.dart';
 import '../core/gatomix_store.dart';
+import '../core/master_skip.dart';
+import '../core/queue_bpm.dart';
 import 'pipeline_provider.dart';
 import 'db_provider.dart'; // 🛠️ FIX: Enlace al controlador de ISAR
 
@@ -62,9 +65,9 @@ class DspWorker {
               tagData[i + 7];
           if (frameSize > 0 && i + 10 + frameSize <= tagData.length) {
             final bpmStringBytes = tagData.sublist(i + 11, i + 10 + frameSize);
-            final rawString = String.fromCharCodes(bpmStringBytes)
-                .replaceAll(RegExp(r'[^\d.]'), '');
-            return double.tryParse(rawString) ?? 0.0;
+            return TrackTags.decodeTbpm(
+              String.fromCharCodes(bpmStringBytes.where((int b) => b != 0)),
+            );
           }
         }
       }
@@ -161,47 +164,33 @@ class DspWorker {
         debugPrint("⚙️ [DSP Cache] Escaneando binario ID3: $filename");
         await Future.delayed(const Duration(milliseconds: 30));
 
-        final bpm = await _extractBpmFromID3(absolutePath);
-        final double? ranged = bpm > 0 ? fixBpmRange(bpm) : null;
-
-        if (ranged != null) {
-          cacheData[absolutePath] = ranged;
-          cacheData[filename] = ranged;
+        final Map<String, String> tags = readGmxTagsFromFile(absolutePath);
+        if (tags['GMX_ANALYSIS'] == kGmxAnalysis) {
+          final double tagged = await _extractBpmFromID3(absolutePath);
+          final double? ranged = tagged > 0 ? fixBpmRange(tagged) : null;
+          if (ranged != null) {
+            cacheData[absolutePath] = ranged;
+            cacheData[filename] = ranged;
+          }
         } else {
-          final match = RegExp(
-            r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-            caseSensitive: false,
-          ).firstMatch(filename);
-
-          if (match != null) {
-            final double? fromName = fixBpmRange(double.parse(match.group(1)!));
-            if (fromName != null) {
-              cacheData[absolutePath] = fromName;
-              cacheData[filename] = fromName;
-            }
-          } else {
-            pipe.updateProgress(
-              currentIndex,
-              totalFiles,
-              filename,
-              "🧠 Analizando Espectro FFI...",
-            );
-
-            try {
-              final detectedBpm = await rust_dsp
-                  .autoDetectAndInjectBpm(inputPath: absolutePath)
-                  .timeout(const Duration(seconds: 45));
-
-              final double? fixedDetected = fixBpmRange(detectedBpm);
-              cacheData[absolutePath] = fixedDetected ?? 0.0;
-              if (fixedDetected != null) cacheData[filename] = fixedDetected;
-              debugPrint(
-                "✅ [FFT BPM] Matemático: $detectedBpm BPM -> $filename",
-              );
-            } catch (e) {
-              debugPrint("🔴 [FFT BPM FALLO / TIMEOUT]: $e -> $filename");
-              cacheData[absolutePath] = 0.0;
-            }
+          pipe.updateProgress(
+            currentIndex,
+            totalFiles,
+            filename,
+            "🧠 Analizando Espectro FFI...",
+          );
+          try {
+            final double oldBpm = readTbpmSync(absolutePath);
+            final detectedBpm = await rust_dsp
+                .autoDetectAndInjectBpm(inputPath: absolutePath)
+                .timeout(const Duration(seconds: 45));
+            final double? fixedDetected = fixBpmRange(detectedBpm);
+            cacheData[absolutePath] = fixedDetected ?? 0.0;
+            if (fixedDetected != null) cacheData[filename] = fixedDetected;
+            debugPrint('BPM_FIX $filename $oldBpm->$detectedBpm');
+          } catch (e) {
+            debugPrint("🔴 [FFT BPM FALLO / TIMEOUT]: $e -> $filename");
+            cacheData[absolutePath] = 0.0;
           }
         }
 

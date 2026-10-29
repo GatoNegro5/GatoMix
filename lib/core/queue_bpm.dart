@@ -296,8 +296,11 @@ double _parseBpmText(List<int> bytes) {
   final String text = String.fromCharCodes(
     bytes.where((int b) => b == 0x2C || b == 0x2E || (b >= 0x30 && b <= 0x39)),
   );
-  final RegExpMatch? match = RegExp(r'(\d{1,6}(?:[.,]\d+)?)').firstMatch(text);
-  if (match == null) return 0;
-  final double raw = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 0;
-  return TrackTags.musicalBpm(raw);
+  return TrackTags.decodeTbpm(text);
+}
+
+void forgetKnownBpm(String? path) {
+  if (path == null || path.isEmpty) return;
+  _syncKnownBpmGen();
+  _knownBpmMem.remove(audioPathKey(path));
 }

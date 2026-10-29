@@ -64,11 +64,12 @@ double _parseBpmText(List<int> bytes) {
   final String text = String.fromCharCodes(
     bytes.where((b) => b == 0x2C || b == 0x2E || (b >= 0x30 && b <= 0x39)),
   );
-  final match = RegExp(r'(\d{1,6}(?:[.,]\d+)?)').firstMatch(text);
-  if (match == null) return 0.0;
-  final double raw =
-      double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 0.0;
-  return TrackTags.musicalBpm(raw);
+  return TrackTags.decodeTbpm(text);
+}
+
+void forgetLiveDjBpm(String path) {
+  _bpmCache.remove(path);
+  _indexCache.clear();
 }
 
 /// Lee la etiqueta ID3v2 `TBPM` saltando frames grandes (carátulas).
@@ -194,7 +195,7 @@ class LiveDjBpmChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(4),
           ),
           child: Text(
-            bpm > 0 ? '${bpm.round()} BPM' : '– BPM',
+            bpm > 0 ? '${bpm.toStringAsFixed(2)} BPM' : '– BPM',
             maxLines: 1,
             style: TextStyle(
               color: bpm > 0 ? Colors.white : Colors.white38,
@@ -222,7 +223,7 @@ class LiveDjBpmBadge extends StatelessWidget {
         builder: (context, snap) {
           final bpm = snap.data ?? 0.0;
           return Text(
-            bpm > 0 ? bpm.round().toString() : '–',
+            bpm > 0 ? bpm.toStringAsFixed(2) : '–',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: bpm > 0 ? Colors.white : Colors.white24,

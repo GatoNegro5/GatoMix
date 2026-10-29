@@ -98,6 +98,7 @@ void main() {
       'GMX_BACKUP': '1',
       'GMX_LYR': 'APPROX',
       'GMX_LYR_CHECK': 'SKIP',
+      'GMX_ANALYSIS': '3031',
     };
     expect(missingWork(tags, karaoke: false), isNull);
   });

@@ -14,6 +14,26 @@ import 'gatomix_store.dart';
 const String masterIndexName = '.gatomix_master_index.json';
 const String _sealText = 'ReGenial Master';
 
+/// Medidor de BPM, rejilla y duración. Una anterior no recodifica el audio.
+const String kGmxAnalysis = '3031';
+
+enum AnalysisPlan { skip, retag, full }
+
+AnalysisPlan planAnalysis(
+  Map<String, String> tags, {
+  required bool karaoke,
+  bool hasKaraokeTwin = false,
+}) {
+  final String? miss = missingWork(
+    tags,
+    karaoke: karaoke,
+    hasKaraokeTwin: hasKaraokeTwin,
+  );
+  if (miss == null) return AnalysisPlan.skip;
+  if (miss == 'analysis') return AnalysisPlan.retag;
+  return AnalysisPlan.full;
+}
+
 const Set<String> _lyrOk = <String>{
   'SYNC',
   'PLAIN',
@@ -193,17 +213,24 @@ String? missingWork(
   if (trim == null || trim < 0) return 'trim';
   if (!tags.containsKey('GMX_LUFS_DONE')) return 'lufs';
   if (tags['GMX_BPM_OK'] != '1') return 'bpm';
-  if (karaoke) return null;
+  if (karaoke) {
+    if (tags['GMX_ANALYSIS'] != kGmxAnalysis) return 'analysis';
+    return null;
+  }
   if (tags['__SEAL'] != '1') return 'seal';
   if (tags['GMX_NAME_OK'] != '1') return 'name';
   if (tags['GMX_BACKUP'] != '1') return 'backup';
   final bool mega = tags['GMX_TYPE'] == 'MEGAMIX';
-  if (mega) return null;
+  if (mega) {
+    if (tags['GMX_ANALYSIS'] != kGmxAnalysis) return 'analysis';
+    return null;
+  }
   final String lyr = tags['GMX_LYR'] ?? '';
   if (lyr == 'RETRY') return 'lyr_retry';
   if (!_lyrOk.contains(lyr)) return 'lyr';
   if (!tags.containsKey('GMX_LYR_CHECK')) return 'lyr_check';
   if (hasKaraokeTwin && tags['GMX_K'] != '1') return 'k';
+  if (tags['GMX_ANALYSIS'] != kGmxAnalysis) return 'analysis';
   return null;
 }
 
@@ -257,7 +284,9 @@ class MasterSkipIndex {
     final MasterSkipIndex idx = MasterSkipIndex(root);
     try {
       final dynamic d = GatomixStore.section(root, 'masterIndex');
-      if (d is Map && d['schema'] == 1 && d['entries'] is Map) {
+      if (d is Map &&
+          (d['schema'] == 1 || d['schema'] == 2) &&
+          d['entries'] is Map) {
         (d['entries'] as Map).forEach((k, v) {
           if (v is Map) {
             final String nk = audioPathKey(
@@ -275,7 +304,7 @@ class MasterSkipIndex {
   void save() {
     try {
       GatomixStore.putSection(root, 'masterIndex', <String, dynamic>{
-        'schema': 1,
+        'schema': 2,
         'entries': entries,
       });
     } catch (_) {}
@@ -305,12 +334,14 @@ class MasterSkipIndex {
   String? record(String path) {
     if (!File(path).existsSync()) return 'missing';
     final Map<String, dynamic> s = _stat(path);
+    final Map<String, String> tags = readGmxTagsFromFile(path);
     final String? miss = missingWork(
-      readGmxTagsFromFile(path),
+      tags,
       karaoke: isKaraokePath(path),
       hasKaraokeTwin: s['twin'] == true,
     );
     s['state'] = miss == null ? 'OK' : 'PENDING';
+    s['analysis'] = tags['GMX_ANALYSIS'] ?? '';
     if (miss != null) s['miss'] = miss;
     entries[key(path)] = s;
     return miss;
@@ -326,9 +357,13 @@ class MasterSkipIndex {
         e['mtime'] == s['mtime'] &&
         e['lrc'] == s['lrc'] &&
         e['twin'] == s['twin']) {
-      return e['state'] == 'OK'
-          ? const SkipDecision(true, 'index')
-          : SkipDecision(false, 'index:${e['miss'] ?? e['state']}');
+      if (e['state'] == 'OK' && e['analysis'] == kGmxAnalysis) {
+        return const SkipDecision(true, 'index');
+      }
+      if (e['state'] == 'OK') {
+        return const SkipDecision(false, 'analysis');
+      }
+      return SkipDecision(false, 'index:${e['miss'] ?? e['state']}');
     }
     // Sin entrada (o cambió): respaldo por el tag ID3. Si el archivo cambió
     // respecto al índice, se procesa aunque el tag diga completo.
@@ -340,13 +375,15 @@ class MasterSkipIndex {
     }
     // 1.0.20+39: un .lrc APPROX que apareció después del índice no fuerza
     // reproceso; manda el tag (si está completo, se salta y se actualiza).
+    final Map<String, String> tags = readGmxTagsFromFile(path);
     final String? miss = missingWork(
-      readGmxTagsFromFile(path),
+      tags,
       karaoke: isKaraokePath(path),
       hasKaraokeTwin: s['twin'] == true,
     );
     if (miss != null) return SkipDecision(false, miss);
     s['state'] = 'OK';
+    s['analysis'] = tags['GMX_ANALYSIS'] ?? '';
     entries[key(path)] = s;
     return const SkipDecision(true, 'tags');
   }

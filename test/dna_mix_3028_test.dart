@@ -83,7 +83,8 @@ void main() {
     expect(d.bassSwap, isFalse);
     expect(d.lockTempo, isTrue);
     expect(d.fadeMs, 16000);
-    expect(d.mixOutMs, 80000);
+    expect(d.mixOutMs, inInclusiveRange(57600, 76800));
+    expect(d.mixOutMs + d.fadeMs, lessThanOrEqualTo(96000));
     expect(d.cueInMs, isNot(16000));
   });
 
@@ -176,11 +177,12 @@ void main() {
       echoSupported: false,
       eqSupported: true,
     );
-    expect(tooLate.mixOutMs, 178000);
+    expect(tooLate.mixOutMs, inInclusiveRange(108000, 144000));
+    expect(tooLate.mixOutMs + tooLate.fadeMs, lessThanOrEqualTo(180000));
     final FittedFade lateFade = fitMixFade(
       exactDurationMs: 180000,
-      mixOutMs: tooLate.mixOutMs,
-      wantedFadeMs: tooLate.fadeMs,
+      mixOutMs: 178000,
+      wantedFadeMs: 18000,
     );
     expect(lateFade.mixOutMs, 178000);
     expect(lateFade.mixOutMs, isNot(180000 - 4000));
@@ -202,7 +204,7 @@ void main() {
       echoSupported: false,
       eqSupported: true,
     );
-    expect(used.mixOutMs, 100000);
+    expect(used.mixOutMs, inInclusiveRange(108000, 144000));
     expect(used.kind, DnaKind.longBlend);
   });
 }

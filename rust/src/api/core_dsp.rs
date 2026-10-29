@@ -559,10 +559,13 @@ fn fold_display_bpm(mut bpm: f64, lo: f64, hi: f64) -> f64 {
     bpm
 }
 
-/// Ventana ~22 ms y salto ~11,6 ms (1024 y 512 muestras a 44,1 kHz).
+/// Ventana ~23 ms. El peine usa salto 512 (el de ahora). La envolvente de
+/// golpes usa 256, dentro de 128–256 a 44,1 kHz: el 512 cuantizaba ±1–2 BPM.
 /// Bello, Duxbury, Davies y Sandler, IEEE SPL 11(6), 2004.
-fn odf_stft(rate: u32) -> (usize, usize) {
-    let hop = ((rate as f64) * 512.0 / 44100.0).round().max(1.0) as usize;
+fn odf_stft_hop(rate: u32, hop_at_44100: f64) -> (usize, usize) {
+    let hop = ((rate as f64) * hop_at_44100 / 44100.0)
+        .round()
+        .clamp(1.0, 4096.0) as usize;
     let want = ((rate as f64) * 1024.0 / 44100.0).round().max(32.0) as usize;
     let up = want.next_power_of_two();
     let down = (up / 2).max(32);
@@ -579,7 +582,16 @@ fn odf_stft(rate: u32) -> (usize, usize) {
 /// el valor previsto de cada bin es la magnitud anterior con la fase
 /// extrapolada `2φ[n−1] − φ[n−2]`; la detección es la distancia euclídea.
 fn complex_odf(mono: &[f32], rate: u32) -> Option<(Vec<f64>, f64)> {
-    let (n_fft, hop) = odf_stft(rate);
+    complex_odf_hop(mono, rate, 512.0)
+}
+
+/// Envolvente de onsets con hop 256 a 44,1 kHz. Mismo detector complejo.
+fn onset_envelope(mono: &[f32], rate: u32) -> Option<(Vec<f64>, f64)> {
+    complex_odf_hop(mono, rate, 256.0)
+}
+
+fn complex_odf_hop(mono: &[f32], rate: u32, hop_at_44100: f64) -> Option<(Vec<f64>, f64)> {
+    let (n_fft, hop) = odf_stft_hop(rate, hop_at_44100);
     if rate < 8000 || mono.len() < n_fft.saturating_mul(4) || hop == 0 {
         return None;
     }
@@ -888,10 +900,15 @@ fn ellis_beats(odf: &[f64], period: f64) -> Vec<usize> {
 /// 5. Beat tracking por programación dinámica (Ellis 2007, α = 680).
 /// 6. Octava de visualización: ×2 o ÷2 solo para entrar en 60–180.
 fn estimate_tempo_track(mono: &[f32], rate: u32) -> Option<f64> {
-    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI)
+    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI).map(|g| g.bpm)
 }
 
-fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) -> Option<f64> {
+fn estimate_tempo_in(
+    mono: &[f32],
+    rate: u32,
+    display_lo: f64,
+    display_hi: f64,
+) -> Option<crate::bpm_exact::TempoGrid> {
     let debug = std::env::var_os("GMX_BPM_DEBUG").is_some();
     let (odf, env_rate) = complex_odf(mono, rate)?;
     // Inducción más ancha que la visualización, para que el peine vea el tactus
@@ -987,14 +1004,26 @@ fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) 
     if lag < 1.0 {
         return None;
     }
-    let bpm = 60.0 * env_rate / lag;
-    // Ellis coloca los golpes. El BPM es el del tempograma: el intervalo
-    // medio, en cuadros de 11,6 ms, cuantiza más que el pico parabólico.
-    let beats = ellis_beats(&odf, env_rate * 60.0 / bpm);
-    if cancel_now().is_err() {
+    let coarse_raw = 60.0 * env_rate / lag;
+    // El peine solo elige la octava. El número sale de la recta de los golpes.
+    let coarse = fold_display_bpm(coarse_raw, display_lo, display_hi);
+    if !(coarse.is_finite() && coarse > 0.0) {
         return None;
     }
-    let shown = fold_display_bpm(bpm, display_lo, display_hi);
+    let (fine, fine_rate) = onset_envelope(mono, rate).unwrap_or((odf.clone(), env_rate));
+    // ×2, ×1/2, ×4/3 y ×3/4: los puntúa la envolvente, no una regla fija.
+    let metric = crate::bpm_exact::choose_metric(&fine, fine_rate, coarse);
+    // Un tono sin golpes no arma una rejilla (el seno de prueba queda por
+    // debajo de 0,05). Los clics, también con ruido, quedan por encima.
+    let evidence = crate::bpm_exact::onset_evidence(&fine, fine_rate * 60.0 / metric);
+    if evidence < 0.05 {
+        return None;
+    }
+    let beats = ellis_beats(&fine, fine_rate * 60.0 / metric);
+    if cancel_now().is_err() || beats.is_empty() {
+        return None;
+    }
+    let grid = crate::bpm_exact::grid_from_onsets(&fine, &beats, fine_rate, metric)?;
     if debug {
         let mut order: Vec<usize> = (0..lags.len()).collect();
         order.sort_by(|&a, &b| {
@@ -1019,118 +1048,32 @@ fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) 
             .map(|i| format!("{:.1}:{:.3}", 60.0 * env_rate / lags[i], comb_acc[i]))
             .collect();
         eprintln!(
-            "tempo qm rate {rate} env {env_rate:.4} odf {} wins {} top [{}] peine [{}] viterbi_lag {:.1} pico_lag {:.2} bpm {bpm:.2} mostrado {shown:.2} golpes {}",
+            "tempo qm rate {rate} env {env_rate:.4} odf {} wins {} top [{}] peine [{}] viterbi_lag {:.1} pico_lag {:.2} octava {coarse:.2} bpm {:.2} golpes {} tramos {}",
             odf.len(),
             starts.len(),
             top.join(" "),
             top_c.join(" "),
             lags.get(around).copied().unwrap_or(0.0),
             lag,
-            beats.len()
+            grid.bpm,
+            beats.len(),
+            grid.segments.len()
         );
     }
-    if shown.is_finite() && shown > 0.0 {
-        Some(shown)
-    } else {
-        None
-    }
+    Some(grid)
 }
 
-/// BPM.
-/// Con TBPM previo: desempata ×4/3 y ×3/4 y pliega a 78–165 (no se toca).
-/// Sin TBPM previo: TempoTrackV2 (dominio complejo, peine, Rayleigh, Viterbi, Ellis).
-/// El buffer que llega es el tramo a medir (la canción entera, si cabe).
+/// BPM de toda la señal. La etiqueta previa no entra: el peine solo elige
+/// la octava y la recta de los golpes da el número.
 fn detect_bpm(mono: &[f32], rate: u32, prior: Option<f64>) -> Option<f64> {
-    if prior.and_then(fix_bpm_range).is_none() {
-        return estimate_tempo_track(mono, rate);
-    }
-    let total_s = mono.len() as f64 / rate as f64;
-    let (from, len) = if total_s > 100.0 {
-        (20.0, 80.0)
-    } else {
-        (0.0, total_s)
-    };
-    let s0 = (from * rate as f64) as usize;
-    let s1 = ((from + len) * rate as f64) as usize;
-    let seg = &mono[s0.min(mono.len())..s1.min(mono.len())];
-    let hop = (rate as usize / 200).max(1); // 5 ms
-    let env_rate = rate as f64 / hop as f64;
-    let n = seg.len() / hop;
-    if n < 400 {
-        return None;
-    }
-    // Energía de la señal diferenciada (resalta golpes).
-    let mut env: Vec<f64> = Vec::with_capacity(n);
-    for i in 0..n {
-        let s = &seg[i * hop..(i + 1) * hop];
-        let mut e = 0.0;
-        let mut prev = if i == 0 { 0.0 } else { seg[i * hop - 1] as f64 };
-        for v in s {
-            let d = *v as f64 - prev;
-            e += d * d;
-            prev = *v as f64;
-        }
-        env.push((1.0 + 1000.0 * e / hop as f64).ln());
-    }
-    // Flujo positivo y centrado.
-    let mut flux: Vec<f64> = (0..n)
-        .map(|i| {
-            if i == 0 {
-                0.0
-            } else {
-                (env[i] - env[i - 1]).max(0.0)
-            }
-        })
-        .collect();
-    let mean = flux.iter().sum::<f64>() / n as f64;
-    for v in flux.iter_mut() {
-        *v -= mean;
-    }
-    let min_lag = (env_rate * 60.0 / 200.0) as usize;
-    let max_lag = (env_rate * 60.0 / 55.0) as usize;
-    if max_lag * 4 + 2 >= n {
-        return None;
-    }
-    let ac = |lag: usize| -> f64 {
-        let mut c = 0.0;
-        for i in 0..(n - lag) {
-            c += flux[i] * flux[i + lag];
-        }
-        c / (n - lag) as f64
-    };
-    let mut best_lag = 0usize;
-    let mut best = f64::MIN;
-    let mut scores: Vec<f64> = vec![0.0; max_lag + 2];
-    for lag in min_lag..=max_lag {
-        let sc = ac(lag) + 0.5 * ac(lag * 2) + 0.25 * ac((lag * 4).min(n - 2));
-        scores[lag] = sc;
-        if sc > best {
-            best = sc;
-            best_lag = lag;
-        }
-    }
-    if best_lag == 0 || best <= 0.0 {
-        return None;
-    }
-    // Interpolación parabólica del pico.
-    let mut lag_f = best_lag as f64;
-    if best_lag > min_lag && best_lag < max_lag {
-        let (a, b, c) = (scores[best_lag - 1], scores[best_lag], scores[best_lag + 1]);
-        let denom = a - 2.0 * b + c;
-        if denom.abs() > 1e-12 {
-            lag_f += 0.5 * (a - c) / denom;
-        }
-    }
-    if let Some(want) = prior.and_then(fix_bpm_range) {
-        if let Some(lag) = lag_matching_prior(lag_f, &scores, env_rate, min_lag, max_lag, want) {
-            lag_f = lag;
-        }
-        // Con TBPM previo manda el alias (±2 %). La ventana 56–180 no corre:
-        // una cumbia en 108 se queda en 108 aunque 144 puntúe más.
-        return Some(fold_bpm_band(60.0 * env_rate / lag_f));
-    }
-    Some(fold_bpm_band(60.0 * env_rate / lag_f))
+    let _ = prior;
+    estimate_tempo_track(mono, rate).and_then(fix_bpm_range)
 }
+
+fn measure_tempo_grid(mono: &[f32], rate: u32) -> Option<crate::bpm_exact::TempoGrid> {
+    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI)
+}
+
 
 /// Rejilla de golpes de un tramo: BPM medido y posición (ms absolutos en la
 /// pista) de un golpe fuerte. Los demás golpes: `beat_ms + k * 60000 / bpm`.
@@ -1158,69 +1101,20 @@ pub async fn beat_grid(input_path: String, from_ms: u64, span_secs: u32) -> Beat
         Err(_) => return none,
     };
     let mono = to_mono(&d);
-    let bpm = match detect_bpm(&mono, d.rate, None) {
-        Some(b) if b > 40.0 => b,
+    let grid = match measure_tempo_grid(&mono, d.rate) {
+        Some(g) if g.bpm > 40.0 && g.period_ms > 0.0 => g,
         _ => return none,
     };
-    let hop = (d.rate as usize / 200).max(1); // 5 ms
-    let env_rate = d.rate as f64 / hop as f64;
-    let n = mono.len() / hop;
-    if n < 400 {
-        return none;
-    }
-    let mut env: Vec<f64> = Vec::with_capacity(n);
-    for i in 0..n {
-        let s = &mono[i * hop..(i + 1) * hop];
-        let mut e = 0.0;
-        let mut prev = if i == 0 {
-            0.0
-        } else {
-            mono[i * hop - 1] as f64
-        };
-        for v in s {
-            let dv = *v as f64 - prev;
-            e += dv * dv;
-            prev = *v as f64;
-        }
-        env.push((1.0 + 1000.0 * e / hop as f64).ln());
-    }
-    let flux: Vec<f64> = (0..n)
-        .map(|i| {
-            if i == 0 {
-                0.0
-            } else {
-                (env[i] - env[i - 1]).max(0.0)
-            }
-        })
-        .collect();
-    let period = env_rate * 60.0 / bpm; // en cuadros de 5 ms
-    let steps = period.ceil() as usize;
-    let mut best_p = 0usize;
-    let mut best = f64::MIN;
-    for p in 0..steps {
-        let mut sc = 0.0;
-        let mut k = 0.0f64;
-        loop {
-            let c = p as f64 + k * period;
-            let i = c.round() as usize;
-            if i + 1 >= n {
-                break;
-            }
-            // tolerancia ±1 cuadro (5 ms)
-            let m = flux[i].max(flux[i.saturating_sub(1)]).max(flux[i + 1]);
-            sc += m;
-            k += 1.0;
-        }
-        if sc > best {
-            best = sc;
-            best_p = p;
-        }
-    }
-    let beat_ms = d.start_ms as f64 + best_p as f64 * hop as f64 * 1000.0 / d.rate as f64;
+    // El tramo medido usa su propia recta. Si hay deriva, el primer tramo
+    // es el que cubre el inicio de la ventana.
+    let (anchor_ms, bpm) = match grid.segments.first() {
+        Some(seg) if seg.period_ms > 0.0 => (seg.anchor_ms, 60000.0 / seg.period_ms),
+        _ => (grid.anchor_ms, grid.bpm),
+    };
     BeatGrid {
         ok: true,
         bpm,
-        beat_ms,
+        beat_ms: d.start_ms as f64 + anchor_ms,
     }
 }
 
@@ -1229,7 +1123,7 @@ struct Analysis {
     peak: f64,
     lead_ms: u64,
     tail_ms: u64,
-    bpm: Option<f64>,
+    grid: Option<crate::bpm_exact::TempoGrid>,
 }
 
 fn analyze_file(input_path: &str) -> Result<Analysis, String> {
@@ -1253,13 +1147,13 @@ fn analyze_file(input_path: &str) -> Result<Analysis, String> {
     let lufs = integrated_lufs(&d);
     let mono = to_mono(&d);
     let (lead_ms, tail_ms) = edge_silence_ms(&mono, d.rate);
-    let bpm = detect_bpm(&mono, d.rate, None);
+    let grid = measure_tempo_grid(&mono, d.rate);
     Ok(Analysis {
         lufs,
         peak,
         lead_ms,
         tail_ms,
-        bpm,
+        grid,
     })
 }
 
@@ -1287,8 +1181,17 @@ fn num_from(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(0.0)
 }
 
-/// Número de un TBPM ya escrito. Acepta `144`, `144.00`, espacios, nulos y
-/// una coma decimal. No pliega ni descarta por rango: si hay cifra, existe.
+/// `173.12` con punto. Nunca `17312` ni `173,12`.
+fn format_tbpm(bpm: f64) -> String {
+    format!("{:.2}", bpm)
+}
+
+/// Número de un TBPM ya escrito.
+///
+/// `144`, `144.00`, espacios y nulos. La coma decimal (`146,70`) vale como
+/// punto. Sin separador, un entero fuera de tempo que partido por 100 cae
+/// en 40–250 es BPM×100 (`17312` = 173,12, `09548` = 95,48, `08635`, `08571`).
+/// `144` se queda en 144.
 fn parse_tbpm_text(raw: &str) -> Option<(f64, String)> {
     let token = raw
         .split('\0')
@@ -1310,11 +1213,21 @@ fn parse_tbpm_text(raw: &str) -> Option<(f64, String)> {
         }
     }
     let value: f64 = num.parse().ok()?;
-    if value.is_finite() && value > 0.0 {
-        Some((value, token.to_string()))
-    } else {
-        None
+    if !(value.is_finite() && value > 0.0) {
+        return None;
     }
+    let has_sep = token.contains('.') || token.contains(',');
+    let value = if !has_sep && value > 300.0 {
+        let scaled = value / 100.0;
+        if (40.0..=250.0).contains(&scaled) {
+            scaled
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+    Some((value, token.to_string()))
 }
 
 fn decode_tbpm_body(encoding: u8, body: &[u8]) -> Option<(f64, String)> {
@@ -1410,8 +1323,12 @@ fn tbpm_in_id3(data: &[u8]) -> Option<(f64, String)> {
 
 struct StoredBpm {
     value: f64,
+    /// Texto original del frame. El medidor ya no lo copia: lo lee el test
+    /// de parseo y quien inspecciona el tag.
+    #[allow(dead_code)]
     token: String,
-    /// El frame ya está cargado en el tag. No hay que reescribirlo.
+    /// El frame ya está cargado en el tag.
+    #[allow(dead_code)]
     in_tag: bool,
 }
 
@@ -1494,7 +1411,11 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
         return Ok(false);
     }
     let mut tag = Tag::read_from_path(input_path).unwrap_or_else(|_| Tag::new());
+    if !force && is_mastered(&tag) && analysis_current(&tag) {
+        return Ok(true);
+    }
     if !force && is_mastered(&tag) {
+        refresh_analysis_tags(input_path)?;
         return Ok(true);
     }
     let a = analyze_file(input_path)?;
@@ -1504,13 +1425,17 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
     set_ext(&mut tag, KEY_LUFS, format!("{:.2}", a.lufs));
     set_ext(&mut tag, KEY_LEAD, a.lead_ms.to_string());
     set_ext(&mut tag, KEY_TAIL, a.tail_ms.to_string());
-    let stored = stored_bpm(input_path, &tag);
-    if let Some(s) = &stored {
-        if !s.in_tag {
-            tag.set_text("TBPM", s.token.clone());
-        }
-    } else if let Some(b) = a.bpm {
-        tag.set_text("TBPM", b.round().to_string());
+    if let Some(grid) = &a.grid {
+        let old = stored_bpm(input_path, &tag).map(|s| s.value).unwrap_or(0.0);
+        stamp_grid(&mut tag, grid, "FULL");
+        let name = Path::new(input_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(input_path);
+        eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
+    }
+    if let Ok(audio) = decoded_duration_ms(input_path) {
+        write_measured_duration(&mut tag, audio);
     }
     set_ext(&mut tag, KEY_V, MASTER_VERSION.to_string());
     tag.write_to_path(input_path, Version::Id3v24)
@@ -1552,26 +1477,13 @@ fn auto_detect_body(input_path: String) -> Result<f64, String> {
     let _watch = CancelWatch::enter();
     cancel_now()?;
     if is_mp3(&input_path) {
-        let tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
-        if let Some(s) = stored_bpm(&input_path, &tag) {
-            return Ok(s.value);
-        }
+        return refresh_analysis_tags(&input_path);
     }
-    // La pista completa. 150 s en Hello se quedaban en el verso (~235 BPM)
-    // y el pliegue 60–180 lo mostraba como 117,45.
     let d = decode_channels(&input_path, 0, MAX_ANALYZE_SECS, 2)
         .map_err(|e| format!("Fallo DSP: {}", e))?;
-    let mono = to_mono(&d);
-    let bpm = detect_bpm(&mono, d.rate, None)
+    let grid = measure_tempo_grid(&to_mono(&d), d.rate)
         .ok_or("Anomalía determinista: Sin periodicidad".to_string())?;
-    let rounded = bpm.round();
-    if is_mp3(&input_path) {
-        let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
-        tag.set_text("TBPM", rounded.to_string());
-        tag.write_to_path(&input_path, Version::Id3v24)
-            .map_err(|e| format!("Fallo I/O al sellar ID3: {}", e))?;
-    }
-    Ok(rounded)
+    Ok(grid.bpm)
 }
 
 // --------------------------------------------------------------------- género
@@ -2124,6 +2036,10 @@ const KEY_TRIM_TAIL: &str = "GMX_TRIM_TAIL_MS";
 const KEY_LRC_SHIFT: &str = "GMX_LRC_SHIFT";
 const KEY_BPM_OK: &str = "GMX_BPM_OK";
 const KEY_BPM_SCOPE: &str = "GMX_BPM_SCOPE";
+/// Versión del medidor de BPM, rejilla y duración. 3031 = recta de golpes.
+const KEY_ANALYSIS: &str = "GMX_ANALYSIS";
+const ANALYSIS_V: &str = "3031";
+const KEY_GRID: &str = "GMX_GRID";
 const KEY_LUFS_DONE: &str = "GMX_LUFS_DONE";
 const KEY_K: &str = "GMX_K";
 const KEY_BACKUP: &str = "GMX_BACKUP";
@@ -2565,12 +2481,109 @@ fn fix_bpm_range(bpm: f64) -> Option<f64> {
     }
 }
 
-/// Un TBPM ya escrito se respeta tal cual. El medido solo entra si no hay.
-fn resolve_bpm(measured: Option<f64>, existing: f64) -> f64 {
-    if existing.is_finite() && existing > 0.0 {
-        return existing;
+/// El medido gana. La etiqueta previa no se confirma ni se conserva como
+/// resultado: si no hay medición, no hay BPM nuevo (0 = no escribir).
+fn resolve_bpm(measured: Option<f64>, _existing: f64) -> f64 {
+    match measured {
+        Some(b) if b.is_finite() && b > 0.0 => (b * 100.0).round() / 100.0,
+        _ => 0.0,
     }
-    measured.and_then(fix_bpm_range).unwrap_or(0.0)
+}
+
+fn analysis_current(tag: &Tag) -> bool {
+    ext_text(tag, KEY_ANALYSIS).as_deref() == Some(ANALYSIS_V)
+}
+
+/// Audio ya masterizado: hay corte decidido y el −14 está sellado.
+fn audio_mastered(tag: &Tag) -> bool {
+    ext_text(tag, KEY_TRIM).is_some()
+        && ext_text(tag, KEY_LUFS_DONE).as_deref() == Some("-14")
+}
+
+fn stamp_grid(tag: &mut Tag, grid: &crate::bpm_exact::TempoGrid, scope: &str) {
+    tag.set_text("TBPM", format_tbpm(grid.bpm));
+    set_ext(
+        tag,
+        KEY_GRID,
+        crate::bpm_exact::encode_grid(grid),
+    );
+    set_ext(tag, KEY_BPM_OK, "1".to_string());
+    set_ext(tag, KEY_BPM_SCOPE, scope.to_string());
+    set_ext(tag, KEY_ANALYSIS, ANALYSIS_V.to_string());
+}
+
+fn write_measured_duration(tag: &mut Tag, audio_ms: u64) {
+    if audio_ms == 0 {
+        return;
+    }
+    let prev = tag.duration().map(|d| d as u64);
+    if prev == Some(audio_ms) {
+        return;
+    }
+    tag.set_duration(audio_ms as u32);
+    if let Some(value) = len_mismatch_value(prev, audio_ms) {
+        set_ext(tag, "GMX_LEN_MISMATCH", value);
+    }
+}
+
+/// BPM + rejilla + TLEN. No recodifica. Si la versión ya es la actual, no abre el audio.
+fn refresh_analysis_tags(path: &str) -> Result<f64, String> {
+    if !on_worker_thread() {
+        let owned = path.to_string();
+        return run_on_master_worker(move || refresh_analysis_tags(&owned));
+    }
+    if !Path::new(path).exists() {
+        return Err("Archivo no encontrado en I/O.".to_string());
+    }
+    if !is_mp3(path) {
+        return Err("Solo MP3.".to_string());
+    }
+    let mut tag = Tag::read_from_path(path).unwrap_or_else(|_| Tag::new());
+    if analysis_current(&tag) {
+        return Ok(stored_bpm(path, &tag).map(|s| s.value).unwrap_or(0.0));
+    }
+    let old = stored_bpm(path, &tag).map(|s| s.value).unwrap_or(0.0);
+    let audio = decoded_duration_ms(path)?;
+    let grid = measure_path_grid(path, false).ok_or("Sin periodicidad".to_string())?;
+    stamp_grid(&mut tag, &grid, "FULL");
+    write_measured_duration(&mut tag, audio);
+    tag.write_to_path(path, Version::Id3v24)
+        .map_err(|e| format!("Fallo I/O al guardar etiquetas: {e}"))?;
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
+    Ok(grid.bpm)
+}
+
+fn measure_path_grid(path: &str, intro: bool) -> Option<crate::bpm_exact::TempoGrid> {
+    let span = if intro {
+        60u32
+    } else {
+        MAX_ANALYZE_SECS
+    };
+    let d = decode_channels(path, 0, span, 2).ok()?;
+    measure_tempo_grid(&to_mono(&d), d.rate)
+}
+
+fn rewrite_from_tags(tag: &Tag, bpm: f64) -> MasterRewrite {
+    MasterRewrite {
+        trim_head_ms: 0,
+        trim_tail_ms: 0,
+        lead_ms: ext_text(tag, KEY_LEAD)
+            .map(|s| num_from(&s) as u32)
+            .unwrap_or(0),
+        tail_ms: ext_text(tag, KEY_TAIL)
+            .map(|s| num_from(&s) as u32)
+            .unwrap_or(0),
+        bpm,
+        lufs: ext_text(tag, KEY_LUFS).map(|s| num_from(&s)).unwrap_or(0.0),
+        lufs_applied: false,
+        bitrate_kbps: 0,
+        rewritten: false,
+        residual_ms: 0,
+    }
 }
 
 fn syncsafe_u32(b: &[u8]) -> usize {
@@ -3015,27 +3028,21 @@ fn detect_validated(
     intro: bool,
     prior: Option<f64>,
 ) -> Option<f64> {
-    let has_prior = prior.and_then(fix_bpm_range).is_some();
-    // Sin TBPM: la pista completa, desde el inicio, hasta 15 min. Un recorte
-    // de 90 o 150 s en Hello medía ~235 y el pliegue 60–180 (solo ×2/÷2)
-    // lo dejaba en 117,45. Con TBPM se queda el tramo de antes.
+    let _ = prior;
+    // La pista completa, desde el inicio, hasta 15 min. Un megamix pide solo
+    // la intro (60 s): el mismo medidor, no otro algoritmo.
     let total_s = if samples == 0 || rate == 0 {
         MAX_ANALYZE_SECS as u64
     } else {
         (samples / rate as u64).max(8)
     };
-    let (from, span) = if intro {
-        (0u32, 60u32)
-    } else if has_prior && total_s > 100 {
-        ((total_s / 2).saturating_sub(40) as u32, 80u32)
-    } else if has_prior {
-        (0u32, (total_s.min(150)) as u32)
+    let span = if intro {
+        60u32
     } else {
-        (0u32, (total_s.min(MAX_ANALYZE_SECS as u64)) as u32)
+        (total_s.min(MAX_ANALYZE_SECS as u64)) as u32
     };
-    let d = decode_channels(path, from, span.max(8), 2).ok()?;
-    let bpm = detect_bpm(&to_mono(&d), d.rate, prior)?;
-    fix_bpm_range(bpm)
+    let d = decode_channels(path, 0, span.max(8), 2).ok()?;
+    detect_bpm(&to_mono(&d), d.rate, None)
 }
 
 fn opt_i32(tag: &Tag, key: &str) -> i32 {
@@ -3068,6 +3075,8 @@ fn gmx_key_ok(key: &str) -> bool {
             | KEY_LRC_SHIFT
             | KEY_BPM_OK
             | KEY_BPM_SCOPE
+            | KEY_ANALYSIS
+            | KEY_GRID
             | KEY_LUFS_DONE
             | KEY_K
             | KEY_BACKUP
@@ -3754,6 +3763,19 @@ pub fn master_rewrite(
         return Err("Solo MP3.".to_string());
     }
     let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+    // Audio ya hecho. Versión actual: no se abre el PCM. Versión vieja o
+    // ausente: solo BPM, rejilla y duración, sin recodificar.
+    if force_head_ms < 0 && force_tail_ms < 0 && audio_mastered(&tag) {
+        if analysis_current(&tag) {
+            let bpm = stored_bpm(&input_path, &tag)
+                .map(|s| s.value)
+                .unwrap_or(0.0);
+            return Ok(rewrite_from_tags(&tag, bpm));
+        }
+        let bpm = refresh_analysis_tags(&input_path)?;
+        let tag = Tag::read_from_path(&input_path).unwrap_or(tag);
+        return Ok(rewrite_from_tags(&tag, bpm));
+    }
     let already_trim = ext_text(&tag, KEY_TRIM).is_some();
     let already_lufs = ext_text(&tag, KEY_LUFS_DONE).as_deref() == Some("-14");
     let do_trim = do_trim && !already_trim;
@@ -3924,13 +3946,14 @@ pub fn master_rewrite(
         (0u64, 0u32)
     };
     let stored = stored_bpm(&input_path, &tag);
-    let existing_bpm = stored.as_ref().map(|s| s.value).unwrap_or(0.0);
-    // Con paquetes rotos el medido sale de un PCM incompleto: no pisa el TBPM.
-    // Si el archivo ya trae TBPM, no se mide para reemplazarlo.
-    let measured_bpm = if blocked || stored.is_some() {
+    let old_bpm = stored.as_ref().map(|s| s.value).unwrap_or(0.0);
+    // Con paquetes rotos el PCM está incompleto: no se inventa un BPM.
+    // Con audio sano se mide siempre, aunque ya hubiera TBPM.
+    let grid = if blocked {
         None
     } else {
-        detect_validated(&bpm_path, samples_for_bpm, rate_for_bpm, intro_bpm, None)
+        let _ = (samples_for_bpm, rate_for_bpm);
+        measure_path_grid(&bpm_path, intro_bpm)
     };
     if let Err(e) = cancel_now() {
         if rewritten {
@@ -3938,7 +3961,7 @@ pub fn master_rewrite(
         }
         return Err(e);
     }
-    let bpm = resolve_bpm(measured_bpm, existing_bpm);
+    let bpm = grid.as_ref().map(|g| g.bpm).unwrap_or(0.0);
 
     if do_trim && !blocked {
         set_ext(&mut tag, KEY_TRIM, cut_head_ms.to_string());
@@ -3960,20 +3983,25 @@ pub fn master_rewrite(
             format!("{TP_CEILING:.6}"),
         );
     }
-    if bpm > 0.0 {
-        if let Some(s) = &stored {
-            if !s.in_tag {
-                tag.set_text("TBPM", s.token.clone());
-            }
-        } else {
-            tag.set_text("TBPM", format!("{}", bpm.round() as i32));
-        }
-        set_ext(&mut tag, KEY_BPM_OK, "1".to_string());
-        set_ext(
+    if let Some(g) = &grid {
+        stamp_grid(
             &mut tag,
-            KEY_BPM_SCOPE,
-            if intro_bpm { "INTRO" } else { "FULL" }.to_string(),
+            g,
+            if intro_bpm { "INTRO" } else { "FULL" },
         );
+        let dur_path = if rewritten {
+            bpm_path.as_str()
+        } else {
+            input_path.as_str()
+        };
+        if let Ok(audio) = decoded_duration_ms(dur_path) {
+            write_measured_duration(&mut tag, audio);
+        }
+        let name = Path::new(&input_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(input_path.as_str());
+        eprintln!("BPM_FIX {name} {old_bpm:.2}->{:.2}", g.bpm);
     }
     if blocked {
         set_ext(
@@ -4688,17 +4716,29 @@ mod master_guard_tests {
     use super::*;
 
     #[test]
-    fn el_tbpm_previo_no_se_sobrescribe() {
-        // Blondie: el archivo trae 144 y el medido es 141,18. Se queda 144.
-        assert_eq!(resolve_bpm(Some(141.18), 144.0), 144.0);
-        assert_eq!(resolve_bpm(Some(144.0), 108.0), 108.0);
-        assert_eq!(resolve_bpm(Some(148.4), 108.0), 108.0);
-        assert_eq!(resolve_bpm(Some(120.0), 108.0), 108.0);
-        assert_eq!(resolve_bpm(None, 108.0), 108.0);
-        let libre = resolve_bpm(Some(141.18), 0.0);
+    fn el_medido_pisa_la_etiqueta_previa() {
+        // Bad Case: el archivo trae 144 y el medido es 146,67. Se queda el medido.
+        assert_eq!(resolve_bpm(Some(146.67), 144.0), 146.67);
+        assert_eq!(resolve_bpm(Some(144.71), 146.70), 144.71);
+        assert_eq!(resolve_bpm(Some(141.18), 144.0), 141.18);
+        assert_eq!(resolve_bpm(None, 108.0), 0.0);
+        let libre = resolve_bpm(Some(141.184), 0.0);
         assert!((libre - 141.18).abs() < 0.011, "{libre}");
         let (v, _) = parse_tbpm_text("144.00").unwrap();
         assert_eq!(v, 144.0);
+        let (h, _) = parse_tbpm_text("17312").unwrap();
+        assert!((h - 173.12).abs() < 1e-9, "17312 → {h}");
+        let (a, _) = parse_tbpm_text("09548").unwrap();
+        assert!((a - 95.48).abs() < 1e-9, "09548 → {a}");
+        let (b, _) = parse_tbpm_text("08635").unwrap();
+        assert!((b - 86.35).abs() < 1e-9, "08635 → {b}");
+        let (c, _) = parse_tbpm_text("08571").unwrap();
+        assert!((c - 85.71).abs() < 1e-9, "08571 → {c}");
+        let (k, _) = parse_tbpm_text("146,70").unwrap();
+        assert!((k - 146.70).abs() < 1e-9, "coma → {k}");
+        assert_eq!(format_tbpm(146.666), "146.67");
+        assert!(!format_tbpm(173.12).contains(','), "el punto no es coma");
+        assert_eq!(format_tbpm(173.12), "173.12");
         let (v, _) = parse_tbpm_text(" 144 \0").unwrap();
         assert_eq!(v, 144.0);
         let (v, _) = parse_tbpm_text("144\0\0").unwrap();
@@ -5037,15 +5077,22 @@ mod master_guard_tests {
         );
         let after = Tag::read_from_path(&path_s).unwrap();
         let kept = stored_bpm(&path_s, &after).unwrap();
-        assert_eq!(kept.value, 144.0, "el TBPM quedó en {}", kept.value);
-        assert!(
-            !after
-                .get("TBPM")
-                .and_then(|f| f.content().text())
-                .unwrap_or("")
-                .contains("141"),
-            "se reescribió el frame"
-        );
+        let text = after
+            .get("TBPM")
+            .and_then(|f| f.content().text())
+            .unwrap_or("")
+            .to_string();
+        if text == "144.00" || text.starts_with("144") {
+            assert!(
+                (kept.value - 144.0).abs() < 0.02,
+                "el tono no debía inventar {}",
+                kept.value
+            );
+        } else {
+            assert!(text.contains('.'), "TBPM sin punto: {text}");
+            assert!(!text.contains(','), "TBPM con coma: {text}");
+            assert!((kept.value - 144.0).abs() > 0.5, "repitió 144 sin medirlo: {text}");
+        }
         let out = measure_stream(&path_s).unwrap();
         let out_lufs = lufs_of(&out.k_ms);
         assert!(out.true_peak <= TP_CEILING, "TP {}", out.true_peak);
@@ -5139,6 +5186,79 @@ mod master_guard_tests {
             (prior169 - 169.0).abs() < 4.0 || (prior169 - 84.5).abs() < 4.0,
             "con TBPM 169 no debía inventar otro tempo: {prior169}"
         );
+    }
+
+    fn clics_exactos(bpm: f64, seconds: f64, noise: f32, jitter: i32) -> Vec<f32> {
+        let rate = 44100.0_f32;
+        let n = (rate as f64 * seconds) as usize;
+        let mut pcm = vec![0.0f32; n];
+        let mut state = 0x00C0_FFEEu32;
+        if noise > 0.0 {
+            for v in &mut pcm {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                *v = ((state >> 8) as f32 / 16_777_216.0) * 2.0 * noise - noise;
+            }
+        }
+        let period = rate as f64 * 60.0 / bpm;
+        let mut k = 2.0_f64;
+        while (k * period) as usize + 600 < n {
+            let wobble = if jitter == 0 {
+                0
+            } else {
+                ((k as i32 * 3) % (jitter * 2 + 1)) - jitter
+            };
+            let at = (k * period).round() as i32 + wobble;
+            if at > 80 {
+                burst(&mut pcm, at as usize, rate, 12.0, 0.9);
+            }
+            k += 1.0;
+        }
+        pcm
+    }
+
+    #[test]
+    fn bpm_decimal_ruido_jitter_y_metrica() {
+        let casos = [
+            (146.67, "Palmer"),
+            (144.71, "Kiss"),
+            (104.09, "Sandra"),
+            (154.42, "Loverboy"),
+            (139.95, "Two Princes"),
+            (86.56, "Words Fell Down"),
+            (171.46, "Boys Will Be Boys"),
+            (105.75, "How Gee"),
+            (60.25, "lento"),
+            (180.0, "techo"),
+        ];
+        let mut fails = Vec::new();
+        for (bpm, name) in casos {
+            let clean = detect_bpm(&clics_exactos(bpm, 24.0, 0.0, 0), 44100, Some(999.0));
+            let got = clean.unwrap_or(0.0);
+            if (got - bpm).abs() > 0.02 {
+                fails.push(format!("{name} limpio {got:.4} vs {bpm}"));
+            }
+            let half = if bpm / 2.0 >= 60.0 { bpm / 2.0 } else { bpm * 2.0 };
+            let third = bpm * 3.0 / 4.0;
+            let fourth = bpm * 4.0 / 3.0;
+            assert!(
+                (got - half).abs() > 1.0,
+                "{name} saltó de octava a {got}"
+            );
+            if (60.0..=180.0).contains(&third) {
+                assert!((got - third).abs() > 1.0, "{name} cayó en ×3/4 {got}");
+            }
+            if (60.0..=180.0).contains(&fourth) {
+                assert!((got - fourth).abs() > 1.0, "{name} cayó en ×4/3 {got}");
+            }
+            let dirty = detect_bpm(&clics_exactos(bpm, 28.0, 0.02, 12), 44100, None).unwrap_or(0.0);
+            if (dirty - bpm).abs() > 0.02 {
+                fails.push(format!(
+                    "{name} sucio {dirty:.4} vs {bpm} Δ{:.4}",
+                    (dirty - bpm).abs()
+                ));
+            }
+        }
+        assert!(fails.is_empty(), "{}", fails.join(" | "));
     }
 
     fn tone(pcm: &mut [f32], at: usize, freq: f32, rate: f32, ms: f32, amp: f32) {

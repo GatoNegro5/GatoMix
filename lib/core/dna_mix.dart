@@ -25,6 +25,9 @@ class DnaDecision {
   final int echoDelayMs;
   final double echoFeedback;
 
+  /// De dónde salió el punto: outro, hueco o frase.
+  final String mixSource;
+
   const DnaDecision({
     required this.kind,
     required this.mixOutMs,
@@ -34,6 +37,7 @@ class DnaDecision {
     required this.bassSwap,
     required this.echoDelayMs,
     required this.echoFeedback,
+    this.mixSource = '',
   });
 
   bool get legacy => kind == DnaKind.legacy;
@@ -64,23 +68,49 @@ DnaDecision decideDna({
   bool exitLocked = false,
 }) {
   if (outgoing == null && incoming == null) {
+    final int lo = (outDurationMs * 0.60).round();
+    final int hi = (outDurationMs * 0.80).round();
+    var m = _clampWindow(genreMixOutMs, lo, hi);
+    var f = 18000;
+    if (outDurationMs > 0 && m + f > outDurationMs && outDurationMs - f >= lo) {
+      final int pulled = outDurationMs - f;
+      m = pulled > hi ? hi : pulled;
+    }
+    if (outDurationMs > 0 && m + f > outDurationMs) {
+      f = outDurationMs - m;
+      if (f < 0) f = 0;
+    }
     return DnaDecision(
       kind: DnaKind.legacy,
-      mixOutMs: genreMixOutMs,
+      mixOutMs: m,
       cueInMs: fallbackCueMs,
-      fadeMs: 18000,
+      fadeMs: f,
       lockTempo: true,
       bassSwap: true,
       echoDelayMs: 0,
       echoFeedback: 0,
+      mixSource: 'frase',
     );
   }
 
-  var mixOut = genreMixOutMs;
-  if (!exitLocked &&
-      outgoing != null &&
-      _outroFits(outgoing.outroMs, outDurationMs)) {
-    mixOut = outgoing.outroMs;
+  final int winLo = (outDurationMs * 0.60).round();
+  final int winHi = (outDurationMs * 0.80).round();
+  var source = 'frase';
+  var mixOut = _clampWindow(genreMixOutMs, winLo, winHi);
+  if (!exitLocked && outgoing != null) {
+    if (_outroFits(outgoing.outroMs, outDurationMs)) {
+      mixOut = outgoing.outroMs;
+      source = 'outro';
+    } else {
+      final int? quiet = _nearestQuiet(outgoing, mixOut, winLo, winHi);
+      if (quiet != null) {
+        mixOut = quiet;
+        source = 'hueco';
+      } else {
+        final int? phrase = _nearestDownbeat(outgoing, mixOut, winLo, winHi);
+        if (phrase != null) mixOut = phrase;
+      }
+    }
   }
 
   final double entryBpm = inBpm >= 60 && inBpm <= 200
@@ -94,15 +124,6 @@ DnaDecision decideDna({
 
   final bool voice = _hasVoice(outgoing, mixOut) || _hasVoice(incoming, cue);
   if (outgoing != null && incoming != null) {
-    if (!exitLocked && _phraseVocal(outgoing, mixOut) && _phraseVocal(incoming, cue)) {
-      final int? moved = _nearestQuiet(
-        outgoing,
-        mixOut,
-        (outDurationMs * 0.50).round(),
-        outDurationMs,
-      );
-      if (moved != null && moved != mixOut) mixOut = moved;
-    }
     if (_phraseVocal(outgoing, mixOut) && _phraseVocal(incoming, cue)) {
       final int? movedIn = _nearestQuiet(
         incoming,
@@ -123,72 +144,111 @@ DnaDecision decideDna({
         )
       : (entryBpm >= 60 ? entryBpm : inBpm);
 
+  DnaDecision seal({
+    required DnaKind kind,
+    required int cueIn,
+    required int fade,
+    required bool lock,
+    required bool bass,
+    required int echoDelay,
+    required double echoFb,
+  }) {
+    var m = mixOut;
+    var f = fade < 0 ? 0 : fade;
+    if (!exitLocked && outDurationMs > 0 && winHi >= winLo) {
+      if (m < winLo) m = winLo;
+      if (m > winHi) m = winHi;
+      if (m + f > outDurationMs && outDurationMs - f >= winLo) {
+        final int pulled = outDurationMs - f;
+        m = pulled > winHi ? winHi : pulled;
+      }
+    }
+    if (outDurationMs > 0 && m + f > outDurationMs) {
+      f = outDurationMs - m;
+      if (f < 0) f = 0;
+    }
+    return DnaDecision(
+      kind: kind,
+      mixOutMs: m,
+      cueInMs: cueIn,
+      fadeMs: f,
+      lockTempo: lock,
+      bassSwap: bass,
+      echoDelayMs: echoDelay,
+      echoFeedback: echoFb,
+      mixSource: source,
+    );
+  }
+
   if (!tempo || clash) {
     final int delay = _beatMs(outBpm >= 60 ? outBpm : inBpm);
     if (echoSupported) {
-      return DnaDecision(
+      return seal(
         kind: DnaKind.echoOut,
-        mixOutMs: mixOut,
-        cueInMs: cue,
-        fadeMs: _bars(outBpm >= 60 ? outBpm : sounded, 8),
-        lockTempo: false,
-        bassSwap: false,
-        echoDelayMs: delay,
-        echoFeedback: 0.45,
+        cueIn: cue,
+        fade: _bars(outBpm >= 60 ? outBpm : sounded, 8),
+        lock: false,
+        bass: false,
+        echoDelay: delay,
+        echoFb: 0.45,
       );
     }
     if (eqSupported) {
-      return DnaDecision(
+      return seal(
         kind: DnaKind.filterSweep,
-        mixOutMs: mixOut,
-        cueInMs: cue,
-        fadeMs: _bars(outBpm >= 60 ? outBpm : sounded, 8),
-        lockTempo: false,
-        bassSwap: false,
-        echoDelayMs: 0,
-        echoFeedback: 0,
+        cueIn: cue,
+        fade: _bars(outBpm >= 60 ? outBpm : sounded, 8),
+        lock: false,
+        bass: false,
+        echoDelay: 0,
+        echoFb: 0,
       );
     }
-    return DnaDecision(
+    return seal(
       kind: DnaKind.blendFallback,
-      mixOutMs: mixOut,
-      cueInMs: cue,
-      fadeMs: _bars(sounded, voice ? 8 : 16),
-      lockTempo: false,
-      bassSwap: false,
-      echoDelayMs: 0,
-      echoFeedback: 0,
+      cueIn: cue,
+      fade: _bars(sounded, voice ? 8 : 16),
+      lock: false,
+      bass: false,
+      echoDelay: 0,
+      echoFb: 0,
     );
   }
 
   if (!voice) {
-    return DnaDecision(
+    return seal(
       kind: DnaKind.longBlend,
-      mixOutMs: mixOut,
-      cueInMs: cue,
-      fadeMs: _bars(sounded, 16),
-      lockTempo: true,
-      bassSwap: true,
-      echoDelayMs: 0,
-      echoFeedback: 0,
+      cueIn: cue,
+      fade: _bars(sounded, 16),
+      lock: true,
+      bass: true,
+      echoDelay: 0,
+      echoFb: 0,
     );
   }
-  return DnaDecision(
+  return seal(
     kind: DnaKind.shortBlend,
-    mixOutMs: mixOut,
-    cueInMs: cue,
-    fadeMs: _bars(sounded, 8),
-    lockTempo: true,
-    bassSwap: false,
-    echoDelayMs: 0,
-    echoFeedback: 0,
+    cueIn: cue,
+    fade: _bars(sounded, 8),
+    lock: true,
+    bass: false,
+    echoDelay: 0,
+    echoFb: 0,
   );
+}
+
+int _clampWindow(int ms, int lo, int hi) {
+  if (hi < lo) return ms;
+  if (ms < lo) return lo;
+  if (ms > hi) return hi;
+  return ms;
 }
 
 bool _outroFits(int outroMs, int durationMs) {
   if (outroMs < 0 || durationMs <= 0) return false;
-  final int floor = (durationMs * 0.50).round();
-  return outroMs >= floor && outroMs < durationMs;
+  final int lo = (durationMs * 0.60).round();
+  final int hi = (durationMs * 0.80).round();
+  return outroMs >= lo && outroMs <= hi;
 }
 
 bool _bpmClose(double outBpm, double inBpm, double outRate) {
@@ -257,6 +317,29 @@ int? _nearestQuiet(PhraseTrack track, int fromMs, int lo, int hi) {
     }
   }
   return best;
+}
+
+int? _nearestDownbeat(PhraseTrack track, int fromMs, int lo, int hi) {
+  if (hi < lo) return null;
+  int? best;
+  var bestDist = 1 << 62;
+  for (final PhrasePhrase p in track.phrases) {
+    if (p.startMs < lo || p.startMs > hi) continue;
+    final int d = (p.startMs - fromMs).abs();
+    if (best == null || d < bestDist || (d == bestDist && p.startMs < best)) {
+      bestDist = d;
+      best = p.startMs;
+    }
+  }
+  return best;
+}
+
+/// Punto de género ya dentro del 60–80 % de la duración efectiva.
+int dnaPercentPoint(int effectiveMs, double fraction) {
+  if (effectiveMs <= 0) return 0;
+  final int lo = (effectiveMs * 0.60).round();
+  final int hi = (effectiveMs * 0.80).round();
+  return _clampWindow((effectiveMs * fraction).round(), lo, hi);
 }
 
 int _bars(double bpm, int bars) {
