@@ -271,22 +271,29 @@ pub fn onset_evidence(env: &[f64], period: f64) -> f64 {
     best
 }
 
-/// ×2, ×1/2, ×4/3 y ×3/4 del periodo del peine, dentro de 60–180.
-/// Elige el que la envolvente sostiene. Empate numérico: se queda el peine.
+/// ×2, ×1/2, ×4/3, ×3/4, ×3/2 y ×2/3 del periodo del peine, dentro de 60–180.
+/// El peine (factor 1) se queda salvo que otro factor lo supere por más de 1,5×.
 pub fn choose_metric(env: &[f64], env_rate: f64, coarse: f64) -> f64 {
     if !(coarse.is_finite() && coarse > 0.0) || env_rate <= 0.0 {
         return coarse;
     }
     const FACTORS: [f64; 7] = [1.0, 2.0, 0.5, 4.0 / 3.0, 3.0 / 4.0, 1.5, 2.0 / 3.0];
+    let comb_s = onset_evidence(env, env_rate * 60.0 / coarse);
     let mut best_bpm = coarse;
-    let mut best_s = -1.0;
+    let mut best_s = comb_s;
     for factor in FACTORS {
+        if (factor - 1.0).abs() <= 1e-12 {
+            continue;
+        }
         let bpm = coarse * factor;
         if !(60.0..=180.0).contains(&bpm) {
             continue;
         }
-        let period = env_rate * 60.0 / bpm;
-        let score = onset_evidence(env, period);
+        let score = onset_evidence(env, env_rate * 60.0 / bpm);
+        let beats = score > comb_s * 1.5 + 1e-9;
+        if !beats {
+            continue;
+        }
         let closer = (bpm - coarse).abs() < (best_bpm - coarse).abs() - 1e-9;
         if score > best_s + 1e-9 || ((score - best_s).abs() <= 1e-9 && closer) {
             best_s = score;
@@ -294,6 +301,39 @@ pub fn choose_metric(env: &[f64], env_rate: f64, coarse: f64) -> f64 {
         }
     }
     best_bpm
+}
+
+/// 6/8 y 12/8: el peine cae en el pulso largo (< 75). Se toma ×1,5 si la
+/// envolvente de ese tempo vale al menos la mitad de la del pulso largo.
+/// No hay pliegue ×2: 60,25 y 62 se irían al doble.
+pub fn fold_compound(env: &[f64], env_rate: f64, bpm: f64) -> f64 {
+    if !(bpm.is_finite() && bpm > 0.0 && bpm < 75.0) || env_rate <= 0.0 {
+        return bpm;
+    }
+    let up = bpm * 1.5;
+    if !(60.0..=180.0).contains(&up) {
+        return bpm;
+    }
+    let ev = onset_evidence(env, env_rate * 60.0 / bpm);
+    let ev15 = onset_evidence(env, env_rate * 60.0 / up);
+    if ev15 + 1e-12 >= ev * 0.5 {
+        up
+    } else {
+        bpm
+    }
+}
+
+/// Rechaza el tempo solo si la evidencia de onsets es baja Y el peine (o el
+/// clip) no la respalda. `windows` son las ventanas de análisis (~1,5 s).
+///
+/// Débil = pico del peine < 4× su media, o evidencia ≤ 0,003, o menos de 8
+/// ventanas (~12 s). Un peine sin energía (media ≤ 0) también es débil.
+pub fn tempo_rejected(evidence: f64, comb_peak: f64, comb_mean: f64, windows: usize) -> bool {
+    if evidence >= 0.05 {
+        return false;
+    }
+    let comb_weak = !(comb_mean > 0.0 && comb_peak >= comb_mean * 4.0);
+    comb_weak || evidence <= 0.003 || windows < 8
 }
 
 /// Octava más cercana a la métrica ya elegida, dentro de 60–180.
@@ -642,6 +682,49 @@ mod tests {
         let princes = spikes(60.0 / 139.95 * 100.0, 80);
         let p = choose_metric(&princes, 100.0, 105.0);
         assert!((p - 139.95).abs() < 1.5, "Two Princes {p}");
+    }
+
+    #[test]
+    fn el_peine_se_queda_si_otro_factor_no_lo_supera_por_15() {
+        let env = spikes(60.0 / 128.0 * 100.0, 72);
+        let picked = choose_metric(&env, 100.0, 128.0);
+        assert!(
+            (picked - 128.0).abs() < 0.2,
+            "el peine en 128 no debía moverse: {picked}"
+        );
+    }
+
+    #[test]
+    fn la_puerta_solo_rechaza_evidencia_baja_con_peine_debil() {
+        assert!(!tempo_rejected(0.05, 1.0, 1.0, 2));
+        assert!(!tempo_rejected(0.20, 0.0, 0.0, 1));
+        // Evidencia < 0,05, peine fuerte (≥ 4×), > 0,003 y ≥ 8 ventanas: se queda.
+        assert!(!tempo_rejected(0.04, 8.0, 1.0, 8));
+        assert!(tempo_rejected(0.04, 3.9, 1.0, 20), "pico < 4× media");
+        assert!(tempo_rejected(0.04, 0.0, 0.0, 20), "peine mudo");
+        assert!(tempo_rejected(0.003, 8.0, 1.0, 20), "evidencia ≤ 0,003");
+        assert!(tempo_rejected(0.04, 8.0, 1.0, 7), "menos de 8 ventanas");
+        assert!(!tempo_rejected(0.049, 4.0, 1.0, 8));
+    }
+
+    #[test]
+    fn el_compuesto_pliega_a_tres_medios_y_no_al_doble() {
+        // Pulso largo ~63,3 con los golpes en 95 (6/8). ×1,5 entra.
+        let compound = spikes(60.0 / 95.0 * 100.0, 80);
+        let folded = fold_compound(&compound, 100.0, 95.0 / 1.5);
+        assert!(
+            (folded - 95.0).abs() < 0.05,
+            "6/8 debía plegar a 95 y salió {folded}"
+        );
+        // 62 y 60,25 son el tactus: ×1,5 no se sostiene. ×2 no existe.
+        let hello = spikes(60.0 / 62.0 * 100.0, 80);
+        let stay = fold_compound(&hello, 100.0, 62.0);
+        assert!((stay - 62.0).abs() < 1e-9, "62 no se pliega: {stay}");
+        assert!((stay - 124.0).abs() > 1.0);
+        let lento = spikes(60.0 / 60.25 * 100.0, 90);
+        let stay2 = fold_compound(&lento, 100.0, 60.25);
+        assert!((stay2 - 60.25).abs() < 1e-9, "60.25 no se pliega: {stay2}");
+        assert!((fold_compound(&lento, 100.0, 90.0) - 90.0).abs() < 1e-9);
     }
 
     fn grid_from_beats_direct(times: &[f64], coarse: f64) -> TempoGrid {
