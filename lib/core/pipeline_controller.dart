@@ -25,23 +25,91 @@ List<String> ytDlpAbrDownloadArgs({
 List<String> ytDlpRedownloadArgs({
   required String output,
   required String url,
-}) => <String>['--rm-cache-dir', '-f', 'bestaudio/best', '-o', output, url];
+}) => <String>[
+  '--rm-cache-dir',
+  '-f',
+  'bestaudio[ext=m4a]/bestaudio/best',
+  '-o',
+  output,
+  url,
+];
 
 class MasterBpmSettle {
   final bool failed;
   final double bpm;
-  const MasterBpmSettle({required this.failed, required this.bpm});
+
+  /// Cierto si [bpm] es el promedio de la carpeta, no una medición.
+  final bool estimated;
+  const MasterBpmSettle({
+    required this.failed,
+    required this.bpm,
+    this.estimated = false,
+  });
 }
 
-/// BPM <= 0 al terminar una pista: se re-mide una vez. Si sigue en 0,
-/// la pista queda en `failed` con razón `bpm` y el lote no se marca
-/// `completed`.
+/// Promedio redondeado al entero de los BPM > 0.
+/// Los ceros y los negativos no entran. Null si no queda ninguno.
+int? averageValidBpm(Iterable<num> values) {
+  var sum = 0.0;
+  var count = 0;
+  for (final num value in values) {
+    if (value <= 0) continue;
+    sum += value.toDouble();
+    count++;
+  }
+  if (count == 0) return null;
+  final int rounded = (sum / count).round();
+  if (rounded <= 0) return null;
+  return rounded;
+}
+
+/// BPM del índice de la carpeta (número suelto o `{bpm, key}`).
+double indexBpmValue(dynamic value) {
+  if (value is num) return value.toDouble();
+  if (value is Map && value['bpm'] is num) {
+    return (value['bpm'] as num).toDouble();
+  }
+  return 0;
+}
+
+/// BPM de las otras pistas de la misma carpeta, tal como están en el
+/// índice. [excludePath] no entra. Una clave sin carpeta se toma de
+/// esta carpeta; una ruta de otra carpeta no.
+List<num> otherFolderBpms(Map<String, dynamic> index, String excludePath) {
+  final String exclude = excludePath.replaceAll('\\', '/');
+  final int slash = exclude.lastIndexOf('/');
+  final String excludeDir = slash >= 0
+      ? exclude.substring(0, slash).toLowerCase()
+      : '';
+  final String excludeName =
+      (slash >= 0 ? exclude.substring(slash + 1) : exclude).toLowerCase();
+  final List<num> out = <num>[];
+  for (final MapEntry<String, dynamic> entry in index.entries) {
+    final String key = entry.key.replaceAll('\\', '/');
+    final int keySlash = key.lastIndexOf('/');
+    final String name = (keySlash >= 0 ? key.substring(keySlash + 1) : key)
+        .toLowerCase();
+    if (name == excludeName) continue;
+    if (keySlash >= 0 && excludeDir.isNotEmpty) {
+      final String dir = key.substring(0, keySlash).toLowerCase();
+      if (dir != excludeDir) continue;
+    }
+    out.add(indexBpmValue(entry.value));
+  }
+  return out;
+}
+
+/// BPM <= 0 al terminar una pista: se re-mide una vez. Si sigue en 0 y
+/// [folderBpm] es el promedio de la carpeta, esa cifra se acepta. Si no
+/// hay promedio, la pista queda en `failed` con razón `bpm` y el lote no
+/// se marca `completed`.
 Future<MasterBpmSettle> settleMasterBpm({
   required Map<String, dynamic> checkpoint,
   required String fileName,
   required double measured,
   required Future<double> Function() remeasure,
   String? logDir,
+  int? folderBpm,
 }) async {
   var bpm = measured;
   if (bpm <= 0) {
@@ -50,6 +118,19 @@ Future<MasterBpmSettle> settleMasterBpm({
     } catch (_) {
       bpm = 0;
     }
+  }
+  if (bpm <= 0 && folderBpm != null && folderBpm > 0) {
+    if (logDir != null && logDir.isNotEmpty) {
+      GatomixLog.append(
+        logDir,
+        'AVISO $fileName BPM estimado $folderBpm (promedio carpeta)',
+      );
+    }
+    return MasterBpmSettle(
+      failed: false,
+      bpm: folderBpm.toDouble(),
+      estimated: true,
+    );
   }
   if (bpm > 0) {
     return MasterBpmSettle(failed: false, bpm: bpm);

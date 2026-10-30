@@ -748,17 +748,33 @@ class DspNlpWorkspace extends ConsumerWidget {
                   await logSong(0);
                   return;
                 }
+                final String songPath = outcome.path;
+                final int? folderBpm = averageValidBpm(
+                  otherFolderBpms(
+                    readDjMetadata(File(songPath).parent.path),
+                    songPath,
+                  ),
+                );
                 final MasterBpmSettle bpmSettle = await settleMasterBpm(
                   checkpoint: checkpoint,
                   fileName: originalName,
-                  measured: readTbpmSync(outcome.path),
+                  measured: readTbpmSync(songPath),
                   remeasure: () => rust_dsp.autoDetectAndInjectBpm(
-                    inputPath: outcome.path,
+                    inputPath: songPath,
                   ),
                   logDir: targetPath,
+                  folderBpm: folderBpm,
                 );
                 if (bpmSettle.failed) {
                   debugPrint('MASTER BPM 0 failed $originalName');
+                } else if (bpmSettle.estimated) {
+                  TrackTags.forget(songPath);
+                  TrackTags.rememberBpm(songPath, bpmSettle.bpm);
+                  saveTrackMusic(songPath, bpm: bpmSettle.bpm);
+                  forgetKnownBpm(songPath);
+                  forgetLiveDjBpm(songPath);
+                  forgetStoredGrid(songPath);
+                  (checkpoint['processed'] as List).add(originalName);
                 } else {
                   final String? miss = skipIndex.record(outcome.path);
                   skipIndex.save();

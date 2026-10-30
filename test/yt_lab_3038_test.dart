@@ -18,13 +18,12 @@ void main() {
     File(path).writeAsStringSync(body);
   }
 
-  test('la re-descarga pide bestaudio/best y no android_vr', () {
+  test('la re-descarga prefiere m4a y no android_vr', () {
     final List<String> args = ytDlpRedownloadArgs(
       output: 'out.%(ext)s',
       url: 'https://youtube.com/watch?v=abc',
     );
-    expect(args, contains('bestaudio/best'));
-    expect(args, contains('-f'));
+    expect(args[args.indexOf('-f') + 1], 'bestaudio[ext=m4a]/bestaudio/best');
     expect(args.join(' '), isNot(contains('android_vr')));
     expect(args.join(' '), isNot(contains('140/bestaudio')));
     expect(args, contains('https://youtube.com/watch?v=abc'));
@@ -71,9 +70,8 @@ void main() {
       masterCheckpointStatus(checkpoint: checkpoint, critical: false),
       'incomplete',
     );
-    final String log = File(
-      '${dir.path}${Platform.pathSeparator}.gatomix.log',
-    ).readAsStringSync();
+    final String log = File('${dir.path}${Platform.pathSeparator}.gatomix.log')
+        .readAsStringSync();
     expect(log, contains('AVISO tema.mp3 BPM 0.0 incompleta: bpm'));
   });
 
@@ -158,9 +156,9 @@ void main() {
     expect(File('${lab.path}${sep}tema.lrc.bak').existsSync(), isFalse);
     expect(File('${lab.path}${sep}tema.gmx_words.json').existsSync(), isFalse);
 
-    final Map<String, dynamic> reg =
-        jsonDecode(File('${lab.path}${sep}$labRegistryName').readAsStringSync())
-            as Map<String, dynamic>;
+    final Map<String, dynamic> reg = jsonDecode(
+      File('${lab.path}${sep}$labRegistryName').readAsStringSync(),
+    ) as Map<String, dynamic>;
     expect(reg.containsKey('tema.mp3'), isFalse);
     expect(reg['otra.mp3'], 'queda');
 
