@@ -15,6 +15,7 @@ import '../../core/lrc_timeline.dart';
 import '../../core/net/safe_download.dart';
 import '../../core/track_name_clean.dart';
 
+import 'package:gatomix/core/pipeline_controller.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../providers/nlp_provider.dart';
@@ -366,7 +367,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
         Media(
           directStreamUrl,
           httpHeaders: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           },
         ),
         play: true,
@@ -509,17 +511,10 @@ class _YoutubeSearchAndDownloadWorkspaceState
           throw Exception("Fallo al bajar el audio (archivo vacío).");
         }
       } else {
-        final process = await Process.start(ytdlpPath, [
-          '--rm-cache-dir',
-          '-f',
-          // De mejor a peor calidad entre los AAC/M4A que Rust decodifica.
-          'bestaudio[ext=m4a]/141/140/bestaudio',
-          '--print',
-          '%(abr)s',
-          '-o',
-          tempRawPath,
-          targetUrl,
-        ]);
+        final process = await Process.start(
+          ytdlpPath,
+          ytDlpAbrDownloadArgs(output: tempRawPath, url: targetUrl),
+        );
 
         String errorTrace = "";
         String abrOut = "";
@@ -994,7 +989,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
                 margin: const EdgeInsets.symmetric(horizontal: 15),
               ),
               Tooltip(
-                message: "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
+                message:
+                    "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
                 child: Row(
                   children: [
                     const Icon(
@@ -1366,7 +1362,8 @@ class _PreIngestModalState extends State<PreIngestModal> {
                   filled: true,
                   fillColor: Color(0xFF0A0A0A),
                   border: OutlineInputBorder(),
-                  hintText: "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
+                  hintText:
+                      "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
                   hintStyle: TextStyle(color: Colors.white24),
                 ),
               ),

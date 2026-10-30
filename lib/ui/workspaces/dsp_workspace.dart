@@ -15,6 +15,7 @@ import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/master_cool.dart';
 import '../../core/master_skip.dart';
+import '../../core/pipeline_controller.dart';
 import '../../core/queue_bpm.dart';
 import '../../core/stored_grid.dart';
 import '../../services/track_tags.dart';
@@ -747,23 +748,36 @@ class DspNlpWorkspace extends ConsumerWidget {
                   await logSong(0);
                   return;
                 }
-                final String? miss = skipIndex.record(outcome.path);
-                skipIndex.save();
-                final String? bucket = checkpointBucket(
-                  lyricRetry: outcome.lyric == LyricStatus.retry,
-                  miss: miss,
+                final MasterBpmSettle bpmSettle = await settleMasterBpm(
+                  checkpoint: checkpoint,
+                  fileName: originalName,
+                  measured: readTbpmSync(outcome.path),
+                  remeasure: () => rust_dsp.autoDetectAndInjectBpm(
+                    inputPath: outcome.path,
+                  ),
+                  logDir: targetPath,
                 );
-                if (bucket == 'processed') {
-                  (checkpoint['processed'] as List).add(originalName);
-                } else if (bucket == 'incomplete') {
-                  final Map<String, dynamic> inc =
-                      (checkpoint['incomplete'] as Map<String, dynamic>?) ??
-                      <String, dynamic>{};
-                  inc[originalName] = outcome.detail.isEmpty
-                      ? miss
-                      : '$miss · ${outcome.detail}';
-                  checkpoint['incomplete'] = inc;
-                  debugPrint('MASTER incompleta ($miss) $originalName');
+                if (bpmSettle.failed) {
+                  debugPrint('MASTER BPM 0 failed $originalName');
+                } else {
+                  final String? miss = skipIndex.record(outcome.path);
+                  skipIndex.save();
+                  final String? bucket = checkpointBucket(
+                    lyricRetry: outcome.lyric == LyricStatus.retry,
+                    miss: miss,
+                  );
+                  if (bucket == 'processed') {
+                    (checkpoint['processed'] as List).add(originalName);
+                  } else if (bucket == 'incomplete') {
+                    final Map<String, dynamic> inc =
+                        (checkpoint['incomplete'] as Map<String, dynamic>?) ??
+                        <String, dynamic>{};
+                    inc[originalName] = outcome.detail.isEmpty
+                        ? miss
+                        : '$miss · ${outcome.detail}';
+                    checkpoint['incomplete'] = inc;
+                    debugPrint('MASTER incompleta ($miss) $originalName');
+                  }
                 }
               } finally {
                 tick.cancel();
@@ -918,7 +932,10 @@ class DspNlpWorkspace extends ConsumerWidget {
         await ref.read(dspWorkerProvider).generateStaticBpmCache(targetPath);
 
         if (criticalFailureMessage == null) {
-          checkpoint['status'] = 'completed';
+          checkpoint['status'] = masterCheckpointStatus(
+            checkpoint: checkpoint,
+            critical: false,
+          );
           checkpoint['timestamp'] = DateTime.now().toIso8601String();
           persistCheckpoint();
         }

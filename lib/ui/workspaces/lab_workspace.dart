@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:gatomix/core/brand_paths.dart';
+import 'package:gatomix/core/gatomix_store.dart';
+import 'package:gatomix/core/pipeline_controller.dart';
 import 'package:gatomix/core/lab_quarantine.dart' as labq;
 import 'package:gatomix/core/id3_names.dart';
 import 'package:gatomix/core/lyric_files.dart';
@@ -530,6 +532,19 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
     } catch (_) {}
   }
 
+  void _reportRescueIssue(String message, String logDir) {
+    debugPrint('🔴 [LAB RESCATE] $message');
+    GatomixLog.append(logDir, 'LAB RESCATE $message');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('🔴 $message'),
+        backgroundColor: Colors.redAccent,
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
   void _scheduleRescueDelivery({
     required String audioPath,
     required String originDir,
@@ -543,10 +558,13 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           final String karaoke = KaraokeEngine.karaokePathFor(audioPath);
           includeKaraoke = done > 0 && File(karaoke).existsSync();
           if (!includeKaraoke) {
-            debugPrint('🔴 [LAB RESCATE] Karaoke no quedó listo: $audioPath');
+            _reportRescueIssue(
+              'Karaoke no quedó listo: $audioPath',
+              File(audioPath).parent.path,
+            );
           }
         } catch (e) {
-          debugPrint('🔴 [LAB RESCATE] Karaoke falló: $e');
+          _reportRescueIssue('Karaoke falló: $e', File(audioPath).parent.path);
         }
       }
       try {
@@ -556,7 +574,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           includeKaraoke: includeKaraoke,
         );
       } catch (e) {
-        debugPrint('🔴 [LAB RESCATE] No se pudo enviar al origen: $e');
+        _reportRescueIssue(
+          'No se pudo enviar al origen: $e',
+          File(audioPath).parent.path,
+        );
       }
     });
   }
@@ -674,16 +695,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       statusNotifier.value =
           "1/6. Descargando stream crudo nativo (Bypass DRM)...";
 
-      final process = await Process.start(ytdlpPath, [
-        '--rm-cache-dir',
-        '-f',
-        '140/bestaudio',
-        '--extractor-args',
-        'youtube:player_client=android_vr',
-        '-o',
-        '$tempAudioPrefix.%(ext)s',
-        url,
-      ]);
+      final process = await Process.start(
+        ytdlpPath,
+        ytDlpRedownloadArgs(output: '$tempAudioPrefix.%(ext)s', url: url),
+      );
 
       String errorTrace = "";
       process.stdout.listen((_) {});

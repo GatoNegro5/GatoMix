@@ -293,23 +293,26 @@ List<String> deleteStaleKaraokeSync(String audioPath) {
   return gone;
 }
 
-/// Tras el rescate: mp3, .lrc y, si [includeKaraoke], el `_K` del mismo base.
+/// Tras el rescate: mp3, .lrc, .lrc.bak, .gmx_words.json y, si
+/// [includeKaraoke], el `_K` (mp3 y .lrc) del mismo base.
 /// Si el audio de destino es otro archivo, no mueve nada.
+/// Tras una entrega buena, quita la pista de [labRegistryName].
 void deliverRescuedTrackSync(
   String audioPath,
   String originDir, {
   required bool includeKaraoke,
 }) {
-  final String audioDest = '$originDir$_sep${_nameOf(audioPath)}';
+  final String audioName = _nameOf(audioPath);
+  final String audioDest = '$originDir$_sep$audioName';
   if (File(audioDest).existsSync() && !_sameFile(audioPath, audioDest)) {
     return;
   }
-  final List<String> srcs = <String>[audioPath, lrcBesideAudio(audioPath)];
-  if (includeKaraoke) {
-    srcs.add(karaokeMp3Beside(audioPath));
-    final String klrc = karaokeLrcBeside(audioPath);
-    if (File(klrc).existsSync()) srcs.add(klrc);
-  }
+  final String kMp3 = karaokeMp3Beside(audioPath);
+  final String kLrc = karaokeLrcBeside(audioPath);
+  final List<String> srcs = companionsOf(audioPath).where((String p) {
+    if (includeKaraoke) return true;
+    return !_sameFile(p, kMp3) && !_sameFile(p, kLrc);
+  }).toList();
   for (final String p in srcs) {
     if (!File(p).existsSync()) continue;
     final String dest = '$originDir$_sep${_nameOf(p)}';
@@ -317,6 +320,12 @@ void deliverRescuedTrackSync(
     if (File(dest).existsSync()) continue;
     moveOneNoOverwriteSync(p, dest);
   }
+  if (!File(audioDest).existsSync()) return;
+  final File regF = File('${_dirOf(audioPath)}$_sep$labRegistryName');
+  if (!regF.existsSync()) return;
+  final Map<String, dynamic> reg = _readJson(regF);
+  if (reg.remove(audioName) == null) return;
+  _writeJson(regF, reg);
 }
 
 /// Vuelve a armar el mapa del LAB con lo que hay ahora en la carpeta.

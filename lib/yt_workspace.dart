@@ -5,6 +5,7 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:file_selector/file_selector.dart';
 
 // 🛠️ INYECTADO: Backend FFI Nativo y Providers para Auto-Masterización
+import 'package:gatomix/core/pipeline_controller.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import 'providers/metadata_provider.dart';
 import 'providers/nlp_provider.dart';
@@ -476,16 +477,10 @@ class _YoutubeSearchAndDownloadWorkspaceState
             "Descargando stream crudo vía Android VR (Anti-Throttle)...",
       );
 
-      final process = await Process.start(ytdlpPath, [
-        '--rm-cache-dir',
-        '-f',
-        '140/bestaudio[ext=m4a]/bestaudio',
-        '--extractor-args',
-        'youtube:player_client=android_vr',
-        '-o',
-        tempRawPath,
-        targetUrl,
-      ]);
+      final process = await Process.start(
+        ytdlpPath,
+        ytDlpRedownloadArgs(output: tempRawPath, url: targetUrl),
+      );
 
       String errorTrace = "";
       process.stdout.listen((_) {});
