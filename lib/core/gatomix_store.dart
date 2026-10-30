@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -77,6 +78,20 @@ class GatomixStore {
 
   /// Lecturas reales de `.gatomix.json` (no los aciertos de caché).
   static int debugDiskReads = 0;
+
+  /// Escrituras reales de `.gatomix.json` (síncronas y asíncronas).
+  static int debugDiskWrites = 0;
+
+  static final Map<String, Future<void>> _asyncLocks = <String, Future<void>>{};
+
+  /// Olvida lo leído de [dirs]. Lo usa quien dejó que otro isolate leyera o
+  /// escribiera esas carpetas: la próxima lectura va al disco.
+  static void forget(Iterable<String> dirs) {
+    for (final String dir in dirs) {
+      _docs.remove(dir);
+    }
+    generation++;
+  }
 
   /// Cierto si el documento de [dir] ya se leyó (o se escribió) en este proceso.
   static bool holdsDocument(String dir) => _docs.containsKey(dir);
@@ -187,6 +202,83 @@ class GatomixStore {
     final Map<String, dynamic>? doc = _read(dir);
     if (doc != null && doc.containsKey(key)) return doc[key];
     return _legacySection(dir, key);
+  }
+
+  /// Una lectura y una escritura atómica asíncrona de la carpeta [dir].
+  /// [edit] recibe el documento y devuelve cierto si cambió algo; si no
+  /// cambió, no se escribe. Las llamadas de una misma carpeta van en fila.
+  static Future<bool> editAsync(
+    String dir,
+    bool Function(Map<String, dynamic> doc) edit,
+  ) {
+    final Completer<bool> done = Completer<bool>();
+    final Future<void> prev = _asyncLocks[dir] ?? Future<void>.value();
+    final Future<void> next = prev.catchError((Object _) {}).then((_) async {
+      try {
+        done.complete(await _editNow(dir, edit));
+      } catch (_) {
+        done.complete(false);
+      }
+    });
+    _asyncLocks[dir] = next;
+    return done.future;
+  }
+
+  static Future<bool> _editNow(
+    String dir,
+    bool Function(Map<String, dynamic> doc) edit,
+  ) async {
+    if (dir.isEmpty) return false;
+    migrate(dir);
+    Map<String, dynamic>? doc = _docs[dir];
+    if (doc == null) {
+      final File f = fileOf(dir);
+      Map<String, dynamic> read = <String, dynamic>{'schema': 1};
+      if (await f.exists()) {
+        try {
+          debugDiskReads++;
+          final Object? d = jsonDecode(await f.readAsString());
+          if (d is! Map) return false;
+          read = Map<String, dynamic>.from(d);
+        } catch (_) {
+          return false;
+        }
+      }
+      doc = _docs[dir] ?? read;
+      _docs[dir] = doc;
+    }
+    if (!edit(doc)) return true;
+    return _writeAsync(dir, doc);
+  }
+
+  static Future<bool> _writeAsync(String dir, Map<String, dynamic> doc) async {
+    try {
+      doc['schema'] = 1;
+      final String text = jsonEncode(doc);
+      final Object? parsed = jsonDecode(text);
+      if (parsed is! Map) return false;
+      final File dest = fileOf(dir);
+      final File tmp = File('${dest.path}.tmp');
+      await tmp.writeAsString(text, flush: true);
+      final Object? back = jsonDecode(await tmp.readAsString());
+      if (!jsonEqual(back, parsed)) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+        return false;
+      }
+      if (await dest.exists()) await dest.delete();
+      await tmp.rename(dest.path);
+      hideOnWindows(dest.path);
+      _docs[dir] = doc;
+      _migratedClean.add(dir);
+      debugDiskWrites++;
+      generation++;
+      return true;
+    } catch (_) {
+      _docs.remove(dir);
+      return false;
+    }
   }
 
   static void putSection(String dir, String key, Object? value) {
@@ -402,6 +494,7 @@ class GatomixStore {
       hideOnWindows(dest.path);
       _docs[dir] = doc;
       _migratedClean.add(dir);
+      debugDiskWrites++;
       generation++;
       return true;
     } catch (_) {
@@ -426,20 +519,68 @@ void writeDjMetadata(String dir, Map<String, dynamic> data) =>
 /// No toca el audio. Un BPM 0 no pisa uno que ya estaba.
 void saveTrackMusic(String path, {required double bpm, String? camelot}) {
   if (path.isEmpty) return;
-  final String? key = camelot?.trim();
-  final bool hasKey = key != null && key.isNotEmpty;
-  if (bpm <= 0 && !hasKey) return;
   final String dir = File(path).parent.path;
   final Map<String, dynamic> map = readDjMetadata(dir);
-  String? slot;
-  dynamic prev;
-  final String want = audioPathKey(path);
-  for (final MapEntry<String, dynamic> e in map.entries) {
-    if (audioPathKey(e.key) != want) continue;
-    slot = e.key;
-    prev = e.value;
-    break;
+  if (!_mergeTrackMusic(map, null, path, bpm, camelot)) return;
+  writeDjMetadata(dir, map);
+}
+
+typedef TrackMusic = ({String path, double bpm, String? camelot});
+
+/// Igual que [saveTrackMusic] para muchas pistas: por carpeta, una lectura y
+/// una escritura atómica asíncrona. No bloquea el hilo de la interfaz.
+Future<void> saveTrackMusicBatch(Iterable<TrackMusic> items) async {
+  final Map<String, List<TrackMusic>> byDir = <String, List<TrackMusic>>{};
+  for (final TrackMusic t in items) {
+    if (t.path.isEmpty) continue;
+    byDir.putIfAbsent(File(t.path).parent.path, () => <TrackMusic>[]).add(t);
   }
+  for (final MapEntry<String, List<TrackMusic>> e in byDir.entries) {
+    await GatomixStore.editAsync(e.key, (Map<String, dynamic> doc) {
+      final dynamic raw = doc['djMetadata'];
+      final Map<String, dynamic> map = raw is Map
+          ? Map<String, dynamic>.from(raw)
+          : <String, dynamic>{};
+      final Map<String, String> slots = <String, String>{
+        for (final String k in map.keys) audioPathKey(k): k,
+      };
+      var changed = false;
+      for (final TrackMusic t in e.value) {
+        if (_mergeTrackMusic(map, slots, t.path, t.bpm, t.camelot)) {
+          changed = true;
+        }
+      }
+      if (changed) doc['djMetadata'] = map;
+      return changed;
+    });
+  }
+}
+
+/// Mezcla BPM/tonalidad de [path] en [map]. Cierto si [map] cambió.
+/// [slots] (clave de ruta -> clave en [map]) evita recorrer todo el mapa
+/// por pista cuando se guardan muchas; se mantiene al día.
+bool _mergeTrackMusic(
+  Map<String, dynamic> map,
+  Map<String, String>? slots,
+  String path,
+  double bpm,
+  String? camelot,
+) {
+  final String? key = camelot?.trim();
+  final bool hasKey = key != null && key.isNotEmpty;
+  if (bpm <= 0 && !hasKey) return false;
+  final String want = audioPathKey(path);
+  String? slot;
+  if (slots != null) {
+    slot = slots[want];
+  } else {
+    for (final String k in map.keys) {
+      if (audioPathKey(k) != want) continue;
+      slot = k;
+      break;
+    }
+  }
+  final dynamic prev = slot == null ? null : map[slot];
   var stored = bpm;
   if (stored <= 0 && prev is num) stored = prev.toDouble();
   if (stored <= 0 && prev is Map && prev['bpm'] is num) {
@@ -451,13 +592,15 @@ void saveTrackMusic(String path, {required double bpm, String? camelot}) {
       prev['key'] is String) {
     storedKey = (prev['key'] as String).trim();
   }
-  if (stored <= 0 && (storedKey == null || storedKey.isEmpty)) return;
+  if (stored <= 0 && (storedKey == null || storedKey.isEmpty)) return false;
   final Object value = (storedKey == null || storedKey.isEmpty)
       ? stored
       : <String, dynamic>{if (stored > 0) 'bpm': stored, 'key': storedKey};
+  if (slots != null && slot == path && jsonEqual(prev, value)) return false;
   if (slot != null && slot != path) map.remove(slot);
   map[path] = value;
-  writeDjMetadata(dir, map);
+  slots?[want] = path;
+  return true;
 }
 
 /// Lo que escribe el índice de BPM. No borra una tonalidad `{bpm, key}`

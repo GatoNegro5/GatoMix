@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/audio_path.dart';
+import 'package:gatomix/core/dj_trace.dart';
 import 'package:gatomix/core/gatomix_radio.dart';
 import 'package:gatomix/core/livedj_next.dart';
 import 'package:gatomix/providers/livedj_provider.dart';
@@ -39,6 +40,8 @@ void main() {
       overrides: <Override>[liveDjProvider.overrideWith(_Live.new)],
     );
     dj = box.read(liveDjProvider.notifier);
+    djTraceFileOverride = '${dir.path}${Platform.pathSeparator}trace.txt';
+    dj.useSessionFile('${dir.path}${Platform.pathSeparator}liveDj.json');
     dj.useRadioLibrary(dir.path);
     dj.seedRadioIndex(genre: 'bailable', files: files);
     dj.seedRadio(
@@ -49,6 +52,7 @@ void main() {
 
   tearDown(() {
     box.dispose();
+    djTraceFileOverride = null;
     try {
       dir.deleteSync(recursive: true);
     } catch (_) {}
@@ -126,5 +130,31 @@ void main() {
     expect(dj.radioPendingReadyNow, isNotNull);
     dj.showRadioGenre('bailable');
     expect(dj.radioPendingReadyNow, isNull);
+  });
+
+  test('plan guardado con menos pistas que el pool se rearma completo', () async {
+    dj.seedRadio(
+      memory: RadioMemory.empty.putPlan(
+        'bailable',
+        RadioPlan(order: files.sublist(0, 2)),
+      ),
+      genre: 'bailable',
+    );
+    expect(dj.radioMemoryNow.planOf('bailable')!.order.length, 2);
+    await dj.rearmRadioIfShort();
+    await dj.flushRadioSave();
+    final RadioPlan plan = dj.radioMemoryNow.planOf('bailable')!;
+    expect(plan.order.length, 10);
+    expect(plan.order.map(audioPathKey).toSet().length, 10);
+    expect(plan.order.every(files.contains), isTrue);
+    expect(upcoming().length, 10);
+    final File trace = File(djTraceFileOverride!);
+    expect(trace.existsSync(), isTrue);
+    expect(trace.readAsStringSync(), contains('RADIO PLAN CORTO'));
+  });
+
+  test('plan completo no se rearma', () async {
+    await dj.rearmRadioIfShort();
+    expect(dj.radioMemoryNow.planOf('bailable')!.order, files);
   });
 }

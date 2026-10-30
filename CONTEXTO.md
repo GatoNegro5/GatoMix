@@ -79,3 +79,7 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 - 3.0.34+53: Radio = UN plan con todas las pistas del filtro (Todo = todo ReGenial); la cola muestra el plan entero desde su posición; solo la próxima se precalcula; al terminar se rearma con orden distinto y con todas.
   Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, memoria de Radio por filtro, pausa de mezcla.
   Se elimina: NADA (el tope de 3 próximas de 3.0.33 se quita por pedido)
+- 3.0.35+54: cuelgue al cargar carpeta: `saveTrackMusicBatch` (una lectura y una escritura asíncrona atómica por carpeta) en `_insertLiveRandom`/`addAllTracks`; `_applyLiveShuffleBank` (migrar, BPM, ola, orden armónico, memoria de Shuffle) y los `existsSync` de `loadPlaylist` van fuera del hilo de la interfaz. Radio: al encender o cambiar filtro, un plan guardado con menos pistas que el pool se rearma con todo el pool (`_ensureRadioAssemble` con replace). BPM del Live DJ en la fila y el distintivo se muestra entero (`bpm.round()`). Shuffle deja el modo random al instante y la lista entra al terminar. Las pruebas usan raíz, JSON de radio, sesión y trace temporales.
+  Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, memoria de Radio por filtro, pausa de mezcla, cola estable (lo añadido durante el armado del Shuffle se anexa).
+  Se elimina: NADA
+  Riesgo: UI solo el texto del BPM (entero, más corto; sin overflow); las 4 plataformas comparten el código (Windows, Android, macOS, iPhone); no cambia audio.

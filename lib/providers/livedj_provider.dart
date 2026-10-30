@@ -187,6 +187,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // La pista que sonaba antes de la que entra. El fallback no puede elegirla.
   String? _radioPrevious;
   Future<void> _queueAddChain = Future<void>.value();
+
+  @visibleForTesting
+  Future<void> get addSettled => _queueAddChain;
   final Set<String> _queueAddPending = <String>{};
   int _addEpoch = 0;
   bool _queueHold = false;
@@ -775,7 +778,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return null;
   }
 
-  String _sessionFilePath() => liveDjStatePath();
+  String? _sessionFileOverride;
+
+  String _sessionFilePath() => _sessionFileOverride ?? liveDjStatePath();
+
+  @visibleForTesting
+  void useSessionFile(String path) {
+    _sessionFileOverride = path;
+  }
 
   File _resolveSessionFile() {
     return File(_sessionFilePath());
@@ -833,24 +843,35 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     debugPrint(
       "🛠️ [TRACKER] shuffleQueue() INICIADO. Elementos en cola: ${state.queue.length}",
     );
-    unawaited(_shuffleQueueAsync());
+    _shuffleRun = _shuffleQueueAsync();
+    unawaited(_shuffleRun);
   }
+
+  Future<void> _shuffleRun = Future<void>.value();
+
+  @visibleForTesting
+  Future<void> get shuffleSettled => _shuffleRun;
 
   Future<void> _shuffleQueueAsync() async {
     try {
+      // El modo cambia ya; la lista se arma por detrás y entra al terminar.
+      if (state.mixStrategy != LiveDjMixStrategy.random) {
+        state = state.copyWith(mixStrategy: LiveDjMixStrategy.random);
+      }
       final List<String> paths = state.queue
           .map((f) => f.path)
           .where((p) => !isKaraokeAudioPath(p))
           .toList();
       await preloadQueueBpm(paths);
-      _applyLiveShuffleBank(advance: true);
+      await _applyLiveShuffleBank(advance: true);
     } catch (e, stack) {
       debugPrint("🔴 [TRACKER ERROR FATAL] El Shuffle explotó: $e\n$stack");
     }
   }
 
-  void _applyLiveShuffleBank({required bool advance}) {
+  Future<void> _applyLiveShuffleBank({required bool advance}) async {
     if (!advance) return;
+    final int epoch = _addEpoch;
     final List<String> paths = dedupeAudioPaths(
       state.queue
           .map((f) => f.path)
@@ -867,46 +888,60 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       return;
     }
     final String sessionPath = _sessionFilePath();
-    GatomixStore.migrate(File(sessionPath).parent.path);
-    preloadQueueBpmSync(paths);
     final String? playing = state.currentTrackPath;
-    final ModeWave wave = loadModeWave(sessionPath, <String>[
-      ...paths,
-      ?playing,
-    ]);
-    final HarmonicOrder order = buildHarmonicShuffle(
-      paths,
-      _extractBpm,
-      keyOf: camelotFromPath,
-      usedPairs: wave.pairs,
-      recentAge: wave.age,
-      playing: playing,
-      continueFrom: playing,
-      startWaveUp: wave.waveUp,
-      startInWave: wave.inWave,
+    final Map<String, Object?> raw = await compute(
+      shuffleOffUi,
+      <String, Object?>{
+        'paths': paths,
+        'sessionPath': sessionPath,
+        'playing': playing,
+        'known': <String, double>{
+          for (final String p in paths)
+            if ((TrackTags.peek(p)?.bpm ?? 0) > 0) p: TrackTags.peek(p)!.bpm,
+        },
+      },
     );
-    GatomixStore.commitShuffleMemory(order.tracks, anchor: playing);
+    if (epoch != _addEpoch) return;
+    GatomixStore.forget(<String>{
+      File(sessionPath).parent.path,
+      for (final String p in paths) File(p).parent.path,
+    });
+    final Map<Object?, Object?> bpms = raw['bpm'] as Map<Object?, Object?>;
+    for (final MapEntry<Object?, Object?> e in bpms.entries) {
+      TrackTags.rememberBpm(e.key.toString(), (e.value as num).toDouble());
+    }
+    final List<String> ordered = <String>[
+      for (final Object? p in raw['tracks'] as List<Object?>) p.toString(),
+    ];
+    final bool waveUp = raw['waveUp'] as bool;
+    final int inWave = raw['inWave'] as int;
     unawaited(
       patchModeDoc(
         sessionPath,
         queueWavePatch(
           doc: readModeDoc(sessionPath),
-          order: order.tracks,
+          order: ordered,
           anchor: playing,
-          waveUp: order.waveUp,
-          inWave: order.inWave,
-          previousBpm: order.tracks.isEmpty
-              ? 0
-              : _extractBpm(order.tracks.last),
+          waveUp: waveUp,
+          inWave: inWave,
+          previousBpm: ordered.isEmpty ? 0 : _extractBpm(ordered.last),
         ),
       ),
     );
+    // Lo que entró a la cola mientras se armaba la lista no se pierde.
+    final Set<String> seen = <String>{
+      for (final String p in <String>[...ordered, ...paths]) audioPathKey(p),
+    };
+    final List<File> late = <File>[
+      for (final File f in state.queue)
+        if (!isKaraokeAudioPath(f.path) && seen.add(audioPathKey(f.path))) f,
+    ];
     state = state.copyWith(
-      queue: order.tracks.map(File.new).toList(),
+      queue: <File>[...ordered.map(File.new), ...late],
       mixStrategy: LiveDjMixStrategy.random,
     );
     _saveSnapshot();
-    debugPrint("🔀 [TRACKER] Shuffle armónico: ${order.tracks.length} pistas.");
+    debugPrint("🔀 [TRACKER] Shuffle armónico: ${ordered.length} pistas.");
   }
 
   /// Orden de la cola en Secuencial. Se guarda y se vuelve a aplicar a lo
@@ -1150,9 +1185,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       await preloadQueueBpm(paths);
     } catch (_) {}
     if (epoch != _addEpoch) return;
-    for (final String p in paths) {
-      saveTrackMusic(p, bpm: _extractBpm(p), camelot: harmonicKeyOf(p));
-    }
+    await saveTrackMusicBatch(<TrackMusic>[
+      for (final String p in paths)
+        (path: p, bpm: _extractBpm(p), camelot: harmonicKeyOf(p)),
+    ]);
     if (epoch != _addEpoch) return;
     if (state.mixStrategy != LiveDjMixStrategy.random) {
       state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
@@ -1162,7 +1198,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     if (state.queue.isEmpty && fresh.length > 1) {
       state = state.copyWith(queue: fresh);
-      _applyLiveShuffleBank(advance: true);
+      await _applyLiveShuffleBank(advance: true);
       return;
     }
     if (epoch != _addEpoch) return;
@@ -1249,11 +1285,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         final file = File(result.path);
         final content = await file.readAsString();
         final List<dynamic> paths = jsonDecode(content);
+        final List<String> alive = await compute(
+          _existingPaths,
+          <String>[for (final dynamic p in paths) p.toString()],
+        );
         final List<File> newFiles = dedupeAudioFiles(
-          paths
-              .map((p) => File(p.toString()))
-              .where((f) => f.existsSync())
-              .toList(),
+          alive.map(File.new).toList(),
         );
 
         if (newFiles.isNotEmpty) {
@@ -1788,7 +1825,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       '${File(_sessionFilePath()).parent.path}${Platform.pathSeparator}_livedj_radio.json';
 
   RadioMemory _radioMemory() => _radioMem ??= GatomixRadio.load(
-    _musicRoot(),
+    _radioRootOverride ?? _musicRoot(),
     legacyPaths: <String>[_radioHistoryPath()],
   );
 
@@ -2093,6 +2130,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     required RadioMemory mem,
     required RadioPlan? saved,
     required String? pinned,
+    bool replace = false,
   }) {
     if (!state.radioOn || epoch != _radioEpoch) {
       _djTrace(
@@ -2141,7 +2179,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             epoch: epoch,
             key: key,
             pool: pool,
-            replace: false,
+            replace: replace,
             elapsedMs: sw.elapsedMilliseconds,
           );
           if (!applied) return;
@@ -2181,6 +2219,40 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         .whenComplete(() {
           if (_radioAssembleEpoch == epoch) _radioAssemble = null;
         });
+  }
+
+  /// Al encender la radio o cambiar el filtro: si la lista guardada trae
+  /// menos pistas que el pool del filtro, se rearma con todo el pool.
+  Future<void> _radioRearmIfShort() async {
+    final int epoch = _radioEpoch;
+    await _radioEnsureIndex();
+    if (!state.radioOn || epoch != _radioEpoch) return;
+    final List<String> pool = _radioPoolNow();
+    if (pool.isEmpty) return;
+    final String key = radioGenreKey(state.radioGenres);
+    final RadioMemory mem = _radioMemory();
+    final RadioPlan? saved = mem.planOf(key);
+    if (saved == null || saved.order.length >= pool.length) return;
+    _djTrace(
+      'RADIO PLAN CORTO lista=${saved.order.length} pool=${pool.length} '
+      'key=$key: se rearma con todo el pool',
+    );
+    _ensureRadioAssemble(
+      epoch: epoch,
+      key: key,
+      pool: pool,
+      mem: mem,
+      saved: saved,
+      pinned: null,
+      replace: true,
+    );
+  }
+
+  @visibleForTesting
+  Future<void> rearmRadioIfShort() async {
+    await _radioRearmIfShort();
+    final Future<void>? run = _radioAssemble;
+    if (run != null) await run;
   }
 
   bool _applyRadioPlan({
@@ -2503,6 +2575,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     _publishRadioUpcoming();
     unawaited(_saveSnapshot());
     unawaited(_radioEnsureIndex());
+    unawaited(_radioRearmIfShort());
     if (state.currentTrackPath == null && !_isCrossfading) {
       _isPrepModeBypass = false;
       await forceNext();
@@ -2522,7 +2595,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
     _publishRadioUpcoming();
     unawaited(_saveSnapshot());
-    if (state.radioOn) unawaited(_radioRefill());
+    if (state.radioOn) {
+      unawaited(_radioRearmIfShort());
+      unawaited(_radioRefill());
+    }
   }
 
   void toggleRadioGenre(String genre) {
@@ -2539,7 +2615,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
     _publishRadioUpcoming();
     unawaited(_saveSnapshot());
-    if (state.radioOn) unawaited(_radioRefill());
+    if (state.radioOn) {
+      unawaited(_radioRearmIfShort());
+      unawaited(_radioRefill());
+    }
   }
 
   int _nextQueueIndex() {
@@ -3159,3 +3238,48 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 final liveDjProvider = NotifierProvider<LiveDjNotifier, LiveDjState>(
   LiveDjNotifier.new,
 );
+
+/// Lo pesado del Shuffle, fuera del hilo de la interfaz: migrar el JSON de
+/// la carpeta, BPM guardados, parejas/ola, el orden armónico y la memoria
+/// de Shuffle. Devuelve el orden y los BPM leídos; quien llama olvida sus
+/// cachés de esas carpetas y anota los BPM.
+Map<String, Object?> shuffleOffUi(Map<String, Object?> msg) {
+  final List<String> paths = <String>[
+    for (final Object? p in msg['paths'] as List<Object?>) p.toString(),
+  ];
+  final String sessionPath = msg['sessionPath'] as String;
+  final String? playing = msg['playing'] as String?;
+  final Map<Object?, Object?> known = msg['known'] as Map<Object?, Object?>;
+  for (final MapEntry<Object?, Object?> e in known.entries) {
+    TrackTags.rememberBpm(e.key.toString(), (e.value as num).toDouble());
+  }
+  GatomixStore.migrate(File(sessionPath).parent.path);
+  preloadQueueBpmSync(paths);
+  final ModeWave wave = loadModeWave(sessionPath, <String>[...paths, ?playing]);
+  final HarmonicOrder order = buildHarmonicShuffle(
+    paths,
+    knownBpm,
+    keyOf: camelotFromPath,
+    usedPairs: wave.pairs,
+    recentAge: wave.age,
+    playing: playing,
+    continueFrom: playing,
+    startWaveUp: wave.waveUp,
+    startInWave: wave.inWave,
+  );
+  GatomixStore.commitShuffleMemory(order.tracks, anchor: playing);
+  return <String, Object?>{
+    'tracks': order.tracks,
+    'waveUp': order.waveUp,
+    'inWave': order.inWave,
+    'bpm': <String, double>{
+      for (final String p in paths)
+        if (knownBpm(p) > 0) p: knownBpm(p),
+    },
+  };
+}
+
+List<String> _existingPaths(List<String> paths) => <String>[
+  for (final String p in paths)
+    if (File(p).existsSync()) p,
+];

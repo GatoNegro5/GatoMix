@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/audio/mix_pause.dart';
+import 'package:gatomix/core/dj_trace.dart';
 import 'package:gatomix/providers/automix_provider.dart';
 import 'package:gatomix/providers/livedj_provider.dart';
 
@@ -15,6 +18,20 @@ class _Auto extends AutomixNotifier {
 }
 
 void main() {
+  late Directory tmp;
+
+  setUp(() {
+    tmp = Directory.systemTemp.createTempSync('gmx_pause3030_');
+    djTraceFileOverride = '${tmp.path}${Platform.pathSeparator}trace.txt';
+  });
+
+  tearDown(() {
+    djTraceFileOverride = null;
+    try {
+      tmp.deleteSync(recursive: true);
+    } catch (_) {}
+  });
+
   test('la línea de pausa y de reanudación usa el tiempo de mezcla', () {
     expect(
       mixPauseLine(
@@ -75,6 +92,7 @@ void main() {
       overrides: <Override>[liveDjProvider.overrideWith(_Live.new)],
     );
     final LiveDjNotifier dj = box.read(liveDjProvider.notifier);
+    dj.useSessionFile('${tmp.path}${Platform.pathSeparator}liveDj.json');
     dj.armMixForTest(fadeMs: 10000, rampBpm: 128, elapsedMs: 4000);
     await dj.togglePlayPause();
     final String paused = dj.lastMixHoldLine!;
@@ -103,6 +121,7 @@ void main() {
         overrides: <Override>[liveDjProvider.overrideWith(_Live.new)],
       );
       final LiveDjNotifier dj = box.read(liveDjProvider.notifier);
+      dj.useSessionFile('${tmp.path}${Platform.pathSeparator}liveDj.json');
       dj.armMixPreFadeForTest(rampBpm: 140);
       final int epoch = dj.mixEpoch;
       await dj.togglePlayPause();

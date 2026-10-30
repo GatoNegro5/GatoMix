@@ -195,7 +195,7 @@ class LiveDjBpmChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(4),
           ),
           child: Text(
-            bpm > 0 ? '${bpm.toStringAsFixed(2)} BPM' : '– BPM',
+            bpm > 0 ? '${bpm.round()} BPM' : '– BPM',
             maxLines: 1,
             style: TextStyle(
               color: bpm > 0 ? Colors.white : Colors.white38,
@@ -223,7 +223,7 @@ class LiveDjBpmBadge extends StatelessWidget {
         builder: (context, snap) {
           final bpm = snap.data ?? 0.0;
           return Text(
-            bpm > 0 ? bpm.toStringAsFixed(2) : '–',
+            bpm > 0 ? bpm.round().toString() : '–',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: bpm > 0 ? Colors.white : Colors.white24,
