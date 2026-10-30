@@ -73,3 +73,6 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 - 3.0.32+51: pausa entre arm y el play del entrante espera; no corre mudo.
   Se conserva: mezcla sin pausa, pausa durante el fundido, DNA / Phrase 8 / Stealth, cue-in 10 s.
   Se elimina: NADA
+- 3.0.33+52: Radio elige 3 próximas por adelantado (segundo plano, tras encender/cambiar género/mezcla); el armado usa la ya elegida sin await.
+  Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, plan y memoria de Radio, pausa de mezcla.
+  Se elimina: NADA

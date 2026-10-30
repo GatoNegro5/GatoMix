@@ -1413,7 +1413,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           // Radio encendida: la pista sale del universo de géneros, no de la cola.
           // Apagada: la misma que muestra la barra (cabeza, o BPM en Stealth).
           final String? armPathOrNull = armingRadio
-              ? await _radioNextPath()
+              ? (_radioPendingReady() ?? await _radioNextPath())
               : (state.queue.isNotEmpty
                     ? state.queue[_nextQueueIndex()].path
                     : null);
@@ -1697,6 +1697,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
   String? _radioPending;
+  // Próximas de radio ya elegidas (hasta kRadioAheadCount). Valen solo en la
+  // época en que se calcularon; el relleno corre en segundo plano.
+  List<String> _radioAhead = const <String>[];
+  int _radioAheadEpoch = -1;
+  Future<void>? _radioRefillRun;
+  bool _radioRefillAgain = false;
   final Random _radioRng = Random();
   int _radioEpoch = 0;
   int _radioAssembleEpoch = -1;
@@ -1813,10 +1819,91 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         ? radioUpcomingPaths(
             plan: _radioMem?.planOf(radioGenreKey(state.radioGenres)),
             nextPath: state.radioNextPath,
+            ahead: _radioAheadEpoch == _radioEpoch
+                ? _radioAhead
+                : const <String>[],
           )
         : const <String>[];
     if (listEquals(state.radioUpcoming, next)) return;
     state = state.copyWith(radioUpcoming: next);
+  }
+
+  /// La siguiente ya elegida, sin esperar ni tocar disco. null = no hay.
+  String? _radioPendingReady() {
+    final String? p = _radioPending;
+    if (p == null || p.isEmpty || _radioBanned(p)) return null;
+    return p;
+  }
+
+  /// Rellena en segundo plano hasta [kRadioAheadCount] próximas. Nunca corre
+  /// desde el tick; durante un cruce solo asegura la primera (sin disco).
+  Future<void> _radioRefill() {
+    if (!state.radioOn) return Future<void>.value();
+    final Future<void>? run = _radioRefillRun;
+    if (run != null) {
+      _radioRefillAgain = true;
+      return run;
+    }
+    return _radioRefillRun = _radioRefillLoop().whenComplete(() {
+      _radioRefillRun = null;
+    });
+  }
+
+  Future<void> _radioRefillLoop() async {
+    do {
+      _radioRefillAgain = false;
+      try {
+        await _radioRefillOnce();
+      } catch (e, st) {
+        debugPrint('🔴 [RADIO] relleno: $e\n$st');
+      }
+    } while (_radioRefillAgain && state.radioOn);
+  }
+
+  Future<void> _radioRefillOnce() async {
+    final int epoch = _radioEpoch;
+    bool live() => radioArmStillValid(
+      radioOn: state.radioOn,
+      epoch: _radioEpoch,
+      armEpoch: epoch,
+    );
+    // Tras consumir la primera, la segunda ya elegida pasa a ser la siguiente.
+    if (_radioPending == null && _radioAheadEpoch == epoch) {
+      for (final String p in _radioAhead) {
+        if (_radioBanned(p)) continue;
+        if (!_isCrossfading && !File(p).existsSync()) continue;
+        _radioPending = p;
+        _driftNextPath = p;
+        state = state.copyWith(radioNextPath: p);
+        break;
+      }
+    }
+    final String? first = await _radioNextPath();
+    if (!live() || first == null || first.isEmpty) return;
+    // Los extras tocan disco (existsSync): esperan al final de la mezcla.
+    if (_isCrossfading) return;
+    final List<String> out = <String>[first];
+    final RadioPlan? plan = _radioMemory().planOf(
+      radioGenreKey(state.radioGenres),
+    );
+    if (plan != null && !plan.finished) {
+      for (
+        var i = plan.position;
+        i < plan.order.length && out.length < kRadioAheadCount;
+        i++
+      ) {
+        final String p = plan.order[i];
+        if (out.any((String o) => sameAudioPath(o, p))) continue;
+        if (sameAudioPath(p, state.currentTrackPath)) continue;
+        if (_radioBanned(p)) continue;
+        if (!File(p).existsSync()) continue;
+        out.add(p);
+      }
+    }
+    if (!live()) return;
+    _radioAhead = out;
+    _radioAheadEpoch = epoch;
+    _publishRadioUpcoming();
   }
 
   bool _radioAccept(String path) {
@@ -2193,6 +2280,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       '${elapsedMs}ms key=$key',
     );
     _saveRadio(_radioMemory().putPlan(key, plan), activeKey: key);
+    if (state.radioOn && epoch == _radioEpoch && !_isCrossfading) {
+      unawaited(_radioRefill());
+    }
     if (_isStandbyArmed) return true;
     if (plan.finished || plan.order.isEmpty) return true;
     if (plan.position < 0 || plan.position >= plan.order.length) return true;
@@ -2230,13 +2320,32 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       saveTrackMusic(path, bpm: bpm, camelot: harmonicKeyOf(path));
     }
     _radioPending = null;
+    if (_radioAhead.isNotEmpty) {
+      _radioAhead = <String>[
+        for (final String p in _radioAhead)
+          if (!sameAudioPath(p, path)) p,
+      ];
+    }
     state = state.copyWith(clearRadioNextPath: true);
+    if (_radioAhead.isNotEmpty) _publishRadioUpcoming();
   }
 
   @visibleForTesting
   void useRadioLibrary(String root) {
     _radioRootOverride = root;
   }
+
+  @visibleForTesting
+  void seedRadioIndex({required String genre, required List<String> files}) {
+    _radioIndex = <String, List<String>>{'/seed': files};
+    _radioFolderGenre['/seed'] = genre;
+  }
+
+  @visibleForTesting
+  Future<void> refillRadioAhead() => _radioRefill();
+
+  @visibleForTesting
+  String? get radioPendingReadyNow => _radioPendingReady();
 
   @visibleForTesting
   RadioMemory get radioMemoryNow => _radioMem ?? RadioMemory.empty;
@@ -2411,7 +2520,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       _isPrepModeBypass = false;
       await forceNext();
     } else {
-      unawaited(_radioNextPath());
+      unawaited(_radioRefill());
     }
   }
 
@@ -2426,7 +2535,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
     _publishRadioUpcoming();
     unawaited(_saveSnapshot());
-    if (state.radioOn) unawaited(_radioNextPath());
+    if (state.radioOn) unawaited(_radioRefill());
   }
 
   void toggleRadioGenre(String genre) {
@@ -2443,7 +2552,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
     _publishRadioUpcoming();
     unawaited(_saveSnapshot());
-    if (state.radioOn) unawaited(_radioNextPath());
+    if (state.radioOn) unawaited(_radioRefill());
   }
 
   int _nextQueueIndex() {
@@ -3022,6 +3131,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         _radioOffAfterFade = false;
         if (state.radioOn || _radioFreeze != null) _turnRadioOff();
       }
+      // Terminada la mezcla: se reponen las próximas en segundo plano.
+      if (state.radioOn) unawaited(_radioRefill());
     }
   }
 
