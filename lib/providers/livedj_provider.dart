@@ -1697,8 +1697,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
   String? _radioPending;
-  // Próximas de radio ya elegidas (hasta kRadioAheadCount). Valen solo en la
-  // época en que se calcularon; el relleno corre en segundo plano.
+  // La PRÓXIMA de radio ya validada. Vale solo en la época en que se calculó;
+  // el relleno corre en segundo plano. La lista visible es el plan entero.
   List<String> _radioAhead = const <String>[];
   int _radioAheadEpoch = -1;
   Future<void>? _radioRefillRun;
@@ -1835,8 +1835,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return p;
   }
 
-  /// Rellena en segundo plano hasta [kRadioAheadCount] próximas. Nunca corre
-  /// desde el tick; durante un cruce solo asegura la primera (sin disco).
+  /// Deja lista en segundo plano la próxima (_radioPending). Nunca corre
+  /// desde el tick ni hace trabajo extra durante el cruce.
   Future<void> _radioRefill() {
     if (!state.radioOn) return Future<void>.value();
     final Future<void>? run = _radioRefillRun;
@@ -1867,41 +1867,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       epoch: _radioEpoch,
       armEpoch: epoch,
     );
-    // Tras consumir la primera, la segunda ya elegida pasa a ser la siguiente.
-    if (_radioPending == null && _radioAheadEpoch == epoch) {
-      for (final String p in _radioAhead) {
-        if (_radioBanned(p)) continue;
-        if (!_isCrossfading && !File(p).existsSync()) continue;
-        _radioPending = p;
-        _driftNextPath = p;
-        state = state.copyWith(radioNextPath: p);
-        break;
-      }
-    }
+    // Solo la PRÓXIMA se valida por adelantado (_radioPending): el armado la
+    // lee sin esperar. La lista completa es el plan, no este relleno.
     final String? first = await _radioNextPath();
     if (!live() || first == null || first.isEmpty) return;
-    // Los extras tocan disco (existsSync): esperan al final de la mezcla.
-    if (_isCrossfading) return;
-    final List<String> out = <String>[first];
-    final RadioPlan? plan = _radioMemory().planOf(
-      radioGenreKey(state.radioGenres),
-    );
-    if (plan != null && !plan.finished) {
-      for (
-        var i = plan.position;
-        i < plan.order.length && out.length < kRadioAheadCount;
-        i++
-      ) {
-        final String p = plan.order[i];
-        if (out.any((String o) => sameAudioPath(o, p))) continue;
-        if (sameAudioPath(p, state.currentTrackPath)) continue;
-        if (_radioBanned(p)) continue;
-        if (!File(p).existsSync()) continue;
-        out.add(p);
-      }
-    }
-    if (!live()) return;
-    _radioAhead = out;
+    _radioAhead = <String>[first];
     _radioAheadEpoch = epoch;
     _publishRadioUpcoming();
   }
@@ -1955,7 +1925,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         await for (final e in root.list(followLinks: false)) {
           if (e is! Directory) continue;
           final name = e.path.replaceAll('\\', '/').split('/').last;
-          final genre = _radioGenreOfFolder(name);
+          if (_radioFold(name).contains('_k')) continue; // Karaoke
+          // Carpeta de ReGenial sin género conocido: entra en "Todo" (no en
+          // ningún filtro de género), así Todo = toda la biblioteca.
+          final String? genre =
+              _radioGenreOfFolder(name) ??
+              (root.path.toLowerCase().endsWith('regenial') ? 'todo' : null);
           if (genre == null) continue;
           final files = <String>[];
           try {
@@ -2251,6 +2226,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       return false;
     }
+    // El plan lleva TODAS las pistas del pool: las que el armado dejó fuera
+    // (la que suena, la anterior, recientes) van al final de la vuelta.
+    final Set<String> inPlan = <String>{
+      for (final String p in plan.order) audioPathKey(p),
+    };
+    final List<String> missing = <String>[
+      for (final String p in pool)
+        if (inPlan.add(audioPathKey(p))) p,
+    ];
+    if (missing.isNotEmpty) {
+      plan = plan.copy(order: <String>[...plan.order, ...missing]);
+    }
     final RadioPlan? have = _radioMemory().planOf(key);
     if (!replace &&
         have != null &&
@@ -2327,7 +2314,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       ];
     }
     state = state.copyWith(clearRadioNextPath: true);
-    if (_radioAhead.isNotEmpty) _publishRadioUpcoming();
+    _publishRadioUpcoming();
   }
 
   @visibleForTesting

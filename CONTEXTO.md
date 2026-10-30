@@ -76,3 +76,6 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 - 3.0.33+52: Radio elige 3 próximas por adelantado (segundo plano, tras encender/cambiar género/mezcla); el armado usa la ya elegida sin await.
   Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, plan y memoria de Radio, pausa de mezcla.
   Se elimina: NADA
+- 3.0.34+53: Radio = UN plan con todas las pistas del filtro (Todo = todo ReGenial); la cola muestra el plan entero desde su posición; solo la próxima se precalcula; al terminar se rearma con orden distinto y con todas.
+  Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, memoria de Radio por filtro, pausa de mezcla.
+  Se elimina: NADA (el tope de 3 próximas de 3.0.33 se quita por pedido)

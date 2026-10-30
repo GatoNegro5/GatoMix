@@ -124,26 +124,22 @@ List<String> liveDjSidePaths({
   return queuePaths;
 }
 
-/// Cuántas próximas mantiene la radio listas por adelantado.
-const int kRadioAheadCount = 3;
-
 /// Siguientes de la radio desde la posición del plan (la que dice la barra).
-/// No incluye lo ya consumido. Sin plan, solo la próxima si ya se eligió.
+/// Con plan válido: SIEMPRE el plan entero desde su posición hasta el final;
+/// [ahead] no lo recorta. No incluye lo ya consumido. Sin plan se usa
+/// [ahead] (la próxima ya precalculada) o [nextPath].
 List<String> radioUpcomingPaths({
   RadioPlan? plan,
   String? nextPath,
   List<String> ahead = const <String>[],
 }) {
-  // Las próximas ya precalculadas (existen, no repiten, misma época).
-  if (ahead.isNotEmpty) {
-    return List<String>.from(ahead.take(kRadioAheadCount));
-  }
   if (plan != null && plan.order.isNotEmpty && !plan.finished) {
     final int start = plan.position.clamp(0, plan.order.length);
     if (start < plan.order.length) {
       return List<String>.from(plan.order.sublist(start));
     }
   }
+  if (ahead.isNotEmpty) return List<String>.from(ahead);
   if (nextPath != null && nextPath.isNotEmpty) return <String>[nextPath];
   return const <String>[];
 }
