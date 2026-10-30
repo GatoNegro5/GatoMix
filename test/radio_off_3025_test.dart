@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -119,7 +120,10 @@ void main() {
     TrackTags.clear();
     expect(knownBpm(path), 0);
     File('${dir.path}$sep.gatomix.json').writeAsStringSync(
-      '{"schema":1,"djMetadata":{"$path":138}}',
+      jsonEncode(<String, Object?>{
+        'schema': 1,
+        'djMetadata': <String, Object?>{path: 138},
+      }),
     );
     expect(knownBpm(path), 138);
     final int mid = GatomixStore.debugDiskReads;

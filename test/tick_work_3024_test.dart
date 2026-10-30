@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -15,9 +16,12 @@ void main() {
       );
       final String sep = Platform.pathSeparator;
       final String path = '${dir.path}${sep}Lime - You Love.mp3';
-      File(
-        '${dir.path}$sep.gatomix.json',
-      ).writeAsStringSync('{"schema":1,"djMetadata":{"$path":128}}');
+      File('${dir.path}$sep.gatomix.json').writeAsStringSync(
+        jsonEncode(<String, Object?>{
+          'schema': 1,
+          'djMetadata': <String, Object?>{path: 128},
+        }),
+      );
       final int before = GatomixStore.debugDiskReads;
       for (var i = 0; i < 60; i++) {
         expect(knownBpm(path), 128);

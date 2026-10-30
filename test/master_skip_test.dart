@@ -201,7 +201,7 @@ void main() {
         File(p).writeAsBytesSync(_mp3(indeep, seal: false));
         final MasterSkipIndex idx = MasterSkipIndex(d.path);
         expect(idx.record(p), 'trim');
-        expect(idx.entries['Indeep.mp3']!['state'], 'PENDING');
+        expect(idx.entries[idx.key(p)]!['state'], 'PENDING');
         final SkipDecision s = idx.decide(p);
         expect(s.skip, isFalse);
         expect(s.reason, 'index:trim');

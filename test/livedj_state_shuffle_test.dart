@@ -69,13 +69,15 @@ void main() {
     });
 
     test('pista renombrada por Masterizar se reencuentra', () {
-      final a = File('${dir.path}/Elvis Presley - Always On My Mind.mp3')
+      final String sep = Platform.pathSeparator;
+      final a = File('${dir.path}${sep}Elvis Presley - Always On My Mind.mp3')
         ..writeAsStringSync('x');
-      final b = File('${dir.path}/Queen - Jump.mp3')..writeAsStringSync('x');
+      final b = File('${dir.path}${sep}Queen - Jump.mp3')
+        ..writeAsStringSync('x');
       final out = resolveSessionPaths([
-        '${dir.path}/Elvis_Presley_-_Always_On_My_Mind (Official Video).mp3',
+        '${dir.path}${sep}Elvis_Presley_-_Always_On_My_Mind (Official Video).mp3',
         b.path,
-        '${dir.path}/Borrada - Del Todo.mp3',
+        '${dir.path}${sep}Borrada - Del Todo.mp3',
       ]);
       expect(out, [a.path, b.path]);
     });

@@ -753,7 +753,11 @@ class GatomixLog {
       final int nl = out.indexOf('\n');
       if (nl >= 0 && nl < out.length - 1) out = out.substring(nl + 1);
     }
-    f.writeAsStringSync(out, flush: true);
+    // En Windows un archivo oculto no se reabre para escribir: se reemplaza.
+    final File tmp = File('${f.path}.tmp');
+    tmp.writeAsStringSync(out, flush: true);
+    if (f.existsSync()) f.deleteSync();
+    tmp.renameSync(f.path);
     hideOnWindows(f.path);
   }
 }
