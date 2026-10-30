@@ -154,3 +154,190 @@ List<String> restoreFixedFromLab(String labDir) {
   if (back.isNotEmpty) _writeJson(regF, reg);
   return back;
 }
+
+const String labManualOriginLabel =
+    'Origen Desconocido (Inyección Manual OS)';
+
+const List<String> labAudioExtensions = <String>[
+  '.mp3',
+  '.m4a',
+  '.webm',
+  '.wav',
+  '.flac',
+];
+
+/// Segundo envío al LAB mientras otro espera la mezcla: entra a la cola,
+/// sin repetir la pista que ya va ni una que ya esté encolada.
+List<String> enqueueLabSend(
+  List<String> queue,
+  String track, {
+  String? inFlight,
+}) {
+  if (track.isEmpty) return List<String>.from(queue);
+  if (inFlight != null && inFlight == track) return List<String>.from(queue);
+  if (queue.contains(track)) return List<String>.from(queue);
+  return List<String>.from(queue)..add(track);
+}
+
+bool _sameFile(String a, String b) =>
+    File(a).absolute.path == File(b).absolute.path;
+
+String lrcBesideAudio(String audio) {
+  final RegExp ext = RegExp(
+    r'\.(mp3|m4a|wav|flac|webm|ogg|aac)$',
+    caseSensitive: false,
+  );
+  if (ext.hasMatch(audio)) return audio.replaceAll(ext, '.lrc');
+  return '$audio.lrc';
+}
+
+/// `<base>_K.mp3`, el mismo corte de [KaraokeEngine.karaokePathFor].
+String karaokeMp3Beside(String audio) {
+  final int dot = audio.lastIndexOf('.');
+  if (dot <= 0) return '${audio}_K.mp3';
+  return '${audio.substring(0, dot)}_K.mp3';
+}
+
+String karaokeLrcBeside(String audio) =>
+    karaokeMp3Beside(audio).replaceAll(RegExp(r'\.mp3$'), '.lrc');
+
+/// Mueve [src] a [dest]. No pisa. Si `rename` cruza de volumen, copia y borra.
+void moveOneNoOverwriteSync(String src, String dest) {
+  if (File(dest).existsSync() || Directory(dest).existsSync()) {
+    throw FileSystemException('destino ocupado', dest);
+  }
+  final File s = File(src);
+  try {
+    s.renameSync(dest);
+  } on FileSystemException {
+    final int len = s.lengthSync();
+    final File copy = s.copySync(dest);
+    if (copy.lengthSync() != len) {
+      try {
+        copy.deleteSync();
+      } catch (_) {}
+      throw FileSystemException('Copia incompleta', src);
+    }
+    s.deleteSync();
+  }
+}
+
+/// Ida al LAB. Si cualquier compañero ya está en [destDir], no mueve nada.
+bool moveCompanionsToSync(String audioPath, String destDir) {
+  final List<String> files = companionsOf(audioPath);
+  if (files.isEmpty) return false;
+  if (files.any(
+    (String p) => File('$destDir$_sep${_nameOf(p)}').existsSync(),
+  )) {
+    return false;
+  }
+  Directory(destDir).createSync(recursive: true);
+  for (final String p in files) {
+    moveOneNoOverwriteSync(p, '$destDir$_sep${_nameOf(p)}');
+  }
+  return true;
+}
+
+class LabReturn {
+  final bool blocked;
+  final bool lrcKeptAtOrigin;
+  const LabReturn({required this.blocked, this.lrcKeptAtOrigin = false});
+}
+
+/// Regreso a la carpeta original. Si el audio de destino ya existe, no mueve
+/// nada. El resto de compañeros se mueve solo si su destino está libre.
+LabReturn restoreCompanionsToSync({
+  required String labAudio,
+  required String originAudio,
+}) {
+  final List<String> files = companionsOf(labAudio);
+  if (File(originAudio).existsSync() && !_sameFile(labAudio, originAudio)) {
+    return const LabReturn(blocked: true);
+  }
+  final String originDir = _dirOf(originAudio);
+  final String labLrc = lrcBesideAudio(labAudio);
+  final String originLrc = lrcBesideAudio(originAudio);
+  if (File(labAudio).existsSync() && !_sameFile(labAudio, originAudio)) {
+    moveOneNoOverwriteSync(labAudio, originAudio);
+  }
+  var lrcKept = false;
+  for (final String p in files) {
+    if (_sameFile(p, labAudio)) continue;
+    if (!File(p).existsSync()) continue;
+    final bool isMainLrc = _sameFile(p, labLrc);
+    final String dest = isMainLrc
+        ? originLrc
+        : '$originDir$_sep${_nameOf(p)}';
+    if (_sameFile(p, dest)) continue;
+    if (File(dest).existsSync()) {
+      if (isMainLrc) lrcKept = true;
+      continue;
+    }
+    moveOneNoOverwriteSync(p, dest);
+  }
+  return LabReturn(blocked: false, lrcKeptAtOrigin: lrcKept);
+}
+
+/// Borra el karaoke viejo (`<base>_K.mp3` y `<base>_K.lrc`). No toca el audio.
+List<String> deleteStaleKaraokeSync(String audioPath) {
+  final List<String> gone = <String>[];
+  for (final String p in <String>[
+    karaokeMp3Beside(audioPath),
+    karaokeLrcBeside(audioPath),
+  ]) {
+    final File f = File(p);
+    if (!f.existsSync()) continue;
+    f.deleteSync();
+    gone.add(p);
+  }
+  return gone;
+}
+
+/// Tras el rescate: mp3, .lrc y, si [includeKaraoke], el `_K` del mismo base.
+/// Si el audio de destino es otro archivo, no mueve nada.
+void deliverRescuedTrackSync(
+  String audioPath,
+  String originDir, {
+  required bool includeKaraoke,
+}) {
+  final String audioDest = '$originDir$_sep${_nameOf(audioPath)}';
+  if (File(audioDest).existsSync() && !_sameFile(audioPath, audioDest)) {
+    return;
+  }
+  final List<String> srcs = <String>[audioPath, lrcBesideAudio(audioPath)];
+  if (includeKaraoke) {
+    srcs.add(karaokeMp3Beside(audioPath));
+    final String klrc = karaokeLrcBeside(audioPath);
+    if (File(klrc).existsSync()) srcs.add(klrc);
+  }
+  for (final String p in srcs) {
+    if (!File(p).existsSync()) continue;
+    final String dest = '$originDir$_sep${_nameOf(p)}';
+    if (_sameFile(p, dest)) continue;
+    if (File(dest).existsSync()) continue;
+    moveOneNoOverwriteSync(p, dest);
+  }
+}
+
+/// Vuelve a armar el mapa del LAB con lo que hay ahora en la carpeta.
+Map<String, dynamic> rescanLabRegistry(
+  String labDir,
+  Map<String, dynamic> registry,
+) {
+  final List<String> physicalFiles = Directory(labDir)
+      .listSync()
+      .whereType<File>()
+      .map((File e) => _nameOf(e.path))
+      .toList();
+  final Map<String, dynamic> next = Map<String, dynamic>.from(registry);
+  next.removeWhere((String key, dynamic _) => !physicalFiles.contains(key));
+  for (final String fileName in physicalFiles) {
+    final bool isAudio = labAudioExtensions.any(
+      (String ext) => fileName.toLowerCase().endsWith(ext),
+    );
+    if (isAudio && !next.containsKey(fileName)) {
+      next[fileName] = labManualOriginLabel;
+    }
+  }
+  return next;
+}

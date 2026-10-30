@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../core/brand_paths.dart';
+import '../core/lab_quarantine.dart';
 import 'core_metadata.dart';
 import 'core_dsp.dart';
 import 'core_nlp.dart';
@@ -67,12 +68,15 @@ class PipelineController {
 
       final newPath = '${quarantine.path}${Platform.pathSeparator}$fileName';
 
-      // 4. Mover el archivo (Fallback a copy+delete si rename falla por bloqueos residuales)
-      try {
-        file.renameSync(newPath);
-      } catch (_) {
-        file.copySync(newPath);
-        file.deleteSync();
+      // 4. Mover la pista y sus compañeros. No pisa un destino que ya existe.
+      for (final String p in companionsOf(filePath)) {
+        final String dest =
+            '${quarantine.path}${Platform.pathSeparator}${File(p).uri.pathSegments.last}';
+        if (File(dest).existsSync()) {
+          debugPrint("☣️ [CUARENTENA] No se pisa: $dest");
+          continue;
+        }
+        moveOneNoOverwriteSync(p, dest);
       }
 
       // 5. Notificar a la UI

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../core/brand_paths.dart';
+import '../../core/lab_quarantine.dart';
 import '../../core/exact_mix.dart';
 import '../../core/gatomix_store.dart';
 import '../../core/gmx_status.dart';
@@ -1802,27 +1803,18 @@ class DspNlpWorkspace extends ConsumerWidget {
     }
 
     int movedCount = 0;
+    int blockedCount = 0;
     for (String path in badPaths) {
       final file = File(path);
       if (file.existsSync()) {
         final fileName = file.uri.pathSegments.last;
-        final newPath = '${labDir.path}${Platform.pathSeparator}$fileName';
 
         try {
-          file.renameSync(newPath);
-          registry[fileName] = path;
-
-          final lrcFile = File(
-            path.replaceAll(
-              RegExp(r'\.mp3$|\.webm$', caseSensitive: false),
-              '.lrc',
-            ),
-          );
-          if (lrcFile.existsSync()) {
-            lrcFile.renameSync(
-              '${labDir.path}${Platform.pathSeparator}${fileName.replaceAll(RegExp(r'\.mp3$|\.webm$', caseSensitive: false), '.lrc')}',
-            );
+          if (!moveCompanionsToSync(path, labDir.path)) {
+            blockedCount++;
+            continue;
           }
+          registry[fileName] = path;
           movedCount++;
         } catch (e) {
           debugPrint("🔴 Error moviendo archivo al LAB: $e");
@@ -1836,7 +1828,11 @@ class DspNlpWorkspace extends ConsumerWidget {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("✅ $movedCount archivos aislados en el LAB."),
+          content: Text(
+            blockedCount > 0
+                ? "⚠️ $blockedCount ya estaban en el LAB (no se pisó nada). ✅ $movedCount archivos aislados en el LAB."
+                : "✅ $movedCount archivos aislados en el LAB.",
+          ),
           backgroundColor: Colors.orangeAccent,
           behavior: SnackBarBehavior.floating,
         ),
