@@ -96,6 +96,38 @@ void main() {
     box.dispose();
   });
 
+  test(
+    'pausa entre arm y beginFade: entrante no arranca; al reanudar el fundido completa y _isCrossfading vuelve a false',
+    () async {
+      final ProviderContainer box = ProviderContainer(
+        overrides: <Override>[liveDjProvider.overrideWith(_Live.new)],
+      );
+      final LiveDjNotifier dj = box.read(liveDjProvider.notifier);
+      dj.armMixPreFadeForTest(rampBpm: 140);
+      final int epoch = dj.mixEpoch;
+      await dj.togglePlayPause();
+      expect(dj.mixPaused, isTrue);
+      expect(dj.crossfadeHeld, isTrue);
+      expect(dj.lastMixHoldLine, 'PAUSA en mezcla t=0 fade=0.0 rampa=140.00');
+      var incomingStarted = false;
+      final Future<void> cross = () async {
+        final bool go = await dj.holdIncomingBeforePlay(epoch);
+        if (!go) return;
+        incomingStarted = true;
+        await dj.runFadeForTest(fadeMs: 48);
+      }();
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(incomingStarted, isFalse);
+      expect(dj.crossfadeHeld, isTrue);
+      await dj.togglePlayPause();
+      await cross;
+      expect(incomingStarted, isTrue);
+      expect(dj.mixPaused, isFalse);
+      expect(dj.crossfadeHeld, isFalse);
+      box.dispose();
+    },
+  );
+
   test('Automix: pausa y reanuda a mitad de mezcla sin soltar el cruce', () async {
     final ProviderContainer box = ProviderContainer(
       overrides: <Override>[automixProvider.overrideWith(_Auto.new)],

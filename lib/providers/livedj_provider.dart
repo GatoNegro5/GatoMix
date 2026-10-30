@@ -209,6 +209,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   PhaseLockSession? _phaseLock;
   bool _deckAWasOn = false;
   bool _deckBWasOn = false;
+  // Deck entrante entre arm y su play. Una pausa en esa ventana no lo
+  // reanuda: al soltar suena el saliente y el fundido lo sube desde 0.
+  Player? _incomingQuiet;
   double _incomingNatBpm = 0.0;
   // Análisis de Phrase 8, una pista por vez, fuera del tick.
   Future<void> _phraseJobs = Future<void>.value();
@@ -638,6 +641,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void _releaseMix() {
     _isCrossfading = false;
+    _incomingQuiet = null;
     _mix.end();
   }
 
@@ -660,6 +664,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   void _captureDecks() {
     _deckAWasOn = _deckPlaying(() => _playerA);
     _deckBWasOn = _deckPlaying(() => _playerB);
+    final Player? quiet = _incomingQuiet;
+    if (quiet != null && _mix.fadeClock == null) {
+      if (identical(quiet, _playerA)) _deckAWasOn = false;
+      if (identical(quiet, _playerB)) _deckBWasOn = false;
+    }
   }
 
   Future<void> _playDecksHeld() async {
@@ -705,6 +714,42 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     _mix.arm();
     _mix.setRampBpm(rampBpm);
     _mix.beginFade(fadeMs, elapsedMs: elapsedMs);
+  }
+
+  @visibleForTesting
+  void armMixPreFadeForTest({required double rampBpm}) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+  }
+
+  @visibleForTesting
+  int get mixEpoch => _mix.epoch;
+
+  /// Pausa entre [MixPause.arm] y el play del entrante: no arranca hasta que
+  /// la mezcla vuelve a correr. false = epoch distinto o mezcla suelta.
+  @visibleForTesting
+  Future<bool> holdIncomingBeforePlay(int epoch) async {
+    if (_mix.paused) await _mix.untilRunning();
+    if (_mix.epoch != epoch || !_mix.armed) {
+      await _dropPhase();
+      return false;
+    }
+    return true;
+  }
+
+  @visibleForTesting
+  Future<void> runFadeForTest({required int fadeMs}) async {
+    final int epoch = _mix.epoch;
+    final MixRunClock fadeClock = _mix.beginFade(fadeMs);
+    while (fadeClock.elapsedMilliseconds < fadeMs && _mix.epoch == epoch) {
+      if (_mix.paused) {
+        await _mix.untilRunning();
+        continue;
+      }
+      await _mix.slice(16, fadeClock);
+    }
+    _releaseMix();
   }
 
   @visibleForTesting
@@ -2424,6 +2469,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (_isCrossfading || (state.queue.isEmpty && !state.radioOn)) return;
     _isCrossfading = true;
     _mix.arm();
+    final int armEpoch = _mix.epoch;
 
     // Radio encendida y sin pista elegida a mano: la sigue la radio (la cola
     // queda congelada). Un toque explícito a una fila (queueIndex) sí suena.
@@ -2490,6 +2536,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     final Player fadingPlayer = _activePlayer;
     final Player incomingPlayer = _standbyPlayer;
+    _incomingQuiet = incomingPlayer;
 
     if (!_isStandbyArmed || forceJit || _standbyArmedPath != nextTrack) {
       try {
@@ -2654,6 +2701,17 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       await incomingPlayer.setRate(incomingRate);
       await incomingPlayer.setVolume(0.0);
+      if (_mix.paused) {
+        try {
+          await incomingPlayer.pause();
+        } catch (_) {}
+      }
+      if (!await holdIncomingBeforePlay(armEpoch)) {
+        _incomingQuiet = null;
+        _releaseMix();
+        return;
+      }
+      _incomingQuiet = null;
       if (gridOut != null &&
           gridIn != null &&
           gridOut.bpm > 0 &&

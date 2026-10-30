@@ -70,3 +70,6 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 ```
 - 3.0.30+49 (`003aafb`): phase lock ≤1 %/<5 ms; pausa congela ambos decks y fade.
 - 3.0.31+50 (`c46705b`): BPM por recta + GMX_GRID/GMX_ANALYSIS=3031; DNA 60–80 % con fade dentro de la canción.
+- 3.0.32+51: pausa entre arm y el play del entrante espera; no corre mudo.
+  Se conserva: mezcla sin pausa, pausa durante el fundido, DNA / Phrase 8 / Stealth, cue-in 10 s.
+  Se elimina: NADA
