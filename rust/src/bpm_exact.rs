@@ -326,13 +326,15 @@ pub fn fold_compound(env: &[f64], env_rate: f64, bpm: f64) -> f64 {
 /// Rechaza el tempo solo si la evidencia de onsets es baja Y el peine (o el
 /// clip) no la respalda. `windows` son las ventanas de análisis (~1,5 s).
 ///
-/// Débil = pico del peine < 4× su media, o evidencia ≤ 0,003, o menos de 8
-/// ventanas (~12 s). Un peine sin energía (media ≤ 0) también es débil.
+/// Débil = pico del peine < 4× su media (< 3× si hay ≥ 64 ventanas), o
+/// evidencia ≤ 0,003, o menos de 8 ventanas (~12 s). Un peine sin energía
+/// (media ≤ 0) también es débil. Adele cabe en 3× con la pista larga.
 pub fn tempo_rejected(evidence: f64, comb_peak: f64, comb_mean: f64, windows: usize) -> bool {
     if evidence >= 0.05 {
         return false;
     }
-    let comb_weak = !(comb_mean > 0.0 && comb_peak >= comb_mean * 4.0);
+    let need = if windows >= 64 { 3.0 } else { 4.0 };
+    let comb_weak = !(comb_mean > 0.0 && comb_peak >= comb_mean * need);
     comb_weak || evidence <= 0.003 || windows < 8
 }
 
@@ -558,10 +560,7 @@ mod tests {
             let times = ideal(bpm, 48, 0.37);
             let line = line_fit(&times).unwrap();
             let got = 60.0 / line.period;
-            assert!(
-                (got - bpm).abs() <= 0.02,
-                "{bpm} salió {got}"
-            );
+            assert!((got - bpm).abs() <= 0.02, "{bpm} salió {got}");
             assert!((line.anchor - 0.37).abs() < 1e-6, "ancla {}", line.anchor);
         }
     }
@@ -572,9 +571,15 @@ mod tests {
         assert!((align_octave(146.67, 146.67) - 146.67).abs() < 1e-6);
         assert!((align_octave(293.34, 146.67) - 146.67).abs() < 1e-2);
         let slow = align_octave(72.0, 72.0);
-        assert!((slow - 72.0).abs() < 1e-6, "72 no debe saltar a 144: {slow}");
+        assert!(
+            (slow - 72.0).abs() < 1e-6,
+            "72 no debe saltar a 144: {slow}"
+        );
         let fast = align_octave(169.0, 169.0);
-        assert!((fast - 169.0).abs() < 1e-6, "169 no debe saltar a 84.5: {fast}");
+        assert!(
+            (fast - 169.0).abs() < 1e-6,
+            "169 no debe saltar a 84.5: {fast}"
+        );
         let top = align_octave(180.0, 179.92);
         assert!((top - 180.0).abs() < 0.05, "180 contra 179.92 salió {top}");
     }
@@ -601,10 +606,7 @@ mod tests {
         );
         let first = 60000.0 / parted.segments.first().unwrap().period_ms;
         let last = 60000.0 / parted.segments.last().unwrap().period_ms;
-        assert!(
-            (first - 120.0).abs() < 1.0,
-            "primer tramo {first}"
-        );
+        assert!((first - 120.0).abs() < 1.0, "primer tramo {first}");
         assert!((last - 126.0).abs() < 1.0, "último tramo {last}");
     }
 
@@ -639,7 +641,10 @@ mod tests {
             line.rms * 1000.0
         );
         let parted = grid_from_beats_direct(&chain, 125.0);
-        assert!(parted.segments.len() >= 2, "222 ms de estilo Chain sin tramos");
+        assert!(
+            parted.segments.len() >= 2,
+            "222 ms de estilo Chain sin tramos"
+        );
         let a = 60000.0 / parted.segments.first().unwrap().period_ms;
         let b = 60000.0 / parted.segments.last().unwrap().period_ms;
         assert!((a - 118.0).abs() < 1.0, "Chain inicio {a}");
@@ -701,6 +706,15 @@ mod tests {
         // Evidencia < 0,05, peine fuerte (≥ 4×), > 0,003 y ≥ 8 ventanas: se queda.
         assert!(!tempo_rejected(0.04, 8.0, 1.0, 8));
         assert!(tempo_rejected(0.04, 3.9, 1.0, 20), "pico < 4× media");
+        assert!(
+            tempo_rejected(0.04, 3.5, 1.0, 63),
+            "63 ventanas siguen en 4×"
+        );
+        assert!(
+            !tempo_rejected(0.04, 3.0, 1.0, 64),
+            "≥64 ventanas aceptan 3×"
+        );
+        assert!(tempo_rejected(0.04, 2.99, 1.0, 80), "bajo 3× se rechaza");
         assert!(tempo_rejected(0.04, 0.0, 0.0, 20), "peine mudo");
         assert!(tempo_rejected(0.003, 8.0, 1.0, 20), "evidencia ≤ 0,003");
         assert!(tempo_rejected(0.04, 8.0, 1.0, 7), "menos de 8 ventanas");
