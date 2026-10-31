@@ -153,6 +153,25 @@ bool radioArmStillValid({
   return radioOn && epoch == armEpoch;
 }
 
+/// El pre-armado sigue valiendo al volver de un await solo si el deck
+/// capturado sigue siendo el standby, el listener sigue en el deck activo,
+/// la pista del tick no cambió y no hay cruce. Si la entrante es la que
+/// ya suena, abrirla mezclaría la pista consigo misma.
+bool armStillValid({
+  required String? tickPath,
+  required String? currentPath,
+  required String? armPath,
+  required bool isCrossfading,
+  required bool sameActive,
+  required bool sameDeck,
+}) {
+  if (isCrossfading || currentPath != tickPath || !sameActive || !sameDeck) {
+    return false;
+  }
+  if (sameAudioPath(armPath, currentPath)) return false;
+  return true;
+}
+
 /// Efecto de apagar la radio. No toca el deck: la canción que suena sigue
 /// y la cola congelada vuelve a ser la visible. [nextPath] es la cabeza de
 /// esa cola; si el tipo es Stealth el motor vuelve a elegir por BPM.

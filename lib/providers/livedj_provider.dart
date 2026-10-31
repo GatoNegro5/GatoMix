@@ -1445,6 +1445,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             barMixOut > 10000) {
           _isStandbyArmed = true;
           _standbyArmedPath = null;
+          // El deck se fija ya: un cruce durante el await invierte los
+          // reproductores y el standby pasa a ser el que está sonando.
+          final armDeck = _standbyPlayer;
           final bool armingRadio = state.radioOn;
           final int armEpoch = _radioEpoch;
           // Radio encendida: la pista sale del universo de géneros, no de la cola.
@@ -1476,15 +1479,34 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             _radioPending = null;
             return;
           }
+          if (!armStillValid(
+            tickPath: tickPath,
+            currentPath: state.currentTrackPath,
+            armPath: armPath,
+            isCrossfading: _isCrossfading,
+            sameActive: player == _activePlayer,
+            sameDeck: armDeck == _standbyPlayer,
+          )) {
+            _isStandbyArmed = false;
+            _standbyArmedPath = null;
+            return;
+          }
           // La rampa ve el BPM de la entrante mientras el deck abre el archivo.
           _driftNextPath = armPath;
-          await _standbyPlayer.setVolume(0.0);
-          await _standbyPlayer.open(Media(armPath), play: false);
-          // Si durante la carga cambió la pista o empezó un cruce, este armado
-          // ya no vale: si no, se recarga el deck que está sonando.
-          if (state.currentTrackPath != tickPath ||
-              _isCrossfading ||
-              player != _activePlayer) {
+          await armDeck.setVolume(0.0);
+          await armDeck.open(Media(armPath), play: false);
+          // Si durante la carga cambió la pista, el deck o empezó un cruce,
+          // este armado ya no vale: si no, se recarga el deck que está sonando.
+          if (!armStillValid(
+            tickPath: tickPath,
+            currentPath: state.currentTrackPath,
+            armPath: armPath,
+            isCrossfading: _isCrossfading,
+            sameActive: player == _activePlayer,
+            sameDeck: armDeck == _standbyPlayer,
+          )) {
+            _isStandbyArmed = false;
+            _standbyArmedPath = null;
             return;
           }
           // Solo se da por precargada cuando la carga terminó de verdad.
@@ -2922,6 +2944,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     _usePlayerA = !_usePlayerA;
     _isStandbyArmed = false;
+    _standbyArmedPath = null;
     _attachListeners(_activePlayer);
 
     // Se quita por ruta (no por índice): la cola pudo cambiar durante la
