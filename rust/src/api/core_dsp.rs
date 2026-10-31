@@ -238,15 +238,18 @@ pub async fn decode_mono_pcm(
 /// Duración EXACTA en ms. Un MP3 sin cabecera Xing (o con carátula grande)
 /// hace que libmpv la ESTIME por tamaño/bitrate y se pase. Si el contenedor
 /// trae el total de cuadros se usa; si no, se suman las duraciones de los
-/// paquetes (sin decodificar). Devuelve 0 si no se puede determinar.
+/// paquetes. En MP3 se cuentan los frames reales: la cabecera Xing miente
+/// cuando hay otro audio pegado al final. Devuelve 0 si no se puede determinar.
 pub async fn exact_duration_ms(input_path: String) -> Result<u64, String> {
-    let (mut format, track_id, params) = open_format(&input_path)?;
+    decoded_duration_ms(&input_path)
+}
+
+fn decoded_duration_ms(input_path: &str) -> Result<u64, String> {
+    let (mut format, track_id, params) = open_format(input_path)?;
     let tb = match params.time_base {
         Some(tb) => tb,
         None => return Ok(0),
     };
-    // MP3: la cabecera Xing/Info suele mentir (archivos recortados, unidos o
-    // re-etiquetados) y libmpv la cree. En MP3 se cuentan los frames reales.
     let is_mp3 = params.codec == symphonia::core::codecs::CODEC_TYPE_MP3;
     if !is_mp3 {
         if let Some(n) = params.n_frames {
@@ -262,6 +265,70 @@ pub async fn exact_duration_ms(input_path: String) -> Result<u64, String> {
     }
     let t = tb.calc_time(total);
     Ok(t.seconds * 1000 + (t.frac * 1000.0) as u64)
+}
+
+/// Marca si el TLEN original y el audio medido difieren más de 10 s.
+/// El valor es `tlen=<ms>,audio=<ms>`. Sin TLEN previo no hay marca.
+pub fn len_mismatch_value(previous_tlen_ms: Option<u64>, audio_ms: u64) -> Option<String> {
+    let prev = previous_tlen_ms?;
+    if audio_ms.abs_diff(prev) > 10_000 {
+        Some(format!("tlen={prev},audio={audio_ms}"))
+    } else {
+        None
+    }
+}
+
+/// Reescribe el TLEN con la duración decodificada. No toca el audio.
+/// `audio=<ms>,tlen=<ms|none>,mismatch=<0|1>,wrote=<0|1>`.
+/// `tlen` es el valor que había antes de escribir.
+pub fn rewrite_tlen(input_path: String) -> Result<String, String> {
+    if !Path::new(&input_path).exists() {
+        return Err("Archivo no encontrado en I/O.".to_string());
+    }
+    if !is_mp3(&input_path) {
+        return Err("Solo MP3.".to_string());
+    }
+    let audio = decoded_duration_ms(&input_path)?;
+    if audio == 0 {
+        return Err("Sin duración decodificada.".to_string());
+    }
+    let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+    let prev = tag.duration().map(|d| d as u64);
+    let mismatch = len_mismatch_value(prev, audio);
+    let same = prev == Some(audio);
+    if !same {
+        tag.set_duration(audio as u32);
+        if let Some(value) = mismatch.clone() {
+            set_ext(&mut tag, "GMX_LEN_MISMATCH", value);
+        }
+        tag.write_to_path(&input_path, Version::Id3v24)
+            .map_err(|e| e.to_string())?;
+    }
+    let tlen = match prev {
+        Some(v) => v.to_string(),
+        None => "none".to_string(),
+    };
+    let mis = if mismatch.is_some() { "1" } else { "0" };
+    let wrote = if same { "0" } else { "1" };
+    Ok(format!(
+        "audio={audio},tlen={tlen},mismatch={mis},wrote={wrote}"
+    ))
+}
+
+#[cfg(test)]
+mod tlen_mark_tests {
+    use super::len_mismatch_value;
+
+    #[test]
+    fn marca_si_difiere_mas_de_10_s() {
+        assert_eq!(
+            len_mismatch_value(Some(224_209), 283_000).as_deref(),
+            Some("tlen=224209,audio=283000")
+        );
+        assert!(len_mismatch_value(Some(224_209), 230_000).is_none());
+        assert!(len_mismatch_value(None, 283_000).is_none());
+        assert!(len_mismatch_value(Some(283_000), 283_000).is_none());
+    }
 }
 
 /// Duración en ms para quien ya la usaba (mismo nombre). Ahora es exacta.
@@ -492,10 +559,13 @@ fn fold_display_bpm(mut bpm: f64, lo: f64, hi: f64) -> f64 {
     bpm
 }
 
-/// Ventana ~22 ms y salto ~11,6 ms (1024 y 512 muestras a 44,1 kHz).
+/// Ventana ~23 ms. El peine usa salto 512 (el de ahora). La envolvente de
+/// golpes usa 256, dentro de 128–256 a 44,1 kHz: el 512 cuantizaba ±1–2 BPM.
 /// Bello, Duxbury, Davies y Sandler, IEEE SPL 11(6), 2004.
-fn odf_stft(rate: u32) -> (usize, usize) {
-    let hop = ((rate as f64) * 512.0 / 44100.0).round().max(1.0) as usize;
+fn odf_stft_hop(rate: u32, hop_at_44100: f64) -> (usize, usize) {
+    let hop = ((rate as f64) * hop_at_44100 / 44100.0)
+        .round()
+        .clamp(1.0, 4096.0) as usize;
     let want = ((rate as f64) * 1024.0 / 44100.0).round().max(32.0) as usize;
     let up = want.next_power_of_two();
     let down = (up / 2).max(32);
@@ -512,7 +582,16 @@ fn odf_stft(rate: u32) -> (usize, usize) {
 /// el valor previsto de cada bin es la magnitud anterior con la fase
 /// extrapolada `2φ[n−1] − φ[n−2]`; la detección es la distancia euclídea.
 fn complex_odf(mono: &[f32], rate: u32) -> Option<(Vec<f64>, f64)> {
-    let (n_fft, hop) = odf_stft(rate);
+    complex_odf_hop(mono, rate, 512.0)
+}
+
+/// Envolvente de onsets con hop 256 a 44,1 kHz. Mismo detector complejo.
+fn onset_envelope(mono: &[f32], rate: u32) -> Option<(Vec<f64>, f64)> {
+    complex_odf_hop(mono, rate, 256.0)
+}
+
+fn complex_odf_hop(mono: &[f32], rate: u32, hop_at_44100: f64) -> Option<(Vec<f64>, f64)> {
+    let (n_fft, hop) = odf_stft_hop(rate, hop_at_44100);
     if rate < 8000 || mono.len() < n_fft.saturating_mul(4) || hop == 0 {
         return None;
     }
@@ -812,6 +891,35 @@ fn ellis_beats(odf: &[f64], period: f64) -> Vec<usize> {
     beats
 }
 
+/// El doble del peine, si pasa de 150, solo se queda con evidencia ≥ 1,7×.
+fn apply_double_guard(comb: f64, chosen: f64, ratio: f64) -> f64 {
+    let doubled = comb > 0.0 && (chosen - comb * 2.0).abs() <= (comb * 2.0).abs() * 1e-3;
+    if chosen > 150.0 && doubled && ratio < 1.7 {
+        comb
+    } else {
+        chosen
+    }
+}
+
+/// 60,25 → 120,5 no pasa de 150. 180 no es el doble de un peine que ya vale 180.
+/// Despacito (88,93 ×2) vuelve al peine si la evidencia no llega a 1,7.
+fn guard_double_time(env: &[f64], env_rate: f64, comb: f64, chosen: f64) -> f64 {
+    let doubled = comb > 0.0 && (chosen - comb * 2.0).abs() <= (comb * 2.0).abs() * 1e-3;
+    if !(chosen > 150.0 && doubled) {
+        return chosen;
+    }
+    let ev_c = crate::bpm_exact::onset_evidence(env, env_rate * 60.0 / comb);
+    let ev_d = crate::bpm_exact::onset_evidence(env, env_rate * 60.0 / chosen);
+    let ratio = if ev_c > 1e-12 {
+        ev_d / ev_c
+    } else if ev_d > 1e-12 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    apply_double_guard(comb, chosen, ratio)
+}
+
 /// TempoTrackV2 en limpio, desde los papers (qm-dsp es GPL; aquí no hay código suyo).
 ///
 /// 1. Detección de onsets en el dominio complejo (Duxbury 2003 / Bello 2004).
@@ -821,10 +929,15 @@ fn ellis_beats(odf: &[f64], period: f64) -> Vec<usize> {
 /// 5. Beat tracking por programación dinámica (Ellis 2007, α = 680).
 /// 6. Octava de visualización: ×2 o ÷2 solo para entrar en 60–180.
 fn estimate_tempo_track(mono: &[f32], rate: u32) -> Option<f64> {
-    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI)
+    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI).map(|g| g.bpm)
 }
 
-fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) -> Option<f64> {
+fn estimate_tempo_in(
+    mono: &[f32],
+    rate: u32,
+    display_lo: f64,
+    display_hi: f64,
+) -> Option<crate::bpm_exact::TempoGrid> {
     let debug = std::env::var_os("GMX_BPM_DEBUG").is_some();
     let (odf, env_rate) = complex_odf(mono, rate)?;
     // Inducción más ancha que la visualización, para que el peine vea el tactus
@@ -879,9 +992,7 @@ fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) 
         let mut row = vec![0.0; lags.len()];
         for (i, &lag) in lags.iter().enumerate() {
             let c = comb_score(&ac, lag).max(0.0);
-            if debug {
-                comb_acc[i] += c;
-            }
+            comb_acc[i] += c;
             row[i] = c * rayleigh_weight(lag, mode);
         }
         frames.push(row);
@@ -920,14 +1031,46 @@ fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) 
     if lag < 1.0 {
         return None;
     }
-    let bpm = 60.0 * env_rate / lag;
-    // Ellis coloca los golpes. El BPM es el del tempograma: el intervalo
-    // medio, en cuadros de 11,6 ms, cuantiza más que el pico parabólico.
-    let beats = ellis_beats(&odf, env_rate * 60.0 / bpm);
-    if cancel_now().is_err() {
+    let coarse_raw = 60.0 * env_rate / lag;
+    // El peine solo elige la octava. El número sale de la recta de los golpes.
+    let coarse = fold_display_bpm(coarse_raw, display_lo, display_hi);
+    if !(coarse.is_finite() && coarse > 0.0) {
         return None;
     }
-    let shown = fold_display_bpm(bpm, display_lo, display_hi);
+    let (fine, fine_rate) = onset_envelope(mono, rate).unwrap_or((odf.clone(), env_rate));
+    // ×2, ×1/2, ×4/3 y ×3/4 solo si superan al peine por más de 1,5×.
+    // Por debajo de 75, ×1,5 (6/8, 12/8). No hay ×2 ahí: rompe 60,25 y 62.
+    // Por encima de 150, el doble del peine solo se queda si la evidencia
+    // llega a 1,7× (Despacito se queda en 88,93; Happy en 160 pasa).
+    let chosen = crate::bpm_exact::choose_metric(&fine, fine_rate, coarse);
+    let metric = crate::bpm_exact::fold_compound(
+        &fine,
+        fine_rate,
+        guard_double_time(&fine, fine_rate, coarse, chosen),
+    );
+    // Un tono de 2 s no arma rejilla: evidencia baja y menos de 8 ventanas.
+    // Una canción larga con peine claro pasa aunque la evidencia quede
+    // entre 0,003 y 0,05 (Perfect, Shape of You).
+    let evidence = crate::bpm_exact::onset_evidence(&fine, fine_rate * 60.0 / metric);
+    let comb_peak = comb_acc.iter().copied().fold(0.0_f64, f64::max);
+    let comb_mean = if comb_acc.is_empty() {
+        0.0
+    } else {
+        comb_acc.iter().sum::<f64>() / comb_acc.len() as f64
+    };
+    if crate::bpm_exact::tempo_rejected(evidence, comb_peak, comb_mean, frames.len()) {
+        return None;
+    }
+    let beats = ellis_beats(&fine, fine_rate * 60.0 / metric);
+    if cancel_now().is_err() || beats.is_empty() {
+        return None;
+    }
+    // Un seno de 2 s arma 4 golpes espurios en una sola ventana. Sin 8 golpes
+    // y sin 8 ventanas no hay tempo (el test del tono puro sigue en blanco).
+    if frames.len() < 8 && beats.len() < 8 {
+        return None;
+    }
+    let grid = crate::bpm_exact::grid_from_onsets(&fine, &beats, fine_rate, metric)?;
     if debug {
         let mut order: Vec<usize> = (0..lags.len()).collect();
         order.sort_by(|&a, &b| {
@@ -952,117 +1095,30 @@ fn estimate_tempo_in(mono: &[f32], rate: u32, display_lo: f64, display_hi: f64) 
             .map(|i| format!("{:.1}:{:.3}", 60.0 * env_rate / lags[i], comb_acc[i]))
             .collect();
         eprintln!(
-            "tempo qm rate {rate} env {env_rate:.4} odf {} wins {} top [{}] peine [{}] viterbi_lag {:.1} pico_lag {:.2} bpm {bpm:.2} mostrado {shown:.2} golpes {}",
+            "tempo qm rate {rate} env {env_rate:.4} odf {} wins {} top [{}] peine [{}] viterbi_lag {:.1} pico_lag {:.2} octava {coarse:.2} bpm {:.2} golpes {} tramos {}",
             odf.len(),
             starts.len(),
             top.join(" "),
             top_c.join(" "),
             lags.get(around).copied().unwrap_or(0.0),
             lag,
-            beats.len()
+            grid.bpm,
+            beats.len(),
+            grid.segments.len()
         );
     }
-    if shown.is_finite() && shown > 0.0 {
-        Some(shown)
-    } else {
-        None
-    }
+    Some(grid)
 }
 
-/// BPM.
-/// Con TBPM previo: desempata ×4/3 y ×3/4 y pliega a 78–165 (no se toca).
-/// Sin TBPM previo: TempoTrackV2 (dominio complejo, peine, Rayleigh, Viterbi, Ellis).
-/// El buffer que llega es el tramo a medir (la canción entera, si cabe).
+/// BPM de toda la señal. La etiqueta previa no entra: el peine solo elige
+/// la octava y la recta de los golpes da el número.
 fn detect_bpm(mono: &[f32], rate: u32, prior: Option<f64>) -> Option<f64> {
-    if prior.and_then(fix_bpm_range).is_none() {
-        return estimate_tempo_track(mono, rate);
-    }
-    let total_s = mono.len() as f64 / rate as f64;
-    let (from, len) = if total_s > 100.0 {
-        (20.0, 80.0)
-    } else {
-        (0.0, total_s)
-    };
-    let s0 = (from * rate as f64) as usize;
-    let s1 = ((from + len) * rate as f64) as usize;
-    let seg = &mono[s0.min(mono.len())..s1.min(mono.len())];
-    let hop = (rate as usize / 200).max(1); // 5 ms
-    let env_rate = rate as f64 / hop as f64;
-    let n = seg.len() / hop;
-    if n < 400 {
-        return None;
-    }
-    // Energía de la señal diferenciada (resalta golpes).
-    let mut env: Vec<f64> = Vec::with_capacity(n);
-    for i in 0..n {
-        let s = &seg[i * hop..(i + 1) * hop];
-        let mut e = 0.0;
-        let mut prev = if i == 0 { 0.0 } else { seg[i * hop - 1] as f64 };
-        for v in s {
-            let d = *v as f64 - prev;
-            e += d * d;
-            prev = *v as f64;
-        }
-        env.push((1.0 + 1000.0 * e / hop as f64).ln());
-    }
-    // Flujo positivo y centrado.
-    let mut flux: Vec<f64> = (0..n)
-        .map(|i| {
-            if i == 0 {
-                0.0
-            } else {
-                (env[i] - env[i - 1]).max(0.0)
-            }
-        })
-        .collect();
-    let mean = flux.iter().sum::<f64>() / n as f64;
-    for v in flux.iter_mut() {
-        *v -= mean;
-    }
-    let min_lag = (env_rate * 60.0 / 200.0) as usize;
-    let max_lag = (env_rate * 60.0 / 55.0) as usize;
-    if max_lag * 4 + 2 >= n {
-        return None;
-    }
-    let ac = |lag: usize| -> f64 {
-        let mut c = 0.0;
-        for i in 0..(n - lag) {
-            c += flux[i] * flux[i + lag];
-        }
-        c / (n - lag) as f64
-    };
-    let mut best_lag = 0usize;
-    let mut best = f64::MIN;
-    let mut scores: Vec<f64> = vec![0.0; max_lag + 2];
-    for lag in min_lag..=max_lag {
-        let sc = ac(lag) + 0.5 * ac(lag * 2) + 0.25 * ac((lag * 4).min(n - 2));
-        scores[lag] = sc;
-        if sc > best {
-            best = sc;
-            best_lag = lag;
-        }
-    }
-    if best_lag == 0 || best <= 0.0 {
-        return None;
-    }
-    // Interpolación parabólica del pico.
-    let mut lag_f = best_lag as f64;
-    if best_lag > min_lag && best_lag < max_lag {
-        let (a, b, c) = (scores[best_lag - 1], scores[best_lag], scores[best_lag + 1]);
-        let denom = a - 2.0 * b + c;
-        if denom.abs() > 1e-12 {
-            lag_f += 0.5 * (a - c) / denom;
-        }
-    }
-    if let Some(want) = prior.and_then(fix_bpm_range) {
-        if let Some(lag) = lag_matching_prior(lag_f, &scores, env_rate, min_lag, max_lag, want) {
-            lag_f = lag;
-        }
-        // Con TBPM previo manda el alias (±2 %). La ventana 56–180 no corre:
-        // una cumbia en 108 se queda en 108 aunque 144 puntúe más.
-        return Some(fold_bpm_band(60.0 * env_rate / lag_f));
-    }
-    Some(fold_bpm_band(60.0 * env_rate / lag_f))
+    let _ = prior;
+    estimate_tempo_track(mono, rate).and_then(fix_bpm_range)
+}
+
+fn measure_tempo_grid(mono: &[f32], rate: u32) -> Option<crate::bpm_exact::TempoGrid> {
+    estimate_tempo_in(mono, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI)
 }
 
 /// Rejilla de golpes de un tramo: BPM medido y posición (ms absolutos en la
@@ -1091,69 +1147,20 @@ pub async fn beat_grid(input_path: String, from_ms: u64, span_secs: u32) -> Beat
         Err(_) => return none,
     };
     let mono = to_mono(&d);
-    let bpm = match detect_bpm(&mono, d.rate, None) {
-        Some(b) if b > 40.0 => b,
+    let grid = match measure_tempo_grid(&mono, d.rate) {
+        Some(g) if g.bpm > 40.0 && g.period_ms > 0.0 => g,
         _ => return none,
     };
-    let hop = (d.rate as usize / 200).max(1); // 5 ms
-    let env_rate = d.rate as f64 / hop as f64;
-    let n = mono.len() / hop;
-    if n < 400 {
-        return none;
-    }
-    let mut env: Vec<f64> = Vec::with_capacity(n);
-    for i in 0..n {
-        let s = &mono[i * hop..(i + 1) * hop];
-        let mut e = 0.0;
-        let mut prev = if i == 0 {
-            0.0
-        } else {
-            mono[i * hop - 1] as f64
-        };
-        for v in s {
-            let dv = *v as f64 - prev;
-            e += dv * dv;
-            prev = *v as f64;
-        }
-        env.push((1.0 + 1000.0 * e / hop as f64).ln());
-    }
-    let flux: Vec<f64> = (0..n)
-        .map(|i| {
-            if i == 0 {
-                0.0
-            } else {
-                (env[i] - env[i - 1]).max(0.0)
-            }
-        })
-        .collect();
-    let period = env_rate * 60.0 / bpm; // en cuadros de 5 ms
-    let steps = period.ceil() as usize;
-    let mut best_p = 0usize;
-    let mut best = f64::MIN;
-    for p in 0..steps {
-        let mut sc = 0.0;
-        let mut k = 0.0f64;
-        loop {
-            let c = p as f64 + k * period;
-            let i = c.round() as usize;
-            if i + 1 >= n {
-                break;
-            }
-            // tolerancia ±1 cuadro (5 ms)
-            let m = flux[i].max(flux[i.saturating_sub(1)]).max(flux[i + 1]);
-            sc += m;
-            k += 1.0;
-        }
-        if sc > best {
-            best = sc;
-            best_p = p;
-        }
-    }
-    let beat_ms = d.start_ms as f64 + best_p as f64 * hop as f64 * 1000.0 / d.rate as f64;
+    // El tramo medido usa su propia recta. Si hay deriva, el primer tramo
+    // es el que cubre el inicio de la ventana.
+    let (anchor_ms, bpm) = match grid.segments.first() {
+        Some(seg) if seg.period_ms > 0.0 => (seg.anchor_ms, 60000.0 / seg.period_ms),
+        _ => (grid.anchor_ms, grid.bpm),
+    };
     BeatGrid {
         ok: true,
         bpm,
-        beat_ms,
+        beat_ms: d.start_ms as f64 + anchor_ms,
     }
 }
 
@@ -1162,7 +1169,7 @@ struct Analysis {
     peak: f64,
     lead_ms: u64,
     tail_ms: u64,
-    bpm: Option<f64>,
+    grid: Option<crate::bpm_exact::TempoGrid>,
 }
 
 fn analyze_file(input_path: &str) -> Result<Analysis, String> {
@@ -1186,13 +1193,13 @@ fn analyze_file(input_path: &str) -> Result<Analysis, String> {
     let lufs = integrated_lufs(&d);
     let mono = to_mono(&d);
     let (lead_ms, tail_ms) = edge_silence_ms(&mono, d.rate);
-    let bpm = detect_bpm(&mono, d.rate, None);
+    let grid = measure_tempo_grid(&mono, d.rate);
     Ok(Analysis {
         lufs,
         peak,
         lead_ms,
         tail_ms,
-        bpm,
+        grid,
     })
 }
 
@@ -1220,8 +1227,17 @@ fn num_from(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(0.0)
 }
 
-/// Número de un TBPM ya escrito. Acepta `144`, `144.00`, espacios, nulos y
-/// una coma decimal. No pliega ni descarta por rango: si hay cifra, existe.
+/// `173.12` con punto. Nunca `17312` ni `173,12`.
+fn format_tbpm(bpm: f64) -> String {
+    format!("{:.2}", bpm)
+}
+
+/// Número de un TBPM ya escrito.
+///
+/// `144`, `144.00`, espacios y nulos. La coma decimal (`146,70`) vale como
+/// punto. Sin separador, un entero fuera de tempo que partido por 100 cae
+/// en 40–250 es BPM×100 (`17312` = 173,12, `09548` = 95,48, `08635`, `08571`).
+/// `144` se queda en 144.
 fn parse_tbpm_text(raw: &str) -> Option<(f64, String)> {
     let token = raw
         .split('\0')
@@ -1243,11 +1259,21 @@ fn parse_tbpm_text(raw: &str) -> Option<(f64, String)> {
         }
     }
     let value: f64 = num.parse().ok()?;
-    if value.is_finite() && value > 0.0 {
-        Some((value, token.to_string()))
-    } else {
-        None
+    if !(value.is_finite() && value > 0.0) {
+        return None;
     }
+    let has_sep = token.contains('.') || token.contains(',');
+    let value = if !has_sep && value > 300.0 {
+        let scaled = value / 100.0;
+        if (40.0..=250.0).contains(&scaled) {
+            scaled
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+    Some((value, token.to_string()))
 }
 
 fn decode_tbpm_body(encoding: u8, body: &[u8]) -> Option<(f64, String)> {
@@ -1343,8 +1369,12 @@ fn tbpm_in_id3(data: &[u8]) -> Option<(f64, String)> {
 
 struct StoredBpm {
     value: f64,
+    /// Texto original del frame. El medidor ya no lo copia: lo lee el test
+    /// de parseo y quien inspecciona el tag.
+    #[allow(dead_code)]
     token: String,
-    /// El frame ya está cargado en el tag. No hay que reescribirlo.
+    /// El frame ya está cargado en el tag.
+    #[allow(dead_code)]
     in_tag: bool,
 }
 
@@ -1427,7 +1457,11 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
         return Ok(false);
     }
     let mut tag = Tag::read_from_path(input_path).unwrap_or_else(|_| Tag::new());
+    if !force && is_mastered(&tag) && analysis_current(&tag) {
+        return Ok(true);
+    }
     if !force && is_mastered(&tag) {
+        refresh_analysis_tags(input_path)?;
         return Ok(true);
     }
     let a = analyze_file(input_path)?;
@@ -1437,13 +1471,17 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
     set_ext(&mut tag, KEY_LUFS, format!("{:.2}", a.lufs));
     set_ext(&mut tag, KEY_LEAD, a.lead_ms.to_string());
     set_ext(&mut tag, KEY_TAIL, a.tail_ms.to_string());
-    let stored = stored_bpm(input_path, &tag);
-    if let Some(s) = &stored {
-        if !s.in_tag {
-            tag.set_text("TBPM", s.token.clone());
-        }
-    } else if let Some(b) = a.bpm {
-        tag.set_text("TBPM", b.round().to_string());
+    if let Some(grid) = &a.grid {
+        let old = stored_bpm(input_path, &tag).map(|s| s.value).unwrap_or(0.0);
+        stamp_grid(&mut tag, grid, "FULL");
+        let name = Path::new(input_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(input_path);
+        eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
+    }
+    if let Ok(audio) = decoded_duration_ms(input_path) {
+        write_measured_duration(&mut tag, audio);
     }
     set_ext(&mut tag, KEY_V, MASTER_VERSION.to_string());
     tag.write_to_path(input_path, Version::Id3v24)
@@ -1485,26 +1523,13 @@ fn auto_detect_body(input_path: String) -> Result<f64, String> {
     let _watch = CancelWatch::enter();
     cancel_now()?;
     if is_mp3(&input_path) {
-        let tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
-        if let Some(s) = stored_bpm(&input_path, &tag) {
-            return Ok(s.value);
-        }
+        return refresh_analysis_tags(&input_path);
     }
-    // La pista completa. 150 s en Hello se quedaban en el verso (~235 BPM)
-    // y el pliegue 60–180 lo mostraba como 117,45.
     let d = decode_channels(&input_path, 0, MAX_ANALYZE_SECS, 2)
         .map_err(|e| format!("Fallo DSP: {}", e))?;
-    let mono = to_mono(&d);
-    let bpm = detect_bpm(&mono, d.rate, None)
+    let grid = measure_tempo_grid(&to_mono(&d), d.rate)
         .ok_or("Anomalía determinista: Sin periodicidad".to_string())?;
-    let rounded = bpm.round();
-    if is_mp3(&input_path) {
-        let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
-        tag.set_text("TBPM", rounded.to_string());
-        tag.write_to_path(&input_path, Version::Id3v24)
-            .map_err(|e| format!("Fallo I/O al sellar ID3: {}", e))?;
-    }
-    Ok(rounded)
+    Ok(grid.bpm)
 }
 
 // --------------------------------------------------------------------- género
@@ -1980,8 +2005,9 @@ fn encode_plain_mp3(
 /// El bitrate es el que pidió Descargas (no el promedio del AAC). Sin TBPM:
 /// Masterizar lo mide después, sin volver a codificar si las marcas ya están.
 fn encode_mastered_mp3(input: &str, output: &str, kbps: u32) -> Result<bool, String> {
-    let m = measure_stream(input)?;
-    if blocking_decode_errors(&m) > 0 {
+    let take = read_audio(input, true)?;
+    let m = &take.measure;
+    if blocking_decode_errors(m) > 0 {
         encode_plain_mp3(input.to_string(), output.to_string(), kbps)?;
         let mut tag = Tag::read_from_path(output).unwrap_or_else(|_| Tag::new());
         set_ext(
@@ -1994,10 +2020,10 @@ fn encode_mastered_mp3(input: &str, output: &str, kbps: u32) -> Result<bool, Str
             .map_err(|e| e.to_string())?;
         return Ok(true);
     }
-    let plan = plan_span(&m, true, true, -1, -1, 0.0);
+    let plan = plan_span(m, true, true, -1, -1, 0.0);
     let tmp = format!("{output}.part");
     encode_master_span(
-        input,
+        &take.pcm,
         &tmp,
         m.rate,
         m.channels,
@@ -2057,6 +2083,10 @@ const KEY_TRIM_TAIL: &str = "GMX_TRIM_TAIL_MS";
 const KEY_LRC_SHIFT: &str = "GMX_LRC_SHIFT";
 const KEY_BPM_OK: &str = "GMX_BPM_OK";
 const KEY_BPM_SCOPE: &str = "GMX_BPM_SCOPE";
+/// Versión del medidor de BPM, rejilla y duración. 3031 = recta de golpes.
+const KEY_ANALYSIS: &str = "GMX_ANALYSIS";
+const ANALYSIS_V: &str = "3031";
+const KEY_GRID: &str = "GMX_GRID";
 const KEY_LUFS_DONE: &str = "GMX_LUFS_DONE";
 const KEY_K: &str = "GMX_K";
 const KEY_BACKUP: &str = "GMX_BACKUP";
@@ -2135,13 +2165,21 @@ fn blocking_decode_errors(m: &StreamMeasure) -> u32 {
 
 fn bitrate_at_most(kbps: u32) -> mp3lame_encoder::Bitrate {
     use mp3lame_encoder::Bitrate as B;
-    // Hacia abajo: un 112 se queda en 96, un 200 en 192. Nunca 128 → 320.
-    match kbps {
-        0..=127 => B::Kbps96,
-        128..=159 => B::Kbps128,
-        160..=191 => B::Kbps160,
-        192..=255 => B::Kbps192,
-        256..=319 => B::Kbps256,
+    // Hacia arriba, al peldaño MPEG que LAME escribe. El master no baja
+    // del promedio de origen. Tope 320.
+    match cap_kbps(kbps as f64) {
+        32 => B::Kbps32,
+        40 => B::Kbps40,
+        48 => B::Kbps48,
+        64 => B::Kbps64,
+        80 => B::Kbps80,
+        96 => B::Kbps96,
+        112 => B::Kbps112,
+        128 => B::Kbps128,
+        160 => B::Kbps160,
+        192 => B::Kbps192,
+        224 => B::Kbps224,
+        256 => B::Kbps256,
         _ => B::Kbps320,
     }
 }
@@ -2337,6 +2375,19 @@ fn decode_frames_ex(
 }
 
 fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
+    Ok(read_audio(input_path, false)?.measure)
+}
+
+struct AudioTake {
+    measure: StreamMeasure,
+    /// PCM entrelazado (los mismos frames que midió `measure`). Vacío si
+    /// no se pidió guardarlo.
+    pcm: Vec<f32>,
+}
+
+/// Una pasada: decodifica, mide sonoridad y silencios, y opcionalmente
+/// se queda el PCM para codificar y medir el BPM sin volver a abrir el archivo.
+fn read_audio(input_path: &str, keep_pcm: bool) -> Result<AudioTake, String> {
     let mut rate = 0u32;
     let mut channels = 1usize;
     let mut samples = 0u64;
@@ -2350,6 +2401,7 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
     let mut peak = 0.0f32;
     let mut hl = [0f32; 4];
     let mut hr = [0f32; 4];
+    let mut pcm: Vec<f32> = Vec::new();
 
     let mut err_pos: Vec<(u64, bool)> = Vec::new();
     let mut first_loud: Option<u64> = None;
@@ -2365,6 +2417,9 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
                 let (a, b) = k_stages(r as f64);
                 let (c, d) = k_stages(r as f64);
                 filt = Some((a, b, c, d));
+            }
+            if keep_pcm {
+                pcm.extend_from_slice(inter);
             }
             let (s1l, s2l, s1r, s2r) = filt.as_mut().unwrap();
             let nch = nch.max(1);
@@ -2413,15 +2468,25 @@ fn measure_stream(input_path: &str) -> Result<StreamMeasure, String> {
     let guard = rate as u64 / 4;
     let silent_edge_errors =
         count_silent_edge_errors(&err_pos, fl, first_loud.is_some(), last_loud, guard);
-    Ok(StreamMeasure {
-        rate,
-        channels,
-        samples,
-        mono_ms,
-        k_ms,
-        true_peak: peak,
-        decode_errors,
-        silent_edge_errors,
+    let width = channels.max(1);
+    if keep_pcm && pcm.len() != samples as usize * width {
+        return Err("El PCM no coincide con el conteo de muestras.".to_string());
+    }
+    if !keep_pcm {
+        pcm.clear();
+    }
+    Ok(AudioTake {
+        measure: StreamMeasure {
+            rate,
+            channels,
+            samples,
+            mono_ms,
+            k_ms,
+            true_peak: peak,
+            decode_errors,
+            silent_edge_errors,
+        },
+        pcm,
     })
 }
 
@@ -2498,12 +2563,139 @@ fn fix_bpm_range(bpm: f64) -> Option<f64> {
     }
 }
 
-/// Un TBPM ya escrito se respeta tal cual. El medido solo entra si no hay.
-fn resolve_bpm(measured: Option<f64>, existing: f64) -> f64 {
-    if existing.is_finite() && existing > 0.0 {
-        return existing;
+/// El medido gana. La etiqueta previa no se confirma ni se conserva como
+/// resultado: si no hay medición, no hay BPM nuevo (0 = no escribir).
+fn resolve_bpm(measured: Option<f64>, _existing: f64) -> f64 {
+    match measured {
+        Some(b) if b.is_finite() && b > 0.0 => (b * 100.0).round() / 100.0,
+        _ => 0.0,
     }
-    measured.and_then(fix_bpm_range).unwrap_or(0.0)
+}
+
+fn analysis_current(tag: &Tag) -> bool {
+    ext_text(tag, KEY_ANALYSIS).as_deref() == Some(ANALYSIS_V)
+}
+
+/// Audio ya masterizado: hay corte decidido y el −14 está sellado.
+fn audio_mastered(tag: &Tag) -> bool {
+    ext_text(tag, KEY_TRIM).is_some() && ext_text(tag, KEY_LUFS_DONE).as_deref() == Some("-14")
+}
+
+fn stamp_grid(tag: &mut Tag, grid: &crate::bpm_exact::TempoGrid, scope: &str) {
+    tag.set_text("TBPM", format_tbpm(grid.bpm));
+    set_ext(tag, KEY_GRID, crate::bpm_exact::encode_grid(grid));
+    set_ext(tag, KEY_BPM_OK, "1".to_string());
+    set_ext(tag, KEY_BPM_SCOPE, scope.to_string());
+    set_ext(tag, KEY_ANALYSIS, ANALYSIS_V.to_string());
+}
+
+fn write_measured_duration(tag: &mut Tag, audio_ms: u64) {
+    if audio_ms == 0 {
+        return;
+    }
+    let prev = tag.duration().map(|d| d as u64);
+    if prev == Some(audio_ms) {
+        return;
+    }
+    tag.set_duration(audio_ms as u32);
+    if let Some(value) = len_mismatch_value(prev, audio_ms) {
+        set_ext(tag, "GMX_LEN_MISMATCH", value);
+    }
+}
+
+/// BPM + rejilla + TLEN. No recodifica. Si la versión ya es la actual, no abre el audio.
+fn refresh_analysis_tags(path: &str) -> Result<f64, String> {
+    if !on_worker_thread() {
+        let owned = path.to_string();
+        return run_on_master_worker(move || refresh_analysis_tags(&owned));
+    }
+    if !Path::new(path).exists() {
+        return Err("Archivo no encontrado en I/O.".to_string());
+    }
+    if !is_mp3(path) {
+        return Err("Solo MP3.".to_string());
+    }
+    let mut tag = Tag::read_from_path(path).unwrap_or_else(|_| Tag::new());
+    let old = stored_bpm(path, &tag).map(|s| s.value).unwrap_or(0.0);
+    // Versión actual con BPM ya escrito: no se abre el audio. BPM 0 (o
+    // ausente) se vuelve a medir aunque GMX_ANALYSIS esté al día.
+    if analysis_current(&tag) && old > 0.0 {
+        return Ok(old);
+    }
+    let audio = decoded_duration_ms(path)?;
+    let grid = measure_path_grid(path, false).ok_or("Sin periodicidad".to_string())?;
+    stamp_grid(&mut tag, &grid, "FULL");
+    write_measured_duration(&mut tag, audio);
+    tag.write_to_path(path, Version::Id3v24)
+        .map_err(|e| format!("Fallo I/O al guardar etiquetas: {e}"))?;
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
+    Ok(grid.bpm)
+}
+
+fn measure_path_grid(path: &str, intro: bool) -> Option<crate::bpm_exact::TempoGrid> {
+    let span = if intro { 60u32 } else { MAX_ANALYZE_SECS };
+    let d = decode_channels(path, 0, span, 2).ok()?;
+    measure_tempo_grid(&to_mono(&d), d.rate)
+}
+
+/// BPM del PCM ya decodificado, en el tramo que se conserva (sin reabrir el archivo).
+fn grid_from_pcm(
+    pcm: &[f32],
+    channels: usize,
+    rate: u32,
+    head: u64,
+    tail: u64,
+    intro: bool,
+) -> Option<crate::bpm_exact::TempoGrid> {
+    let nch = channels.max(1);
+    if rate == 0 || pcm.len() < nch {
+        return None;
+    }
+    let frames = pcm.len() / nch;
+    let end = frames.saturating_sub(tail as usize);
+    let start = (head as usize).min(end);
+    let cap = if intro {
+        rate as usize * 60
+    } else {
+        rate as usize * MAX_ANALYZE_SECS as usize
+    };
+    let stop = end.min(start.saturating_add(cap));
+    if stop <= start {
+        return None;
+    }
+    let mut mono = Vec::with_capacity(stop - start);
+    for i in start..stop {
+        let base = i * nch;
+        let mut s = 0.0f32;
+        for c in 0..nch {
+            s += pcm.get(base + c).copied().unwrap_or(0.0);
+        }
+        mono.push(s / nch as f32);
+    }
+    measure_tempo_grid(&mono, rate)
+}
+
+fn rewrite_from_tags(tag: &Tag, bpm: f64) -> MasterRewrite {
+    MasterRewrite {
+        trim_head_ms: 0,
+        trim_tail_ms: 0,
+        lead_ms: ext_text(tag, KEY_LEAD)
+            .map(|s| num_from(&s) as u32)
+            .unwrap_or(0),
+        tail_ms: ext_text(tag, KEY_TAIL)
+            .map(|s| num_from(&s) as u32)
+            .unwrap_or(0),
+        bpm,
+        lufs: ext_text(tag, KEY_LUFS).map(|s| num_from(&s)).unwrap_or(0.0),
+        lufs_applied: false,
+        bitrate_kbps: 0,
+        rewritten: false,
+        residual_ms: 0,
+    }
 }
 
 fn syncsafe_u32(b: &[u8]) -> usize {
@@ -2574,6 +2766,104 @@ fn kbps_of_audio(audio_len: u64, samples: u64, rate: u32) -> u32 {
     ((audio_len as f64 * 8.0) / secs / 1000.0).round() as u32
 }
 
+/// Promedio exacto en kbps: (bytes de audio × 8) / duración.
+fn kbps_exact(audio_len: u64, samples: u64, rate: u32) -> f64 {
+    if samples == 0 || rate == 0 || audio_len == 0 {
+        return 128.0;
+    }
+    let secs = samples as f64 / rate as f64;
+    if secs < 0.4 {
+        return 128.0;
+    }
+    (audio_len as f64 * 8.0) / secs / 1000.0
+}
+
+/// Peldaños MPEG-1 Layer III que LAME puede escribir. Sin 56: el enum no lo tiene.
+const MPEG_KBPS: [u32; 13] = [32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+
+/// Al peldaño siguiente, nunca por debajo. Tope 320.
+fn round_up_mpeg_kbps(kbps: f64) -> u32 {
+    if !kbps.is_finite() || kbps <= 0.0 {
+        return 128;
+    }
+    for &step in &MPEG_KBPS {
+        if (step as f64) + 1e-6 >= kbps {
+            return step;
+        }
+    }
+    320
+}
+
+fn cap_kbps(avg_kbps: f64) -> u32 {
+    round_up_mpeg_kbps(avg_kbps).min(320)
+}
+
+/// Bytes que declara Xing/Info o VBRI, si el primer frame los trae.
+fn vbr_header_bytes(audio: &[u8]) -> Option<u64> {
+    let last = audio.len().saturating_sub(4).min(8192);
+    let mut i = 0usize;
+    while i < last {
+        if audio[i] == 0xFF && audio[i + 1] & 0xE0 == 0xE0 {
+            let ver = (audio[i + 1] >> 3) & 0x03;
+            let layer = (audio[i + 1] >> 1) & 0x03;
+            let br = (audio[i + 2] >> 4) & 0x0F;
+            if ver != 0x01 && layer == 0x01 && br != 0 && br != 0x0F {
+                return xing_or_vbri_bytes(audio, i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn xing_or_vbri_bytes(audio: &[u8], off: usize) -> Option<u64> {
+    if off + 4 > audio.len() {
+        return None;
+    }
+    let ver = (audio[off + 1] >> 3) & 0x03;
+    let mono = (audio[off + 3] >> 6) & 0x03 == 0x03;
+    let side = if ver == 0x03 {
+        if mono {
+            17
+        } else {
+            32
+        }
+    } else if mono {
+        9
+    } else {
+        17
+    };
+    let xing_at = off + 4 + side;
+    if audio.len() >= xing_at + 16
+        && (&audio[xing_at..xing_at + 4] == b"Xing" || &audio[xing_at..xing_at + 4] == b"Info")
+    {
+        let flags = u32::from_be_bytes(audio[xing_at + 4..xing_at + 8].try_into().ok()?);
+        let mut p = xing_at + 8;
+        if flags & 0x01 != 0 {
+            p += 4;
+        }
+        if flags & 0x02 != 0 && audio.len() >= p + 4 {
+            let bytes = u32::from_be_bytes(audio[p..p + 4].try_into().ok()?);
+            if bytes > 0 {
+                return Some(bytes as u64);
+            }
+        }
+    }
+    let vbri_at = off + 36;
+    if audio.len() >= vbri_at + 14 && &audio[vbri_at..vbri_at + 4] == b"VBRI" {
+        let bytes = u32::from_be_bytes(audio[vbri_at + 10..vbri_at + 14].try_into().ok()?);
+        if bytes > 0 {
+            return Some(bytes as u64);
+        }
+    }
+    None
+}
+
+fn average_from_audio(audio: &[u8], samples: u64, rate: u32) -> u32 {
+    let bytes = vbr_header_bytes(audio).unwrap_or(audio.len() as u64);
+    cap_kbps(kbps_exact(bytes, samples, rate))
+}
+
 /// Bitrate del primer frame MPEG válido (CBR del codec). No mira el tamaño del archivo.
 fn mpeg_bitrate_kbps(audio: &[u8]) -> Option<u32> {
     const V1_L3: [u32; 16] = [
@@ -2602,22 +2892,16 @@ fn mpeg_bitrate_kbps(audio: &[u8]) -> Option<u32> {
     None
 }
 
-/// El tamaño no puede subir el bitrate por encima del que declara el frame.
-fn cap_kbps(from_size: u32, codec: Option<u32>) -> u32 {
-    match codec {
-        Some(c) if from_size > c => c,
-        _ => from_size,
-    }
-}
-
 fn average_kbps(path: &str, samples: u64, rate: u32) -> u32 {
     let data = match std::fs::read(path) {
         Ok(d) if !d.is_empty() => d,
         _ => return 128,
     };
     let (start, end) = audio_byte_range(&data);
-    let from_size = kbps_of_audio((end - start) as u64, samples, rate);
-    cap_kbps(from_size, mpeg_bitrate_kbps(&data[start..end]))
+    if start >= end {
+        return 128;
+    }
+    average_from_audio(&data[start..end], samples, rate)
 }
 
 struct LookLim {
@@ -2628,13 +2912,48 @@ struct LookLim {
     ceiling: f32,
     bl: std::collections::VecDeque<f32>,
     br: std::collections::VecDeque<f32>,
+    hl: [f32; 4],
+    hr: [f32; 4],
+    /// (índice, pico interpolado de esa muestra). El frente es el máximo.
+    maxq: std::collections::VecDeque<(u64, f32)>,
+    seq: u64,
 }
 
-fn buf_true_peak(buf: &std::collections::VecDeque<f32>) -> f32 {
+/// Pico interpolado de UNA muestra (la misma cuenta que un paso de `consider_peak`).
+fn interp_peak(hist: &mut [f32; 4], sample: f32) -> f32 {
+    hist[0] = hist[1];
+    hist[1] = hist[2];
+    hist[2] = hist[3];
+    hist[3] = sample;
+    let (y0, y1, y2, y3) = (
+        hist[0] as f64,
+        hist[1] as f64,
+        hist[2] as f64,
+        hist[3] as f64,
+    );
+    let mut peak = (y1.abs() as f32).max(y2.abs() as f32);
+    for t in [0.25_f64, 0.5, 0.75] {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let v = 0.5
+            * ((2.0 * y1)
+                + (-y0 + y2) * t
+                + (2.0 * y0 - 5.0 * y1 + 4.0 * y2 - y3) * t2
+                + (-y0 + 3.0 * y1 - 3.0 * y2 + y3) * t3);
+        peak = peak.max(v.abs() as f32);
+    }
+    peak
+}
+
+/// Las 3 primeras muestras del buffer se interpolan contra ceros (el escaneo
+/// viejo reiniciaba el historial). El resto ya quedó medido al entrar.
+fn edge_true_peak(buf: &std::collections::VecDeque<f32>) -> f32 {
     let mut hist = [0f32; 4];
     let mut peak = 0.0f32;
-    for &s in buf.iter() {
-        consider_peak(&mut hist, s, &mut peak);
+    let n = buf.len().min(3);
+    for i in 0..n {
+        let s = buf.get(i).copied().unwrap_or(0.0);
+        peak = peak.max(interp_peak(&mut hist, s));
     }
     peak
 }
@@ -2652,16 +2971,44 @@ impl LookLim {
             ceiling,
             bl: std::collections::VecDeque::new(),
             br: std::collections::VecDeque::new(),
+            hl: [0.0; 4],
+            hr: [0.0; 4],
+            maxq: std::collections::VecDeque::new(),
+            seq: 0,
         }
     }
 
     fn push(&mut self, l: f32, r: f32) -> Option<(f32, f32)> {
         self.bl.push_back(l);
         self.br.push_back(r);
+        let p = interp_peak(&mut self.hl, l).max(interp_peak(&mut self.hr, r));
+        let idx = self.seq;
+        self.seq += 1;
+        while self.maxq.back().map(|(_, v)| *v <= p).unwrap_or(false) {
+            self.maxq.pop_back();
+        }
+        self.maxq.push_back((idx, p));
         if self.bl.len() <= self.n {
             return None;
         }
-        let peak = buf_true_peak(&self.bl).max(buf_true_peak(&self.br));
+        let len = self.bl.len() as u64;
+        let oldest = self.seq - len;
+        let stable_from = oldest + 3;
+        while self
+            .maxq
+            .front()
+            .map(|(i, _)| *i < stable_from)
+            .unwrap_or(false)
+        {
+            self.maxq.pop_front();
+        }
+        let peak = self
+            .maxq
+            .front()
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+            .max(edge_true_peak(&self.bl))
+            .max(edge_true_peak(&self.br));
         let target = if peak > self.ceiling {
             self.ceiling / peak
         } else {
@@ -2697,10 +3044,19 @@ fn gain_for(lufs: f64, do_lufs: bool) -> f32 {
     10f32.powf((db / 20.0) as f32)
 }
 
-/// Codifica el tramo conservado. `head`/`tail` en muestras.
-/// Devuelve el retardo residual en ms (0 si el tag gapless quedó escrito).
+struct EncodeTimes {
+    limit_ms: u128,
+    encode_ms: u128,
+    verify_ms: u128,
+    reencode_ms: u128,
+    encodes: u32,
+    out_lufs: f64,
+}
+
+/// Codifica el tramo conservado desde el PCM ya decodificado. `head`/`tail`
+/// en muestras. Devuelve el retardo residual en ms (0 si el tag gapless quedó escrito).
 fn encode_span(
-    input_path: &str,
+    pcm: &[f32],
     tmp: &str,
     rate_hint: u32,
     channels: usize,
@@ -2712,6 +3068,7 @@ fn encode_span(
     kbps: u32,
     ceiling: f32,
 ) -> Result<u32, String> {
+    let nch = channels.max(1);
     let end = samples.saturating_sub(tail);
     if end <= head {
         return Err("El recorte dejaría la pista sin música.".to_string());
@@ -2722,11 +3079,10 @@ fn encode_span(
     } else {
         0
     };
-    let mut sink = Mp3Sink::new_no_upsample(tmp, rate_hint, channels > 1, kbps)?;
+    let mut sink = Mp3Sink::new_no_upsample(tmp, rate_hint, nch > 1, kbps)?;
     let mut lim = LookLim::new(rate_hint, ceiling);
-    let mut seen: u64 = 0;
     let mut batch: Vec<f32> = Vec::with_capacity(8192);
-    let ch_out = if channels > 1 { 2 } else { 1 };
+    let ch_out = if nch > 1 { 2 } else { 1 };
 
     let push_pair =
         |batch: &mut Vec<f32>, sink: &mut Mp3Sink, l: f32, r: f32| -> Result<(), String> {
@@ -2741,35 +3097,40 @@ fn encode_span(
             Ok(())
         };
 
-    decode_frames(input_path, true, |_, nch, inter| {
-        let nch = nch.max(1);
-        for frame in inter.chunks(nch) {
-            let idx = seen;
-            seen += 1;
-            if idx < head || idx >= end {
-                continue;
-            }
-            let mut l = frame[0] * gain;
-            let mut r = (if nch > 1 { frame[1] } else { frame[0] }) * gain;
-            if fade_n > 0 {
-                let pos = idx - head;
-                if pos + fade_n >= kept {
-                    let remain = (kept - pos) as f32 / fade_n as f32;
-                    let g = remain.clamp(0.0, 1.0);
-                    l *= g;
-                    r *= g;
-                }
-            }
-            if limit {
-                if let Some((ol, orr)) = lim.push(l, r) {
-                    push_pair(&mut batch, &mut sink, ol, orr)?;
-                }
-            } else {
-                push_pair(&mut batch, &mut sink, l, r)?;
+    let mut since_check = 0usize;
+    for idx in head..end {
+        since_check += 1;
+        if since_check >= CANCEL_BLOCK {
+            since_check = 0;
+            cancel_now()?;
+        }
+        let base = (idx as usize).saturating_mul(nch);
+        if base >= pcm.len() {
+            break;
+        }
+        let mut l = pcm[base] * gain;
+        let mut r = (if nch > 1 {
+            pcm.get(base + 1).copied().unwrap_or(pcm[base])
+        } else {
+            pcm[base]
+        }) * gain;
+        if fade_n > 0 {
+            let pos = idx - head;
+            if pos + fade_n >= kept {
+                let remain = (kept - pos) as f32 / fade_n as f32;
+                let g = remain.clamp(0.0, 1.0);
+                l *= g;
+                r *= g;
             }
         }
-        Ok(())
-    })?;
+        if limit {
+            if let Some((ol, orr)) = lim.push(l, r) {
+                push_pair(&mut batch, &mut sink, ol, orr)?;
+            }
+        } else {
+            push_pair(&mut batch, &mut sink, l, r)?;
+        }
+    }
     if limit {
         for (ol, orr) in lim.flush() {
             push_pair(&mut batch, &mut sink, ol, orr)?;
@@ -2782,10 +3143,149 @@ fn encode_span(
     Ok(gap.residual_ms)
 }
 
-/// Codifica y mide el MP3. Si el pico real pasa de −1 dBTP, baja el techo.
-/// Si el LUFS medido se sale de −14 ±0,3, corrige la ganancia y repite.
+/// LUFS integrado del PCM ya limitado (misma curva K y las mismas ventanas
+/// de 10 ms que `read_audio`). No abre el MP3.
+fn pcm_lufs(inter: &[f32], rate: u32, channels: usize) -> f64 {
+    if rate == 0 || inter.is_empty() {
+        return -70.0;
+    }
+    let nch = channels.max(1);
+    let win = (rate as usize / 100).max(1);
+    let (mut s1l, mut s2l) = k_stages(rate as f64);
+    let (mut s1r, mut s2r) = k_stages(rate as f64);
+    let mut acc_k = 0.0f64;
+    let mut acc_n = 0usize;
+    let mut k_ms: Vec<f64> = Vec::new();
+    for frame in inter.chunks(nch) {
+        if frame.is_empty() {
+            continue;
+        }
+        let l = frame[0];
+        let rgt = if nch > 1 {
+            frame.get(1).copied().unwrap_or(l)
+        } else {
+            l
+        };
+        let kl = k_one(&mut s1l, &mut s2l, l);
+        let kr = if nch > 1 {
+            k_one(&mut s1r, &mut s2r, rgt)
+        } else {
+            kl
+        };
+        acc_k += kl * kl + kr * kr;
+        acc_n += 1;
+        if acc_n >= win {
+            k_ms.push(acc_k / acc_n as f64);
+            acc_k = 0.0;
+            acc_n = 0;
+        }
+    }
+    lufs_of(&k_ms)
+}
+
+/// Ganancia, fade de cola y limitador, en memoria. El PCM de salida ya está
+/// limitado: el encode posterior no vuelve a pasar por LookLim.
+fn render_limited_span(
+    pcm: &[f32],
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    gain: f32,
+    ceiling: f32,
+) -> Result<Vec<f32>, String> {
+    let nch = channels.max(1);
+    let end = samples.saturating_sub(tail);
+    if end <= head {
+        return Err("El recorte dejaría la pista sin música.".to_string());
+    }
+    let kept = end - head;
+    let fade_n = if tail > 0 {
+        ms_to_samples(TAIL_FADE_MS, rate).min(kept / 4).max(1)
+    } else {
+        0
+    };
+    let ch_out = if nch > 1 { 2 } else { 1 };
+    let mut lim = LookLim::new(rate, ceiling);
+    let mut out = Vec::with_capacity((kept as usize + 8) * ch_out);
+    let mut since_check = 0usize;
+    for idx in head..end {
+        since_check += 1;
+        if since_check >= CANCEL_BLOCK {
+            since_check = 0;
+            cancel_now()?;
+        }
+        let base = (idx as usize).saturating_mul(nch);
+        if base >= pcm.len() {
+            break;
+        }
+        let mut l = pcm[base] * gain;
+        let mut r = (if nch > 1 {
+            pcm.get(base + 1).copied().unwrap_or(pcm[base])
+        } else {
+            pcm[base]
+        }) * gain;
+        if fade_n > 0 {
+            let pos = idx - head;
+            if pos + fade_n >= kept {
+                let g = ((kept - pos) as f32 / fade_n as f32).clamp(0.0, 1.0);
+                l *= g;
+                r *= g;
+            }
+        }
+        if let Some((ol, orr)) = lim.push(l, r) {
+            out.push(ol);
+            if ch_out == 2 {
+                out.push(orr);
+            }
+        }
+    }
+    for (ol, orr) in lim.flush() {
+        out.push(ol);
+        if ch_out == 2 {
+            out.push(orr);
+        }
+    }
+    Ok(out)
+}
+
+/// Limita y corrige la ganancia hasta dejar el PCM posterior en −14.
+fn tune_limited_pcm(
+    pcm: &[f32],
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    gain: &mut f32,
+    ceiling: f32,
+    gain0: f32,
+) -> Result<Vec<f32>, String> {
+    let ch_out = if channels.max(1) > 1 { 2 } else { 1 };
+    let mut limited =
+        render_limited_span(pcm, rate, channels, samples, head, tail, *gain, ceiling)?;
+    for _ in 0..2 {
+        let lufs = pcm_lufs(&limited, rate, ch_out);
+        if lufs <= -50.0 {
+            break;
+        }
+        let db = TARGET_LUFS - lufs;
+        if db.abs() <= 0.05 {
+            break;
+        }
+        *gain = (*gain * 10f32.powf((db.clamp(-12.0, 12.0) / 20.0) as f32))
+            .clamp(gain0 * 0.25, gain0 * 4.0);
+        limited = render_limited_span(pcm, rate, channels, samples, head, tail, *gain, ceiling)?;
+    }
+    Ok(limited)
+}
+
+/// Ganancia cerrada sobre el PCM ya limitado (−14) y una sola codificación.
+/// La verificación mide el MP3; si se va de −14 por más de 0,3 LU (o el pico
+/// pasa de −1 dBTP) se corrige y se codifica como mucho una vez más.
 fn encode_master_span(
-    input_path: &str,
+    pcm: &[f32],
     tmp: &str,
     rate_hint: u32,
     channels: usize,
@@ -2795,34 +3295,67 @@ fn encode_master_span(
     mut gain: f32,
     limit: bool,
     kbps: u32,
-) -> Result<u32, String> {
+) -> Result<(u32, EncodeTimes), String> {
+    let mut times = EncodeTimes {
+        limit_ms: 0,
+        encode_ms: 0,
+        verify_ms: 0,
+        reencode_ms: 0,
+        encodes: 0,
+        out_lufs: 0.0,
+    };
     if !limit {
+        let t = std::time::Instant::now();
         let residual = encode_span(
-            input_path, tmp, rate_hint, channels, samples, head, tail, gain, false, kbps, TP_LIMIT,
+            pcm, tmp, rate_hint, channels, samples, head, tail, gain, false, kbps, TP_LIMIT,
         )?;
-        verify_encoded(tmp)?;
-        return Ok(residual);
+        times.encode_ms = t.elapsed().as_millis();
+        times.encodes = 1;
+        let t = std::time::Instant::now();
+        let measured = measure_stream(tmp)?;
+        times.verify_ms = t.elapsed().as_millis();
+        times.out_lufs = verify_measured(tmp, &measured)?;
+        return Ok((residual, times));
     }
     let gain0 = gain;
     let mut ceiling = TP_LIMIT;
+    let ch_out = if channels.max(1) > 1 { 2 } else { 1 };
+    let tlim = std::time::Instant::now();
+    let mut limited = tune_limited_pcm(
+        pcm, rate_hint, channels, samples, head, tail, &mut gain, ceiling, gain0,
+    )?;
+    times.limit_ms = tlim.elapsed().as_millis();
+    let mut frames = (limited.len() / ch_out) as u64;
+    if frames == 0 {
+        return Err("El recorte dejaría la pista sin música.".to_string());
+    }
     let mut residual = 0u32;
-    for attempt in 0..4 {
+    for attempt in 0..2 {
         cancel_now()?;
+        let t = std::time::Instant::now();
         residual = encode_span(
-            input_path, tmp, rate_hint, channels, samples, head, tail, gain, true, kbps, ceiling,
+            &limited, tmp, rate_hint, ch_out, frames, 0, 0, 1.0, false, kbps, ceiling,
         )?;
-        let measured = measure_stream(tmp)?;
-        if measured.samples == 0 || measured.decode_errors > 0 {
-            let _ = std::fs::remove_file(tmp);
-            return Err("La verificación no decodificó el temporal.".to_string());
+        let took = t.elapsed().as_millis();
+        if attempt == 0 {
+            times.encode_ms = took;
+        } else {
+            times.reencode_ms += took;
         }
-        let out_lufs = lufs_of(&measured.k_ms);
+        times.encodes += 1;
+        let t = std::time::Instant::now();
+        let measured = measure_stream(tmp)?;
+        times.verify_ms += t.elapsed().as_millis();
+        let out_lufs = verify_measured(tmp, &measured)?;
+        times.out_lufs = out_lufs;
         let tp_ok = measured.true_peak <= TP_CEILING;
-        let lufs_ok = out_lufs > -50.0 && (out_lufs - TARGET_LUFS).abs() <= LUFS_TOL;
-        if (tp_ok && lufs_ok) || attempt == 3 {
-            return Ok(residual);
+        let miss = (out_lufs - TARGET_LUFS).abs();
+        let lufs_ok = out_lufs > -50.0 && miss <= LUFS_TOL;
+        if (tp_ok && lufs_ok) || attempt == 1 {
+            return Ok((residual, times));
         }
         let _ = std::fs::remove_file(tmp);
+        let tfix = std::time::Instant::now();
         if !lufs_ok && out_lufs > -50.0 {
             let db = (TARGET_LUFS - out_lufs).clamp(-3.0, 3.0);
             gain = (gain * 10f32.powf((db / 20.0) as f32)).clamp(gain0 * 0.5, gain0 * 2.0);
@@ -2830,8 +3363,12 @@ fn encode_master_span(
         if !tp_ok {
             ceiling = (ceiling * 10f32.powf(-1.0 / 20.0)).max(TP_LIMIT_FLOOR);
         }
+        limited =
+            render_limited_span(pcm, rate_hint, channels, samples, head, tail, gain, ceiling)?;
+        frames = (limited.len() / ch_out) as u64;
+        times.reencode_ms += tfix.elapsed().as_millis();
     }
-    Ok(residual)
+    Ok((residual, times))
 }
 
 struct SpanPlan {
@@ -2948,27 +3485,21 @@ fn detect_validated(
     intro: bool,
     prior: Option<f64>,
 ) -> Option<f64> {
-    let has_prior = prior.and_then(fix_bpm_range).is_some();
-    // Sin TBPM: la pista completa, desde el inicio, hasta 15 min. Un recorte
-    // de 90 o 150 s en Hello medía ~235 y el pliegue 60–180 (solo ×2/÷2)
-    // lo dejaba en 117,45. Con TBPM se queda el tramo de antes.
+    let _ = prior;
+    // La pista completa, desde el inicio, hasta 15 min. Un megamix pide solo
+    // la intro (60 s): el mismo medidor, no otro algoritmo.
     let total_s = if samples == 0 || rate == 0 {
         MAX_ANALYZE_SECS as u64
     } else {
         (samples / rate as u64).max(8)
     };
-    let (from, span) = if intro {
-        (0u32, 60u32)
-    } else if has_prior && total_s > 100 {
-        ((total_s / 2).saturating_sub(40) as u32, 80u32)
-    } else if has_prior {
-        (0u32, (total_s.min(150)) as u32)
+    let span = if intro {
+        60u32
     } else {
-        (0u32, (total_s.min(MAX_ANALYZE_SECS as u64)) as u32)
+        (total_s.min(MAX_ANALYZE_SECS as u64)) as u32
     };
-    let d = decode_channels(path, from, span.max(8), 2).ok()?;
-    let bpm = detect_bpm(&to_mono(&d), d.rate, prior)?;
-    fix_bpm_range(bpm)
+    let d = decode_channels(path, 0, span.max(8), 2).ok()?;
+    detect_bpm(&to_mono(&d), d.rate, None)
 }
 
 fn opt_i32(tag: &Tag, key: &str) -> i32 {
@@ -3001,6 +3532,8 @@ fn gmx_key_ok(key: &str) -> bool {
             | KEY_LRC_SHIFT
             | KEY_BPM_OK
             | KEY_BPM_SCOPE
+            | KEY_ANALYSIS
+            | KEY_GRID
             | KEY_LUFS_DONE
             | KEY_K
             | KEY_BACKUP
@@ -3237,6 +3770,20 @@ impl PriorityGuard {
         }
         Self { active }
     }
+
+    /// Sin bajar el hilo: el master por carpeta (`--master-folder`) va en
+    /// primer plano. El de la app sigue con `enter`.
+    fn skip() -> Self {
+        Self { active: false }
+    }
+}
+
+/// `--master-folder` o `GMX_HEADLESS`: no aplicar EcoQoS / background / nice.
+fn headless_master_folder() -> bool {
+    if std::env::var_os("GMX_HEADLESS").is_some() {
+        return true;
+    }
+    std::env::args().any(|a| a == "--master-folder" || a.starts_with("--master-folder="))
 }
 
 impl Drop for PriorityGuard {
@@ -3488,8 +4035,7 @@ mod win_priority {
 
 /// El temporal tiene que decodificar. LUFS y pico se leen en la misma pasada
 /// (la decisión de −14 y −1 dBTP la toma el bucle de `encode_master_span`).
-fn verify_encoded(tmp: &str) -> Result<(), String> {
-    let measured = measure_stream(tmp)?;
+fn verify_measured(tmp: &str, measured: &StreamMeasure) -> Result<f64, String> {
     if measured.samples == 0 || measured.decode_errors > 0 {
         let _ = std::fs::remove_file(tmp);
         return Err("La verificación no decodificó el temporal.".to_string());
@@ -3500,7 +4046,7 @@ fn verify_encoded(tmp: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(tmp);
         return Err("La verificación no obtuvo LUFS ni pico del temporal.".to_string());
     }
-    Ok(())
+    Ok(lufs)
 }
 
 /// Muestras máximas entre dos lecturas de la X. Dentro de 4096–65536.
@@ -3564,7 +4110,9 @@ fn cancel_now() -> Result<(), String> {
     if watching && master_cancel_flag().load(std::sync::atomic::Ordering::Acquire) {
         Err(CANCELLED.to_string())
     } else if watching
-        && SONG_DEADLINE.with(|t| t.get()).is_some_and(|d| std::time::Instant::now() >= d)
+        && SONG_DEADLINE
+            .with(|t| t.get())
+            .is_some_and(|d| std::time::Instant::now() >= d)
     {
         Err(SONG_TIMEOUT.to_string())
     } else {
@@ -3583,7 +4131,9 @@ mod song_timeout_tests {
             assert!(cancel_now().is_ok());
             // Solo este hilo: no toca el entorno de los demás tests.
             SONG_DEADLINE.with(|t| {
-                t.set(Some(std::time::Instant::now() - std::time::Duration::from_millis(1)))
+                t.set(Some(
+                    std::time::Instant::now() - std::time::Duration::from_millis(1),
+                ))
             });
             assert_eq!(cancel_now().unwrap_err(), SONG_TIMEOUT);
         }
@@ -3677,7 +4227,11 @@ pub fn master_rewrite(
             )
         });
     }
-    let _prio = PriorityGuard::enter();
+    let _prio = if headless_master_folder() {
+        PriorityGuard::skip()
+    } else {
+        PriorityGuard::enter()
+    };
     let _watch = CancelWatch::enter();
     cancel_now()?;
     if !Path::new(&input_path).exists() {
@@ -3687,33 +4241,61 @@ pub fn master_rewrite(
         return Err("Solo MP3.".to_string());
     }
     let mut tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+    // Audio ya hecho. Versión actual con BPM > 0: no se abre el PCM.
+    // BPM 0 se vuelve a medir. Versión vieja: solo BPM, rejilla y duración.
+    if force_head_ms < 0 && force_tail_ms < 0 && audio_mastered(&tag) {
+        let stored = stored_bpm(&input_path, &tag)
+            .map(|s| s.value)
+            .unwrap_or(0.0);
+        if analysis_current(&tag) && stored > 0.0 {
+            return Ok(rewrite_from_tags(&tag, stored));
+        }
+        match refresh_analysis_tags(&input_path) {
+            Ok(bpm) => {
+                let tag = Tag::read_from_path(&input_path).unwrap_or(tag);
+                return Ok(rewrite_from_tags(&tag, bpm));
+            }
+            Err(e) => {
+                if analysis_current(&tag) && stored <= 0.0 {
+                    return Ok(rewrite_from_tags(&tag, 0.0));
+                }
+                return Err(e);
+            }
+        }
+    }
     let already_trim = ext_text(&tag, KEY_TRIM).is_some();
     let already_lufs = ext_text(&tag, KEY_LUFS_DONE).as_deref() == Some("-14");
     let do_trim = do_trim && !already_trim;
     let do_lufs = do_lufs && !already_lufs;
 
     let need_audio = do_trim || do_lufs;
+    let mut decode_ms: u128 = 0;
+    let mut pcm: Vec<f32> = Vec::new();
+    let t_decode = std::time::Instant::now();
     let mut measured = if need_audio {
-        Some(measure_stream(&input_path)?)
+        let take = read_audio(&input_path, true)?;
+        pcm = take.pcm;
+        Some(take.measure)
     } else {
         None
     };
+    decode_ms += t_decode.elapsed().as_millis();
     // Etapa 2 (1.0.12+26): si hay paquetes rotos que bloquean, reparar sin
     // pérdida (estilo mp3val) y volver a medir. Solo se queda la reparación
     // si deja de bloquear; el original queda en `<archivo>.prerepair.bak`.
     let mut rescue_note: Option<String> = None;
-    if let Some(m) = &measured {
-        if blocking_decode_errors(m) > 0 {
-            if let Some((note, m2)) = try_lossless_repair(&input_path, m.decode_errors)? {
-                tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
-                measured = Some(m2);
-                rescue_note = Some(note);
-            } else {
-                rescue_note = Some(format!(
-                    "FAIL:repair_no_help,decode_errors={}",
-                    m.decode_errors
-                ));
-            }
+    let broken = measured.as_ref().map(|m| m.decode_errors).unwrap_or(0);
+    if measured.as_ref().map(blocking_decode_errors).unwrap_or(0) > 0 {
+        if let Some((note, _m2)) = try_lossless_repair(&input_path, broken)? {
+            tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
+            let t_decode = std::time::Instant::now();
+            let take = read_audio(&input_path, true)?;
+            decode_ms += t_decode.elapsed().as_millis();
+            pcm = take.pcm;
+            measured = Some(take.measure);
+            rescue_note = Some(note);
+        } else {
+            rescue_note = Some(format!("FAIL:repair_no_help,decode_errors={broken}"));
         }
     }
 
@@ -3798,8 +4380,16 @@ pub fn master_rewrite(
 
     let mut rewritten = false;
     let mut residual_ms = 0u32;
+    let mut encode_times = EncodeTimes {
+        limit_ms: 0,
+        encode_ms: 0,
+        verify_ms: 0,
+        reencode_ms: 0,
+        encodes: 0,
+        out_lufs: 0.0,
+    };
     let bpm_path: String;
-    if let Some(m) = &measured {
+    let (bpm_head, bpm_tail) = if let Some(m) = &measured {
         let head_s = if cut_head_ms >= 50 {
             ms_to_samples(cut_head_ms, m.rate)
         } else {
@@ -3813,8 +4403,8 @@ pub fn master_rewrite(
         let audio_change = head_s > 0 || tail_s > 0 || lufs_encode;
         if audio_change {
             let tmp = format!("{input_path}.gmxpart");
-            residual_ms = encode_master_span(
-                &input_path,
+            let (residual, times) = encode_master_span(
+                &pcm,
                 &tmp,
                 m.rate,
                 m.channels,
@@ -3829,14 +4419,19 @@ pub fn master_rewrite(
                 let _ = std::fs::remove_file(&tmp);
                 e
             })?;
+            residual_ms = residual;
+            encode_times = times;
             bpm_path = tmp;
             rewritten = true;
+            (head_s, tail_s)
         } else {
             bpm_path = input_path.clone();
+            (0, 0)
         }
     } else {
         bpm_path = input_path.clone();
-    }
+        (0, 0)
+    };
 
     let (samples_for_bpm, rate_for_bpm) = if let Some(m) = &measured {
         let head_s = if do_trim {
@@ -3857,21 +4452,26 @@ pub fn master_rewrite(
         (0u64, 0u32)
     };
     let stored = stored_bpm(&input_path, &tag);
-    let existing_bpm = stored.as_ref().map(|s| s.value).unwrap_or(0.0);
-    // Con paquetes rotos el medido sale de un PCM incompleto: no pisa el TBPM.
-    // Si el archivo ya trae TBPM, no se mide para reemplazarlo.
-    let measured_bpm = if blocked || stored.is_some() {
+    let old_bpm = stored.as_ref().map(|s| s.value).unwrap_or(0.0);
+    // Con paquetes rotos el PCM está incompleto: no se inventa un BPM.
+    // Con audio sano se mide siempre, aunque ya hubiera TBPM.
+    let t_bpm = std::time::Instant::now();
+    let grid = if blocked {
         None
+    } else if let Some(m) = &measured {
+        let _ = (samples_for_bpm, rate_for_bpm, &bpm_path);
+        grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm)
     } else {
-        detect_validated(&bpm_path, samples_for_bpm, rate_for_bpm, intro_bpm, None)
+        measure_path_grid(&bpm_path, intro_bpm)
     };
+    let bpm_ms = t_bpm.elapsed().as_millis();
     if let Err(e) = cancel_now() {
         if rewritten {
             discard_partial(&bpm_path);
         }
         return Err(e);
     }
-    let bpm = resolve_bpm(measured_bpm, existing_bpm);
+    let bpm = grid.as_ref().map(|g| g.bpm).unwrap_or(0.0);
 
     if do_trim && !blocked {
         set_ext(&mut tag, KEY_TRIM, cut_head_ms.to_string());
@@ -3893,20 +4493,21 @@ pub fn master_rewrite(
             format!("{TP_CEILING:.6}"),
         );
     }
-    if bpm > 0.0 {
-        if let Some(s) = &stored {
-            if !s.in_tag {
-                tag.set_text("TBPM", s.token.clone());
-            }
+    if let Some(g) = &grid {
+        stamp_grid(&mut tag, g, if intro_bpm { "INTRO" } else { "FULL" });
+        let dur_path = if rewritten {
+            bpm_path.as_str()
         } else {
-            tag.set_text("TBPM", format!("{}", bpm.round() as i32));
+            input_path.as_str()
+        };
+        if let Ok(audio) = decoded_duration_ms(dur_path) {
+            write_measured_duration(&mut tag, audio);
         }
-        set_ext(&mut tag, KEY_BPM_OK, "1".to_string());
-        set_ext(
-            &mut tag,
-            KEY_BPM_SCOPE,
-            if intro_bpm { "INTRO" } else { "FULL" }.to_string(),
-        );
+        let name = Path::new(&input_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(input_path.as_str());
+        eprintln!("BPM_FIX {name} {old_bpm:.2}->{:.2}", g.bpm);
     }
     if blocked {
         set_ext(
@@ -3962,6 +4563,20 @@ pub fn master_rewrite(
         tag.write_to_path(&input_path, Version::Id3v24)
             .map_err(|e| e.to_string())?;
     }
+
+    let stage_name = Path::new(&input_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(input_path.as_str());
+    eprintln!(
+        "MASTER_STAGE decode_measure_ms={decode_ms} limit_ms={} encode_ms={} verify_ms={} reencode_ms={} bpm_ms={bpm_ms} encodes={} out_lufs={:.2} file={stage_name}",
+        encode_times.limit_ms,
+        encode_times.encode_ms,
+        encode_times.verify_ms,
+        encode_times.reencode_ms,
+        encode_times.encodes,
+        encode_times.out_lufs,
+    );
 
     Ok(MasterRewrite {
         trim_head_ms: cut_head_ms as u32,
@@ -4621,17 +5236,29 @@ mod master_guard_tests {
     use super::*;
 
     #[test]
-    fn el_tbpm_previo_no_se_sobrescribe() {
-        // Blondie: el archivo trae 144 y el medido es 141,18. Se queda 144.
-        assert_eq!(resolve_bpm(Some(141.18), 144.0), 144.0);
-        assert_eq!(resolve_bpm(Some(144.0), 108.0), 108.0);
-        assert_eq!(resolve_bpm(Some(148.4), 108.0), 108.0);
-        assert_eq!(resolve_bpm(Some(120.0), 108.0), 108.0);
-        assert_eq!(resolve_bpm(None, 108.0), 108.0);
-        let libre = resolve_bpm(Some(141.18), 0.0);
+    fn el_medido_pisa_la_etiqueta_previa() {
+        // Bad Case: el archivo trae 144 y el medido es 146,67. Se queda el medido.
+        assert_eq!(resolve_bpm(Some(146.67), 144.0), 146.67);
+        assert_eq!(resolve_bpm(Some(144.71), 146.70), 144.71);
+        assert_eq!(resolve_bpm(Some(141.18), 144.0), 141.18);
+        assert_eq!(resolve_bpm(None, 108.0), 0.0);
+        let libre = resolve_bpm(Some(141.184), 0.0);
         assert!((libre - 141.18).abs() < 0.011, "{libre}");
         let (v, _) = parse_tbpm_text("144.00").unwrap();
         assert_eq!(v, 144.0);
+        let (h, _) = parse_tbpm_text("17312").unwrap();
+        assert!((h - 173.12).abs() < 1e-9, "17312 → {h}");
+        let (a, _) = parse_tbpm_text("09548").unwrap();
+        assert!((a - 95.48).abs() < 1e-9, "09548 → {a}");
+        let (b, _) = parse_tbpm_text("08635").unwrap();
+        assert!((b - 86.35).abs() < 1e-9, "08635 → {b}");
+        let (c, _) = parse_tbpm_text("08571").unwrap();
+        assert!((c - 85.71).abs() < 1e-9, "08571 → {c}");
+        let (k, _) = parse_tbpm_text("146,70").unwrap();
+        assert!((k - 146.70).abs() < 1e-9, "coma → {k}");
+        assert_eq!(format_tbpm(146.666), "146.67");
+        assert!(!format_tbpm(173.12).contains(','), "el punto no es coma");
+        assert_eq!(format_tbpm(173.12), "173.12");
         let (v, _) = parse_tbpm_text(" 144 \0").unwrap();
         assert_eq!(v, 144.0);
         let (v, _) = parse_tbpm_text("144\0\0").unwrap();
@@ -4678,7 +5305,7 @@ mod master_guard_tests {
     }
 
     #[test]
-    fn el_kbps_ignora_id3_y_ape_y_no_sube_del_frame() {
+    fn el_kbps_ignora_id3_y_el_vbr_no_se_queda_en_el_primer_frame() {
         let secs = 10.0;
         let samples = (44100.0 * secs) as u64;
         let audio_len = 200_000usize;
@@ -4699,20 +5326,235 @@ mod master_guard_tests {
             naive > 250,
             "con la carátula el promedio inflado es {naive}"
         );
-        let capped = cap_kbps(from_audio, mpeg_bitrate_kbps(&file[start..end]));
-        assert_eq!(capped, 160);
+        // ID3 y APE fuera: 160 se queda en 160. La carátula no entra en el promedio.
+        assert_eq!(average_from_audio(&file[start..end], samples, 44100), 160);
         assert!(matches!(
-            bitrate_at_most(capped),
+            bitrate_at_most(160),
             mp3lame_encoder::Bitrate::Kbps160
         ));
+        // 125 kbps reales, primer frame a 64 (el fallo VBR: antes capaba a 64 → 96).
+        let mut vbr = vec![0u8; 156_250];
+        vbr[0..4].copy_from_slice(&[0xFF, 0xFB, 0x50, 0x00]);
+        assert_eq!(mpeg_bitrate_kbps(&vbr), Some(64));
+        assert_eq!(average_from_audio(&vbr, samples, 44100), 128);
         assert!(matches!(
-            bitrate_at_most(naive),
-            mp3lame_encoder::Bitrate::Kbps256
+            bitrate_at_most(128),
+            mp3lame_encoder::Bitrate::Kbps128
         ));
-        // El frame dice 160: un promedio inflado no puede subir a 256.
-        assert_eq!(cap_kbps(naive, Some(160)), 160);
-        // Tampoco se sube un promedio más bajo hasta el frame.
-        assert_eq!(cap_kbps(128, Some(160)), 128);
+        // Xing manda aunque el buffer sea corto: 156250 bytes / 10 s = 125 → 128.
+        let mut xing = vec![0u8; 80];
+        xing[0..4].copy_from_slice(&[0xFF, 0xFB, 0x50, 0x00]);
+        xing[36..40].copy_from_slice(b"Xing");
+        xing[40..44].copy_from_slice(&0x0000_0002u32.to_be_bytes());
+        xing[44..48].copy_from_slice(&156_250u32.to_be_bytes());
+        assert_eq!(average_from_audio(&xing, samples, 44100), 128);
+        // VBRI, mismo promedio.
+        let mut vbri = vec![0u8; 80];
+        vbri[0..4].copy_from_slice(&[0xFF, 0xFB, 0x50, 0x00]);
+        vbri[36..40].copy_from_slice(b"VBRI");
+        vbri[46..50].copy_from_slice(&156_250u32.to_be_bytes());
+        assert_eq!(average_from_audio(&vbri, samples, 44100), 128);
+        assert_eq!(cap_kbps(192.0), 192);
+        assert_eq!(cap_kbps(192.2), 224);
+        assert_eq!(cap_kbps(400.0), 320);
+    }
+
+    #[test]
+    fn el_doble_por_encima_de_150_exige_17() {
+        assert!((apply_double_guard(88.93, 177.86, 1.60) - 88.93).abs() < 1e-6);
+        assert!((apply_double_guard(88.93, 177.86, 1.70) - 177.86).abs() < 1e-6);
+        assert!((apply_double_guard(80.0, 160.0, 1.69) - 80.0).abs() < 1e-9);
+        assert!((apply_double_guard(80.0, 160.0, 1.70) - 160.0).abs() < 1e-9);
+        assert!((apply_double_guard(60.25, 120.5, 1.2) - 120.5).abs() < 1e-9);
+        assert!((apply_double_guard(180.0, 180.0, 1.0) - 180.0).abs() < 1e-9);
+        assert!((apply_double_guard(117.18, 117.18, 0.4) - 117.18).abs() < 1e-9);
+        assert!((apply_double_guard(95.01, 190.02, 1.60) - 95.01).abs() < 1e-6);
+        assert!((apply_double_guard(96.18, 192.36, 1.60) - 96.18).abs() < 1e-6);
+    }
+
+    struct OldLim {
+        n: usize,
+        gain: f32,
+        att: f32,
+        rel: f32,
+        ceiling: f32,
+        bl: std::collections::VecDeque<f32>,
+        br: std::collections::VecDeque<f32>,
+    }
+
+    impl OldLim {
+        fn new(rate: u32, ceiling: f32) -> Self {
+            let n = ((rate as usize) * 5 / 1000).max(8);
+            let att = 1.0 - (-1.0_f32 / (0.001 * rate as f32)).exp();
+            let rel = 1.0 - (-1.0_f32 / (0.080 * rate as f32)).exp();
+            Self {
+                n,
+                gain: 1.0,
+                att,
+                rel,
+                ceiling,
+                bl: std::collections::VecDeque::new(),
+                br: std::collections::VecDeque::new(),
+            }
+        }
+
+        fn push(&mut self, l: f32, r: f32) -> Option<(f32, f32)> {
+            self.bl.push_back(l);
+            self.br.push_back(r);
+            if self.bl.len() <= self.n {
+                return None;
+            }
+            let peak = old_buf_peak(&self.bl).max(old_buf_peak(&self.br));
+            let target = if peak > self.ceiling {
+                self.ceiling / peak
+            } else {
+                1.0
+            };
+            let c = if target < self.gain {
+                self.att
+            } else {
+                self.rel
+            };
+            self.gain += (target - self.gain) * c;
+            Some((
+                self.bl.pop_front().unwrap_or(0.0) * self.gain,
+                self.br.pop_front().unwrap_or(0.0) * self.gain,
+            ))
+        }
+
+        fn flush(mut self) -> Vec<(f32, f32)> {
+            let mut o = Vec::with_capacity(self.bl.len());
+            while let Some(l) = self.bl.pop_front() {
+                let r = self.br.pop_front().unwrap_or(l);
+                o.push((l * self.gain, r * self.gain));
+            }
+            o
+        }
+    }
+
+    fn old_buf_peak(buf: &std::collections::VecDeque<f32>) -> f32 {
+        let mut hist = [0f32; 4];
+        let mut peak = 0.0f32;
+        for &s in buf.iter() {
+            consider_peak(&mut hist, s, &mut peak);
+        }
+        peak
+    }
+
+    fn run_lim(samples: &[(f32, f32)], rate: u32, ceiling: f32, new_lim: bool) -> Vec<(f32, f32)> {
+        let mut out = Vec::with_capacity(samples.len());
+        if new_lim {
+            let mut lim = LookLim::new(rate, ceiling);
+            for &(l, r) in samples {
+                if let Some(p) = lim.push(l, r) {
+                    out.push(p);
+                }
+            }
+            out.extend(lim.flush());
+        } else {
+            let mut lim = OldLim::new(rate, ceiling);
+            for &(l, r) in samples {
+                if let Some(p) = lim.push(l, r) {
+                    out.push(p);
+                }
+            }
+            out.extend(lim.flush());
+        }
+        out
+    }
+
+    #[test]
+    fn el_limitador_nuevo_iguala_al_viejo_y_el_encode_informa_etapas() {
+        let _g = guard_master();
+        let rate = 44100u32;
+        let n = rate as usize * 2;
+        let mut state = 0x00C0_FFEEu32;
+        let mut samples = Vec::with_capacity(n);
+        for i in 0..n {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let noise = ((state >> 8) as f32 / 16_777_216.0) * 2.0 - 1.0;
+            let s = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin();
+            let mut l = s * 0.55 + noise * 0.04;
+            let mut r = (i as f32 * 330.0 * std::f32::consts::TAU / rate as f32).sin() * 0.40
+                + noise * 0.03;
+            if i % 640 == 0 {
+                l = 1.15;
+                r = -1.05;
+            }
+            samples.push((l, r));
+        }
+        let ceiling = TP_LIMIT;
+        let t0 = std::time::Instant::now();
+        let old = run_lim(&samples, rate, ceiling, false);
+        let old_ms = t0.elapsed().as_millis();
+        let t1 = std::time::Instant::now();
+        let new = run_lim(&samples, rate, ceiling, true);
+        let new_ms = t1.elapsed().as_millis();
+        assert_eq!(old.len(), new.len());
+        let mut max_abs = 0.0f32;
+        let mut max_db = 0.0f32;
+        for ((a, b), (c, d)) in old.iter().zip(new.iter()) {
+            max_abs = max_abs.max((a - c).abs()).max((b - d).abs());
+            for (x, y) in [(a, c), (b, d)] {
+                let xa = x.abs().max(1e-12);
+                let ya = y.abs().max(1e-12);
+                max_db = max_db.max((20.0 * (xa / ya).log10()).abs());
+            }
+        }
+        eprintln!(
+            "LIMIT_FIXTURE samples={n} old_ms={old_ms} new_ms={new_ms} max_abs={max_abs:.3e} max_db={max_db:.4}"
+        );
+        assert!(
+            max_abs == 0.0 || max_db <= 0.01,
+            "el limitador se fue {max_db:.4} dB (abs {max_abs:.3e})"
+        );
+
+        let secs = 4usize;
+        let mut pcm = vec![0f32; rate as usize * secs];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.22;
+        }
+        let mut at = rate as usize / 2;
+        while at + 40 < pcm.len() {
+            for k in 0..40 {
+                pcm[at + k] = 0.98;
+            }
+            at += rate as usize / 2;
+        }
+        let dir = std::env::temp_dir().join(format!("gmx_limfix_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fix.mp3");
+        let path_s = path.to_string_lossy().to_string();
+        let (residual, times) = encode_master_span(
+            &pcm,
+            &path_s,
+            rate,
+            1,
+            pcm.len() as u64,
+            0,
+            0,
+            1.0,
+            true,
+            192,
+        )
+        .unwrap();
+        eprintln!(
+            "ENCODE_FIXTURE limit_ms={} encode_ms={} verify_ms={} reencode_ms={} encodes={} out_lufs={:.2} residual_ms={residual}",
+            times.limit_ms, times.encode_ms, times.verify_ms, times.reencode_ms, times.encodes, times.out_lufs
+        );
+        assert!(times.encodes >= 1 && times.encodes <= 2);
+        assert!(
+            (times.out_lufs - TARGET_LUFS).abs() <= LUFS_TOL,
+            "LUFS {:.2}",
+            times.out_lufs
+        );
+        let measured = measure_stream(&path_s).unwrap();
+        assert!(
+            measured.true_peak <= TP_CEILING,
+            "TP {}",
+            measured.true_peak
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn guard_master() -> std::sync::MutexGuard<'static, ()> {
@@ -4970,15 +5812,25 @@ mod master_guard_tests {
         );
         let after = Tag::read_from_path(&path_s).unwrap();
         let kept = stored_bpm(&path_s, &after).unwrap();
-        assert_eq!(kept.value, 144.0, "el TBPM quedó en {}", kept.value);
-        assert!(
-            !after
-                .get("TBPM")
-                .and_then(|f| f.content().text())
-                .unwrap_or("")
-                .contains("141"),
-            "se reescribió el frame"
-        );
+        let text = after
+            .get("TBPM")
+            .and_then(|f| f.content().text())
+            .unwrap_or("")
+            .to_string();
+        if text == "144.00" || text.starts_with("144") {
+            assert!(
+                (kept.value - 144.0).abs() < 0.02,
+                "el tono no debía inventar {}",
+                kept.value
+            );
+        } else {
+            assert!(text.contains('.'), "TBPM sin punto: {text}");
+            assert!(!text.contains(','), "TBPM con coma: {text}");
+            assert!(
+                (kept.value - 144.0).abs() > 0.5,
+                "repitió 144 sin medirlo: {text}"
+            );
+        }
         let out = measure_stream(&path_s).unwrap();
         let out_lufs = lufs_of(&out.k_ms);
         assert!(out.true_peak <= TP_CEILING, "TP {}", out.true_peak);
@@ -5072,6 +5924,80 @@ mod master_guard_tests {
             (prior169 - 169.0).abs() < 4.0 || (prior169 - 84.5).abs() < 4.0,
             "con TBPM 169 no debía inventar otro tempo: {prior169}"
         );
+    }
+
+    fn clics_exactos(bpm: f64, seconds: f64, noise: f32, jitter: i32) -> Vec<f32> {
+        let rate = 44100.0_f32;
+        let n = (rate as f64 * seconds) as usize;
+        let mut pcm = vec![0.0f32; n];
+        let mut state = 0x00C0_FFEEu32;
+        if noise > 0.0 {
+            for v in &mut pcm {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                *v = ((state >> 8) as f32 / 16_777_216.0) * 2.0 * noise - noise;
+            }
+        }
+        let period = rate as f64 * 60.0 / bpm;
+        let mut k = 2.0_f64;
+        while (k * period) as usize + 600 < n {
+            let wobble = if jitter == 0 {
+                0
+            } else {
+                ((k as i32 * 3) % (jitter * 2 + 1)) - jitter
+            };
+            let at = (k * period).round() as i32 + wobble;
+            if at > 80 {
+                burst(&mut pcm, at as usize, rate, 12.0, 0.9);
+            }
+            k += 1.0;
+        }
+        pcm
+    }
+
+    #[test]
+    fn bpm_decimal_ruido_jitter_y_metrica() {
+        let casos = [
+            (146.67, "Palmer"),
+            (144.71, "Kiss"),
+            (104.09, "Sandra"),
+            (154.42, "Loverboy"),
+            (139.95, "Two Princes"),
+            (86.56, "Words Fell Down"),
+            (171.46, "Boys Will Be Boys"),
+            (105.75, "How Gee"),
+            (60.25, "lento"),
+            (180.0, "techo"),
+        ];
+        let mut fails = Vec::new();
+        for (bpm, name) in casos {
+            let clean = detect_bpm(&clics_exactos(bpm, 24.0, 0.0, 0), 44100, Some(999.0));
+            let got = clean.unwrap_or(0.0);
+            if (got - bpm).abs() > 0.02 {
+                fails.push(format!("{name} limpio {got:.4} vs {bpm}"));
+            }
+            let half = if bpm / 2.0 >= 60.0 {
+                bpm / 2.0
+            } else {
+                bpm * 2.0
+            };
+            let third = bpm * 3.0 / 4.0;
+            let fourth = bpm * 4.0 / 3.0;
+            assert!((got - half).abs() > 1.0, "{name} saltó de octava a {got}");
+            if (60.0..=180.0).contains(&third) {
+                assert!((got - third).abs() > 1.0, "{name} cayó en ×3/4 {got}");
+            }
+            if (60.0..=180.0).contains(&fourth) {
+                assert!((got - fourth).abs() > 1.0, "{name} cayó en ×4/3 {got}");
+            }
+            let dirty = detect_bpm(&clics_exactos(bpm, 28.0, 0.02, 12), 44100, None).unwrap_or(0.0);
+            if (dirty - bpm).abs() > 0.02 {
+                fails.push(format!(
+                    "{name} sucio {dirty:.4} vs {bpm} Δ{:.4}",
+                    (dirty - bpm).abs()
+                ));
+            }
+        }
+        assert!(fails.is_empty(), "{}", fails.join(" | "));
     }
 
     fn tone(pcm: &mut [f32], at: usize, freq: f32, rate: f32, ms: f32, amp: f32) {
@@ -5327,6 +6253,100 @@ mod master_guard_tests {
     }
 
     #[test]
+    fn masterizar_una_pasada_conserva_lufs_y_corte() {
+        let _g = guard_master();
+        let rate = 44100u32;
+        let lead = rate as usize / 2;
+        let body = rate as usize * 3;
+        let tail = (rate as usize) * 2 / 5;
+        let mut pcm = vec![0f32; lead + body + tail];
+        for i in 0..body {
+            let s = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.05;
+            pcm[lead + i] = s;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "gmx_once_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tema.mp3");
+        let path_s = path.to_string_lossy().to_string();
+        let mut sink = Mp3Sink::new(&path_s, rate, false, 192).unwrap();
+        sink.push(&pcm, 1).unwrap();
+        sink.finish().unwrap();
+
+        let before = measure_stream(&path_s).unwrap();
+        let plan = plan_span(&before, true, true, -1, -1, 0.0);
+        let rw = master_rewrite(path_s.clone(), true, true, false, -1, -1).unwrap();
+        assert_eq!(
+            rw.trim_head_ms as u64, plan.cut_head_ms,
+            "el corte de cabeza cambió"
+        );
+        assert_eq!(
+            rw.trim_tail_ms as u64, plan.cut_tail_ms,
+            "el corte de cola cambió"
+        );
+        assert!(rw.lufs_applied || rw.rewritten);
+        let out = measure_stream(&path_s).unwrap();
+        let lufs = lufs_of(&out.k_ms);
+        assert!(
+            (lufs - TARGET_LUFS).abs() <= 0.5,
+            "LUFS {lufs:.2}, se pedía −14 ±0,5"
+        );
+        assert!(out.true_peak <= TP_CEILING, "true peak {}", out.true_peak);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn analysis_actual_con_bpm_0_vuelve_a_medir() {
+        let _g = guard_master();
+        let dir = std::env::temp_dir().join(format!(
+            "gmx_bpm0_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clic.mp3");
+        let path_s = path.to_string_lossy().to_string();
+        let pcm = clicks(120.0, 20.0);
+        let mut sink = Mp3Sink::new(&path_s, 44100, false, 160).unwrap();
+        sink.push(&pcm, 1).unwrap();
+        sink.finish().unwrap();
+        let mut tag = Tag::new();
+        tag.set_text("TBPM", "0.00");
+        set_ext(&mut tag, KEY_ANALYSIS, ANALYSIS_V.to_string());
+        set_ext(&mut tag, KEY_TRIM, "0".to_string());
+        set_ext(&mut tag, KEY_LUFS_DONE, "-14".to_string());
+        tag.write_to_path(&path_s, Version::Id3v24).unwrap();
+
+        let rw = master_rewrite(path_s.clone(), true, true, false, -1, -1).unwrap();
+        assert!(!rw.rewritten, "BPM 0 no debía recodificar el audio");
+        assert!(
+            (rw.bpm - 120.0).abs() < 3.0,
+            "debía re-medir y salió {}",
+            rw.bpm
+        );
+
+        let mut tag = Tag::read_from_path(&path_s).unwrap();
+        tag.set_text("TBPM", "100.00");
+        set_ext(&mut tag, KEY_ANALYSIS, ANALYSIS_V.to_string());
+        tag.write_to_path(&path_s, Version::Id3v24).unwrap();
+        let kept = refresh_analysis_tags(&path_s).unwrap();
+        assert!(
+            (kept - 100.0).abs() < 0.02,
+            "con BPM > 0 no debía re-medir: {kept}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn la_x_borra_el_temporal_y_deja_el_original() {
         let _g = guard_master();
         master_arm();
@@ -5419,6 +6439,7 @@ mod priority_tests {
         assert_eq!(super::master_worker_cap(), 2);
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
     #[test]
     fn la_prioridad_es_nice_10_en_el_hilo_de_trabajo() {
         let main_before = super::nice_priority::current_nice();

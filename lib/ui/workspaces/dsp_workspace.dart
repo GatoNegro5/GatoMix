@@ -1,16 +1,25 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../core/brand_paths.dart';
+import '../../core/lab_quarantine.dart';
+import '../../core/exact_mix.dart';
+import '../../core/gatomix_store.dart';
 import '../../core/gmx_status.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/master_cool.dart';
 import '../../core/master_skip.dart';
+import '../../core/pipeline_controller.dart';
+import '../../core/queue_bpm.dart';
+import '../../core/stored_grid.dart';
+import '../../services/track_tags.dart';
+import 'livedj_bpm_badge.dart';
 import '../../core/thermal_status.dart';
 import '../../core/master_pause.dart';
 import '../../core/master_profile.dart';
@@ -105,6 +114,7 @@ class DspNlpWorkspace extends ConsumerWidget {
     List<String> failedTracks, {
     bool isAborted = false,
     int current = 0,
+    List<String> lenMismatch = const <String>[],
   }) {
     final int processed = isAborted ? current : (total - failedTracks.length);
 
@@ -140,7 +150,7 @@ class DspNlpWorkspace extends ConsumerWidget {
         ),
         content: SizedBox(
           width: 500,
-          height: failedTracks.isEmpty ? 100 : 300,
+          height: (failedTracks.isEmpty && lenMismatch.isEmpty) ? 100 : 300,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -150,6 +160,40 @@ class DspNlpWorkspace extends ConsumerWidget {
                     : "✅ Procesados con éxito: $processed / $total",
                 style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
+              if (lenMismatch.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  "posible audio pegado / versión distinta",
+                  style: TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                SizedBox(
+                  height: 100,
+                  child: ListView.builder(
+                    itemCount: lenMismatch.length,
+                    itemBuilder: (context, index) {
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        child: Text(
+                          "• ${lenMismatch[index]}",
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11,
+                            fontFamily: 'Consolas',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
               if (failedTracks.isNotEmpty) ...[
                 const SizedBox(height: 10),
                 const Text(
@@ -439,13 +483,11 @@ class DspNlpWorkspace extends ConsumerWidget {
 
     int consecutiveErrors = 0;
     final List<String> lyricReview = <String>[];
+    final List<String> lenMismatch = <String>[];
     int lyricFixed = 0;
     String? criticalFailureMessage;
     bool isThermalThrottling = false;
 
-    final checkpointFile = File(
-      '$targetPath${Platform.pathSeparator}.dj_master_checkpoint.json',
-    );
     Map<String, dynamic> checkpoint = {
       'schema': 2,
       'status': 'started',
@@ -453,10 +495,14 @@ class DspNlpWorkspace extends ConsumerWidget {
       'processed': <String>[],
       'failed': <String>[],
     };
+    void persistCheckpoint() =>
+        GatomixStore.writeCheckpoint(targetPath, checkpoint);
 
-    if (checkpointFile.existsSync()) {
+    final Map<String, dynamic>? existingData = GatomixStore.readCheckpoint(
+      targetPath,
+    );
+    if (existingData != null) {
       try {
-        final existingData = jsonDecode(checkpointFile.readAsStringSync());
         final String lastStatus = existingData['status'] ?? 'unknown';
 
         if (existingData['schema'] == 2 && lastStatus != 'completed') {
@@ -485,7 +531,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             );
           }
         } else if (existingData['schema'] == 2) {
-          checkpointFile.deleteSync();
+          GatomixStore.clearCheckpoint(targetPath);
         } else {
           debugPrint(
             "🔄 [PROCESS VALIDATOR] Checkpoint anterior (solo etiquetas). Este pase mira las marcas GMX.",
@@ -513,7 +559,7 @@ class DspNlpWorkspace extends ConsumerWidget {
       if (total == 0) return;
 
       checkpoint['status'] = 'in_progress';
-      checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+      persistCheckpoint();
 
       final MasterProfile profile = MasterProfile.current();
       // 1.0.20: índice por carpeta para saltar en milisegundos las pistas
@@ -578,7 +624,7 @@ class DspNlpWorkspace extends ConsumerWidget {
               );
               if (skipped % 25 == 0) {
                 skipIndex.save();
-                checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+                persistCheckpoint();
               }
               await Future<void>.delayed(Duration.zero);
               continue;
@@ -679,6 +725,9 @@ class DspNlpWorkspace extends ConsumerWidget {
                   },
                 );
                 currentPath = outcome.path;
+                if (outcome.lenNote.isNotEmpty) {
+                  lenMismatch.add(outcome.lenNote);
+                }
                 if (outcome.lyricCheck == 'REVIEW') {
                   lyricReview.add(
                     '${File(outcome.path).uri.pathSegments.last} — ${outcome.lyricCheckReason}',
@@ -699,23 +748,37 @@ class DspNlpWorkspace extends ConsumerWidget {
                   await logSong(0);
                   return;
                 }
-                final String? miss = skipIndex.record(outcome.path);
-                skipIndex.save();
-                final String? bucket = checkpointBucket(
-                  lyricRetry: outcome.lyric == LyricStatus.retry,
-                  miss: miss,
+                final String songPath = outcome.path;
+                final MasterBpmSettle bpmSettle = await settleMasterBpm(
+                  checkpoint: checkpoint,
+                  fileName: originalName,
+                  measured: readTbpmSync(songPath),
+                  remeasure: () => rust_dsp.autoDetectAndInjectBpm(
+                    inputPath: songPath,
+                  ),
+                  logDir: targetPath,
                 );
-                if (bucket == 'processed') {
-                  (checkpoint['processed'] as List).add(originalName);
-                } else if (bucket == 'incomplete') {
-                  final Map<String, dynamic> inc =
-                      (checkpoint['incomplete'] as Map<String, dynamic>?) ??
-                      <String, dynamic>{};
-                  inc[originalName] = outcome.detail.isEmpty
-                      ? miss
-                      : '$miss · ${outcome.detail}';
-                  checkpoint['incomplete'] = inc;
-                  debugPrint('MASTER incompleta ($miss) $originalName');
+                if (bpmSettle.failed) {
+                  debugPrint('MASTER BPM 0 failed $originalName');
+                } else {
+                  final String? miss = skipIndex.record(outcome.path);
+                  skipIndex.save();
+                  final String? bucket = checkpointBucket(
+                    lyricRetry: outcome.lyric == LyricStatus.retry,
+                    miss: miss,
+                  );
+                  if (bucket == 'processed') {
+                    (checkpoint['processed'] as List).add(originalName);
+                  } else if (bucket == 'incomplete') {
+                    final Map<String, dynamic> inc =
+                        (checkpoint['incomplete'] as Map<String, dynamic>?) ??
+                        <String, dynamic>{};
+                    inc[originalName] = outcome.detail.isEmpty
+                        ? miss
+                        : '$miss · ${outcome.detail}';
+                    checkpoint['incomplete'] = inc;
+                    debugPrint('MASTER incompleta ($miss) $originalName');
+                  }
                 }
               } finally {
                 tick.cancel();
@@ -723,7 +786,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             }
             consecutiveErrors = 0;
             checkpoint['timestamp'] = DateTime.now().toIso8601String();
-            checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+            persistCheckpoint();
           } catch (e) {
             debugPrint(
               "🔴 Error preparando la pista $originalName en stage $currentStage: $e",
@@ -732,7 +795,7 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             (checkpoint['failed'] as List).add(originalName);
             checkpoint['timestamp'] = DateTime.now().toIso8601String();
-            checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+            persistCheckpoint();
 
             String errorCode = "ERR_UNKNOWN";
             String recommendedAction =
@@ -740,24 +803,19 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             if (currentStage == "METADATA_CLEANUP") {
               errorCode = "ERR_FILE_IO";
-              recommendedAction =
-                  "El archivo está bloqueado por otro programa (ej. Rekordbox, Serato o un reproductor). Ciérralos e inténtalo de nuevo.";
+              recommendedAction = "El archivo está bloqueado por otro programa (ej. Rekordbox, Serato o un reproductor). Ciérralos e inténtalo de nuevo.";
             } else if (currentStage == "DSP_FFMPEG") {
               errorCode = "ERR_CODEC";
-              recommendedAction =
-                  "El codec del archivo MP3/M4A está roto o vacío. Reemplázalo descargando una nueva copia desde YouTube DL.";
+              recommendedAction = "El codec del archivo MP3/M4A está roto o vacío. Reemplázalo descargando una nueva copia desde YouTube DL.";
             } else if (currentStage == "WATERMARK_ID3") {
               errorCode = "ERR_TAGS";
-              recommendedAction =
-                  "Fallo al inyectar firmas ID3v2. Las etiquetas originales están corruptas. Intenta limpiar las etiquetas del archivo.";
+              recommendedAction = "Fallo al inyectar firmas ID3v2. Las etiquetas originales están corruptas. Intenta limpiar las etiquetas del archivo.";
             } else if (currentStage == "DB_ISAR") {
               errorCode = "ERR_DATABASE";
-              recommendedAction =
-                  "Fallo al guardar en ISAR Database. Ejecuta un Reset de Fábrica si el problema persiste.";
+              recommendedAction = "Fallo al guardar en ISAR Database. Ejecuta un Reset de Fábrica si el problema persiste.";
             } else if (e.toString().contains("Timeout DSP")) {
               errorCode = "ERR_TIMEOUT";
-              recommendedAction =
-                  "Fallo por alta temperatura de la CPU al normalizar el audio. Intenta masterizar esta pista sola más tarde.";
+              recommendedAction = "Fallo por alta temperatura de la CPU al normalizar el audio. Intenta masterizar esta pista sola más tarde.";
             }
 
             try {
@@ -812,20 +870,18 @@ class DspNlpWorkspace extends ConsumerWidget {
 
             if (errorMessage.contains("Timeout DSP")) {
               isThermalThrottling = true;
-              criticalFailureMessage =
-                  "🌡️ ALERTA TÉRMICA: Tu procesador se ha sobrecalentado y el motor DSP colapsó.\n\n👉 ACCIÓN: Deja enfriar el equipo unos minutos y luego vuelve a darle a 'Masterización Global'. El Validador de Procesos saltará todo el trabajo anterior y retomará justo donde te quedaste.";
+              criticalFailureMessage = "🌡️ ALERTA TÉRMICA: Tu procesador se ha sobrecalentado y el motor DSP colapsó.\n\n👉 ACCIÓN: Deja enfriar el equipo unos minutos y luego vuelve a darle a 'Masterización Global'. El Validador de Procesos saltará todo el trabajo anterior y retomará justo donde te quedaste.";
               checkpoint['status'] = 'thermal_halt';
-              checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+              persistCheckpoint();
               pipe.abort();
               stopAll = true;
               await logSong(0);
               return;
             } else if (consecutiveErrors >= 3) {
               isThermalThrottling = false;
-              criticalFailureMessage =
-                  "💥 COLAPSO I/O: Se han detectado múltiples fallos consecutivos de disco o base de datos.\n\n👉 ACCIÓN: Es OBLIGATORIO que ejecutes el 'Reset de Fábrica' antes de intentar masterizar. Recuerda borrar manualmente el archivo oculto .dj_master_checkpoint.json en tu carpeta si quieres forzar un re-procesamiento total.";
+              criticalFailureMessage = "💥 COLAPSO I/O: Se han detectado múltiples fallos consecutivos de disco o base de datos.\n\n👉 ACCIÓN: Es OBLIGATORIO que ejecutes el 'Reset de Fábrica' antes de intentar masterizar. Recuerda borrar la sección checkpoint del archivo oculto .gatomix.json en tu carpeta si quieres forzar un re-procesamiento total.";
               checkpoint['status'] = 'io_crash';
-              checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+              persistCheckpoint();
               pipe.abort();
               stopAll = true;
               await logSong(0);
@@ -877,9 +933,12 @@ class DspNlpWorkspace extends ConsumerWidget {
         await ref.read(dspWorkerProvider).generateStaticBpmCache(targetPath);
 
         if (criticalFailureMessage == null) {
-          checkpoint['status'] = 'completed';
+          checkpoint['status'] = masterCheckpointStatus(
+            checkpoint: checkpoint,
+            critical: false,
+          );
           checkpoint['timestamp'] = DateTime.now().toIso8601String();
-          checkpointFile.writeAsStringSync(jsonEncode(checkpoint));
+          persistCheckpoint();
         }
       }
     } catch (e) {
@@ -961,6 +1020,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             state.quarantinedTracks,
             isAborted: state.isAborted,
             current: state.current,
+            lenMismatch: lenMismatch,
           );
         }
         if (lyricReview.isNotEmpty || lyricFixed > 0) {
@@ -1384,8 +1444,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           cardNodes.add(
             _buildActionCard(
               title: "MASTERIZACIÓN PROFESIONAL",
-              description:
-                  "TODO EN UNO en PC/Mac: nombre, letra, corte real de silencios, BPM y −14 LUFS (una generación, sin EQ), una canción a la vez con enfriamiento. El _K va al final. Retoma si se corta.",
+              description: "TODO EN UNO en PC/Mac: nombre, letra, corte real de silencios, BPM y −14 LUFS (una generación, sin EQ), una canción a la vez con enfriamiento. El _K va al final. Retoma si se corta.",
               icon: Icons.rocket_launch,
               color: const Color(0xFF39FF14),
               isPrimary: true,
@@ -1408,8 +1467,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           cardNodes.add(
             _buildActionCard(
               title: "PREPARACIÓN MÓVIL",
-              description:
-                  "TODO EN UNO: nombre, letra, corte real, BPM y −14 LUFS, una canción a la vez, con enfriamiento. Sin _K (eso es de PC/Mac). Retoma si se corta.",
+              description: "TODO EN UNO: nombre, letra, corte real, BPM y −14 LUFS, una canción a la vez, con enfriamiento. Sin _K (eso es de PC/Mac). Retoma si se corta.",
               icon: Icons.phone_android,
               color: Colors.cyanAccent,
               isPrimary: true,
@@ -1433,8 +1491,7 @@ class DspNlpWorkspace extends ConsumerWidget {
         cardNodes.addAll([
           _buildActionCard(
             title: "LETRAS",
-            description:
-                "Descarga letras solo si coinciden artista, título y duración. Nunca pisa una letra que ya tengas.",
+            description: "Descarga letras solo si coinciden artista, título y duración. Nunca pisa una letra que ya tengas.",
             icon: Icons.lyrics_outlined,
             color: const Color(0xFFFFC107),
             isPrimary: false,
@@ -1463,9 +1520,7 @@ class DspNlpWorkspace extends ConsumerWidget {
               title: aiState.isRunning
                   ? "IA TRABAJANDO..."
                   : "EXTRACCIÓN KARAOKE IA",
-              description: aiState.isRunning
-                  ? aiState.status
-                  : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
+              description: aiState.isRunning ? aiState.status : "Procesa la carpeta aislando las voces (Crea pistas _K.mp3) en segundo plano (Requiere PC).",
               icon: aiState.isRunning ? Icons.memory : Icons.mic_external_off,
               color: aiState.isRunning
                   ? Colors.orangeAccent
@@ -1507,8 +1562,7 @@ class DspNlpWorkspace extends ConsumerWidget {
             ),
           _buildActionCard(
             title: "INFORME DE AUDITORÍA",
-            description:
-                "Identifica cuellos de botella: faltantes de letras, BPMs o errores de volumen.",
+            description: "Identifica cuellos de botella: faltantes de letras, BPMs o errores de volumen.",
             icon: Icons.analytics_outlined,
             color: Colors.cyanAccent,
             isPrimary: false,
@@ -1518,8 +1572,7 @@ class DspNlpWorkspace extends ConsumerWidget {
           ),
           _buildActionCard(
             title: "RESET DE FÁBRICA",
-            description:
-                "Quita el sello y las etiquetas de sonido y purga ISAR. NO toca letras, cues manuales ni el corte (para volver al audio original: Restaurar).",
+            description: "Quita el sello y las etiquetas de sonido y purga ISAR. NO toca letras, cues manuales ni el corte (para volver al audio original: Restaurar).",
             icon: Icons.dangerous,
             color: Colors.redAccent,
             isPrimary: false,
@@ -1768,27 +1821,18 @@ class DspNlpWorkspace extends ConsumerWidget {
     }
 
     int movedCount = 0;
+    int blockedCount = 0;
     for (String path in badPaths) {
       final file = File(path);
       if (file.existsSync()) {
         final fileName = file.uri.pathSegments.last;
-        final newPath = '${labDir.path}${Platform.pathSeparator}$fileName';
 
         try {
-          file.renameSync(newPath);
-          registry[fileName] = path;
-
-          final lrcFile = File(
-            path.replaceAll(
-              RegExp(r'\.mp3$|\.webm$', caseSensitive: false),
-              '.lrc',
-            ),
-          );
-          if (lrcFile.existsSync()) {
-            lrcFile.renameSync(
-              '${labDir.path}${Platform.pathSeparator}${fileName.replaceAll(RegExp(r'\.mp3$|\.webm$', caseSensitive: false), '.lrc')}',
-            );
+          if (!moveCompanionsToSync(path, labDir.path)) {
+            blockedCount++;
+            continue;
           }
+          registry[fileName] = path;
           movedCount++;
         } catch (e) {
           debugPrint("🔴 Error moviendo archivo al LAB: $e");
@@ -1802,7 +1846,11 @@ class DspNlpWorkspace extends ConsumerWidget {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("✅ $movedCount archivos aislados en el LAB."),
+          content: Text(
+            blockedCount > 0
+                ? "⚠️ $blockedCount ya estaban en el LAB (no se pisó nada). ✅ $movedCount archivos aislados en el LAB."
+                : "✅ $movedCount archivos aislados en el LAB.",
+          ),
           backgroundColor: Colors.orangeAccent,
           behavior: SnackBarBehavior.floating,
         ),
@@ -2194,6 +2242,36 @@ class DspNlpWorkspace extends ConsumerWidget {
         OutlinedButton.icon(
           onPressed: blocked
               ? null
+              : () => _executeDurationSweep(context, ref, targetPath),
+          icon: const Icon(Icons.timer_outlined, size: 16),
+          label: const Text(
+            'REVISAR DURACIONES',
+            style: TextStyle(fontSize: 10),
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.orangeAccent,
+            side: const BorderSide(color: Colors.orangeAccent),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: blocked
+              ? null
+              : () => _executeBpmSweep(context, ref, targetPath),
+          icon: const Icon(Icons.speed_outlined, size: 16),
+          label: const Text(
+            'REVISAR BPM',
+            style: TextStyle(fontSize: 10),
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.orangeAccent,
+            side: const BorderSide(color: Colors.orangeAccent),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: blocked
+              ? null
               : () => _executeRestore(context, ref, targetPath),
           icon: const Icon(Icons.restore, size: 16),
           label: const Text(
@@ -2206,6 +2284,194 @@ class DspNlpWorkspace extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> _executeDurationSweep(
+    BuildContext context,
+    WidgetRef ref,
+    String targetPath,
+  ) async {
+    final pipe = ref.read(pipelineProvider.notifier);
+    final Directory root = Directory(targetPath);
+    if (!root.existsSync()) return;
+    final List<File> files = root.listSync(recursive: true).whereType<File>().where((
+      File f,
+    ) {
+      final String lower = f.path.toLowerCase().replaceAll('\\', '/');
+      if (!lower.endsWith('.mp3')) return false;
+      if (lower.contains('/.gatomix_original/')) return false;
+      return true;
+    }).toList();
+    if (files.isEmpty) return;
+    final List<String> marked = <String>[];
+    try {
+      for (int i = 0; i < files.length; i++) {
+        if (ref.read(pipelineProvider).isAborted) break;
+        final File file = files[i];
+        final String name = file.uri.pathSegments.last;
+        pipe.updateProgress(
+          i + 1,
+          files.length,
+          name,
+          'Revisando duración (solo etiqueta)...',
+        );
+        try {
+          final TlenReport report = await MasterTrack.rewriteDurationTag(
+            file.path,
+          );
+          final String? line = stuckAudioLine(
+            name: name,
+            tlenMs: report.tlenMs,
+            audioMs: report.audioMs,
+            mismatch: report.mismatch,
+          );
+          if (line != null) marked.add(line);
+        } catch (e) {
+          debugPrint('🔴 [TLEN] $name $e');
+        }
+      }
+    } finally {
+      pipe.reset();
+    }
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF121212),
+        title: Text(
+          'Duraciones (${marked.length})',
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: SizedBox(
+          width: 520,
+          height: marked.isEmpty ? 80 : 360,
+          child: marked.isEmpty
+              ? const Text(
+                  'Ninguna pista con TLEN y audio separados más de 10 s. '
+                  'El audio no se recortó.',
+                  style: TextStyle(color: Colors.white70),
+                )
+              : ListView(
+                  children: [
+                    const Text(
+                      'posible audio pegado / versión distinta',
+                      style: TextStyle(
+                        color: Colors.orangeAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final String line in marked)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          line,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('CERRAR'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _executeBpmSweep(
+    BuildContext context,
+    WidgetRef ref,
+    String targetPath,
+  ) async {
+    final pipe = ref.read(pipelineProvider.notifier);
+    final Directory root = Directory(targetPath);
+    if (!root.existsSync()) return;
+    final List<File> files = root.listSync(recursive: true).whereType<File>().where((
+      File f,
+    ) {
+      final String lower = f.path.toLowerCase().replaceAll('\\', '/');
+      if (!lower.endsWith('.mp3')) return false;
+      if (lower.contains('/.gatomix_original/')) return false;
+      return true;
+    }).toList();
+    if (files.isEmpty) return;
+    final List<String> lines = <String>[];
+    var skipped = 0;
+    try {
+      for (int i = 0; i < files.length; i++) {
+        if (ref.read(pipelineProvider).isAborted) break;
+        final File file = files[i];
+        final String name = file.uri.pathSegments.last;
+        final Map<String, String> tags = readGmxTagsFromFile(file.path);
+        if (tags['GMX_ANALYSIS'] == kGmxAnalysis) {
+          skipped++;
+          pipe.updateProgress(i + 1, files.length, name, 'BPM ya medido');
+          continue;
+        }
+        pipe.updateProgress(i + 1, files.length, name, 'Re-midiendo BPM (solo etiqueta)...');
+        try {
+          final double oldBpm = readTbpmSync(file.path);
+          final double neu = await rust_dsp.autoDetectAndInjectBpm(inputPath: file.path);
+          final String line = 'BPM_FIX $name $oldBpm->$neu';
+          debugPrint(line);
+          lines.add(line);
+          TrackTags.forget(file.path);
+          if (neu > 0) {
+            TrackTags.rememberBpm(file.path, neu);
+            saveTrackMusic(file.path, bpm: neu);
+          }
+          forgetKnownBpm(file.path);
+          forgetLiveDjBpm(file.path);
+          forgetStoredGrid(file.path);
+        } catch (e) {
+          debugPrint('🔴 [BPM] $name $e');
+        }
+      }
+    } finally {
+      pipe.reset();
+    }
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF121212),
+        title: Text(
+          'BPM (${lines.length})',
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: SizedBox(
+          width: 520,
+          height: lines.isEmpty ? 80 : 360,
+          child: lines.isEmpty
+              ? Text(
+                  'Nada que re-medir. $skipped ya tenían el análisis $kGmxAnalysis. El audio no se tocó.',
+                  style: const TextStyle(color: Colors.white70),
+                )
+              : ListView(
+                  children: [
+                    for (final String line in lines)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          line,
+                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CERRAR')),
+        ],
+      ),
     );
   }
 
@@ -2419,19 +2685,17 @@ String _masterStageLabel(String stage) {
       return '🎧 Calculando la mezcla...';
     case 'LYRIC_CHECK':
       return '⏱️ Revisando tiempo de la letra...';
+    case 'TLEN':
+      return '⏱️ Duración real en la etiqueta...';
     default:
       return stage;
   }
 }
 
 bool _lrcListedAsAuto(File lrc) {
-  final File reg = File(
-    '${lrc.parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-  );
-  if (!reg.existsSync()) return false;
   try {
-    final dynamic decoded = jsonDecode(reg.readAsStringSync());
-    return decoded is Map && decoded.containsKey(lrc.uri.pathSegments.last);
+    return readLyricsAuto(lrc.parent.path)
+        .containsKey(lrc.uri.pathSegments.last);
   } catch (_) {
     return false;
   }

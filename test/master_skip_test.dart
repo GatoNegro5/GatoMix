@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/core/master_skip.dart';
+import 'package:gatomix/services/track_tags.dart';
 
 List<int> _ss(int n) => <int>[
   (n >> 21) & 0x7f,
@@ -56,6 +57,7 @@ const Map<String, String> _done = <String, String>{
   'GMX_TRIM_MS': '80',
   'GMX_LUFS_DONE': '-14.0',
   'GMX_BPM_OK': '1',
+  'GMX_ANALYSIS': '3031',
 };
 
 void main() {
@@ -91,6 +93,25 @@ void main() {
     expect(pending(again, all).length, 10);
   });
 
+  test('version de analisis: actual salta, vieja reetiqueta, nueva es completa', () {
+    final Map<String, String> actual = <String, String>{
+      ..._done,
+      '__SEAL': '1',
+    };
+    expect(planAnalysis(actual, karaoke: false), AnalysisPlan.skip);
+    final Map<String, String> vieja = Map<String, String>.of(actual)
+      ..remove('GMX_ANALYSIS');
+    expect(planAnalysis(vieja, karaoke: false), AnalysisPlan.retag);
+    expect(planAnalysis(const <String, String>{}, karaoke: false), AnalysisPlan.full);
+    expect(TrackTags.decodeTbpm('17312'), closeTo(173.12, 1e-9));
+    expect(TrackTags.decodeTbpm('09548'), closeTo(95.48, 1e-9));
+    expect(TrackTags.decodeTbpm('08635'), closeTo(86.35, 1e-9));
+    expect(TrackTags.decodeTbpm('08571'), closeTo(85.71, 1e-9));
+    expect(TrackTags.decodeTbpm('146,70'), closeTo(146.70, 1e-9));
+    expect(TrackTags.decodeTbpm('146.70'), closeTo(146.70, 1e-9));
+    expect(TrackTags.decodeTbpm('144'), 144);
+  });
+
   test('archivo modificado se reprocesa', () {
     final String p = put('a.mp3', _mp3(_done));
     final MasterSkipIndex idx = MasterSkipIndex.load(dir.path);
@@ -118,6 +139,7 @@ void main() {
       'GMX_TRIM_MS': '0',
       'GMX_LUFS_DONE': '-14.0',
       'GMX_BPM_OK': '1',
+      'GMX_ANALYSIS': '3031',
     };
     final String k = put('t_K.mp3', _mp3(audio, seal: false));
     final MasterSkipIndex idx = MasterSkipIndex.load(dir.path);
@@ -179,7 +201,7 @@ void main() {
         File(p).writeAsBytesSync(_mp3(indeep, seal: false));
         final MasterSkipIndex idx = MasterSkipIndex(d.path);
         expect(idx.record(p), 'trim');
-        expect(idx.entries['Indeep.mp3']!['state'], 'PENDING');
+        expect(idx.entries[idx.key(p)]!['state'], 'PENDING');
         final SkipDecision s = idx.decide(p);
         expect(s.skip, isFalse);
         expect(s.reason, 'index:trim');

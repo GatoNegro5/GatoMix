@@ -1,7 +1,7 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gatomix/core/gatomix_store.dart';
 import 'package:gatomix/ui/workspaces/yt_workspace.dart';
 
 void main() {
@@ -19,17 +19,14 @@ void main() {
     final File auto = File('${dir.path}/A-ha - Take On Me.lrc');
     auto.writeAsStringSync('[00:12.00]Talking away\n');
     registerYtAutoLyric(auto.path);
-    final Map<String, dynamic> reg =
-        jsonDecode(File('${dir.path}/_lyrics_auto.json').readAsStringSync())
-            as Map<String, dynamic>;
+    final Map<String, dynamic> reg = readLyricsAuto(dir.path);
     expect(reg.containsKey('A-ha - Take On Me.lrc'), isTrue);
+    expect(File('${dir.path}/_lyrics_auto.json').existsSync(), isFalse);
 
     final File manual = File('${dir.path}/A mano.lrc');
     manual.writeAsStringSync('[gmx_manual:1]\n[00:01.00]hola\n');
     registerYtAutoLyric(manual.path);
-    final Map<String, dynamic> again =
-        jsonDecode(File('${dir.path}/_lyrics_auto.json').readAsStringSync())
-            as Map<String, dynamic>;
+    final Map<String, dynamic> again = readLyricsAuto(dir.path);
     expect(again.containsKey('A mano.lrc'), isFalse);
     expect(ytLyricCountsAsAuto('[gmx_manual:1]\n[00:01.00]x'), isFalse);
     expect(ytLyricCountsAsAuto('[00:01.00]x'), isTrue);

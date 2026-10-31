@@ -1,6 +1,9 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:gatomix/core/brand_paths.dart';
+import 'package:gatomix/core/gatomix_store.dart';
+import 'package:gatomix/core/pipeline_controller.dart';
+import 'package:gatomix/core/lab_quarantine.dart' as labq;
 import 'package:gatomix/core/id3_names.dart';
 import 'package:gatomix/core/lyric_files.dart';
 import 'package:gatomix/core/lyric_match.dart';
@@ -85,6 +88,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   String _labPath = '';
   Map<String, dynamic> _registry = {};
   bool _isLoading = true;
+  bool _labTabShown = true;
 
   String? _selectedFileForEdit;
   String? _selectedOriginFolder;
@@ -131,24 +135,7 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       _registry = {};
     }
 
-    final labDir = Directory(_labPath);
-    final physicalFiles = labDir
-        .listSync()
-        .whereType<File>()
-        .map((e) => e.uri.pathSegments.last)
-        .toList();
-
-    _registry.removeWhere((key, value) => !physicalFiles.contains(key));
-
-    final validExtensions = ['.mp3', '.m4a', '.webm', '.wav', '.flac'];
-    for (var fileName in physicalFiles) {
-      final isAudio = validExtensions.any(
-        (ext) => fileName.toLowerCase().endsWith(ext),
-      );
-      if (isAudio && !_registry.containsKey(fileName)) {
-        _registry[fileName] = 'Origen Desconocido (Inyección Manual OS)';
-      }
-    }
+    _registry = labq.rescanLabRegistry(_labPath, _registry);
 
     registryFile.writeAsStringSync(jsonEncode(_registry));
 
@@ -254,11 +241,11 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
         final targetDir = Directory(File(originalPath).parent.path);
         if (!targetDir.existsSync()) targetDir.createSync(recursive: true);
 
-        final LabMove audioMove = await moveFileNoOverwrite(
-          file.path,
-          originalPath,
+        final labq.LabReturn back = labq.restoreCompanionsToSync(
+          labAudio: file.path,
+          originAudio: originalPath,
         );
-        if (audioMove == LabMove.destExists) {
+        if (back.blocked) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -273,10 +260,9 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           return;
         }
 
-        final LabLrcRestore lrcMove = await moveLabLrcToOrigin(
-          labLrcPath: _lrcPathOf(fileName),
-          originLrcPath: lrcPathForAudio(originalPath),
-        );
+        final LabLrcRestore lrcMove = back.lrcKeptAtOrigin
+            ? LabLrcRestore.keptOrigin
+            : LabLrcRestore.moved;
         notifyLrcChanged(originalPath);
 
         _registry.remove(fileName);
@@ -546,6 +532,56 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
     } catch (_) {}
   }
 
+  void _reportRescueIssue(String message, String logDir) {
+    debugPrint('🔴 [LAB RESCATE] $message');
+    GatomixLog.append(logDir, 'LAB RESCATE $message');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('🔴 $message'),
+        backgroundColor: Colors.redAccent,
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
+  void _scheduleRescueDelivery({
+    required String audioPath,
+    required String originDir,
+    required bool heavy,
+  }) {
+    Future<void>(() async {
+      var includeKaraoke = false;
+      if (!heavy) {
+        try {
+          final int done = await KaraokeEngine.run(audioPath);
+          final String karaoke = KaraokeEngine.karaokePathFor(audioPath);
+          includeKaraoke = done > 0 && File(karaoke).existsSync();
+          if (!includeKaraoke) {
+            _reportRescueIssue(
+              'Karaoke no quedó listo: $audioPath',
+              File(audioPath).parent.path,
+            );
+          }
+        } catch (e) {
+          _reportRescueIssue('Karaoke falló: $e', File(audioPath).parent.path);
+        }
+      }
+      try {
+        labq.deliverRescuedTrackSync(
+          audioPath,
+          originDir,
+          includeKaraoke: includeKaraoke,
+        );
+      } catch (e) {
+        _reportRescueIssue(
+          'No se pudo enviar al origen: $e',
+          File(audioPath).parent.path,
+        );
+      }
+    });
+  }
+
   Future<void> _rescueLabTrackFromYoutube(
     String url,
     String targetOriginalPath,
@@ -659,16 +695,10 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
       statusNotifier.value =
           "1/6. Descargando stream crudo nativo (Bypass DRM)...";
 
-      final process = await Process.start(ytdlpPath, [
-        '--rm-cache-dir',
-        '-f',
-        '140/bestaudio',
-        '--extractor-args',
-        'youtube:player_client=android_vr',
-        '-o',
-        '$tempAudioPrefix.%(ext)s',
-        url,
-      ]);
+      final process = await Process.start(
+        ytdlpPath,
+        ytDlpRedownloadArgs(output: '$tempAudioPrefix.%(ext)s', url: url),
+      );
 
       String errorTrace = "";
       process.stdout.listen((_) {});
@@ -715,6 +745,11 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
           try {
             targetOriginalFile.deleteSync();
           } catch (_) {}
+        }
+        try {
+          labq.deleteStaleKaraokeSync(newTargetFile);
+        } catch (e) {
+          debugPrint("🔴 [LAB RESCATE] No se pudo borrar el _K viejo: $e");
         }
 
         // El .lrc.bak se escribe una sola vez (original o marcador
@@ -920,10 +955,13 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
         _loadRegistry();
         _loadLrcForEdit(finalFileName);
 
-        // 🛠️ INYECCIÓN KRAEOKE FIRE-AND-FORGET CONDICIONADA AL PESO
-        if (!isHeavyMix) {
-          KaraokeAIEngine.spawnBackgroundExtraction(finalPath);
-        }
+        // Karaoke nuevo en segundo plano; al terminar (o si falla) los
+        // archivos vuelven a la carpeta original sin pisar.
+        _scheduleRescueDelivery(
+          audioPath: finalPath,
+          originDir: File(targetOriginalPath).parent.path,
+          heavy: isHeavyMix,
+        );
 
         if (mounted) {
           Navigator.pop(context);
@@ -1672,6 +1710,14 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
 
   @override
   Widget build(BuildContext context) {
+    final bool labShown = TickerMode.valuesOf(context).enabled;
+    if (labShown && !_labTabShown && _labPath.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _labTabShown) _loadRegistry();
+      });
+    }
+    _labTabShown = labShown;
+
     final entries = _registry.entries.toList();
     // Se sigue escuchando la carpeta actual para refrescar el LAB al cambiarla.
     ref.watch(directoryProvider);

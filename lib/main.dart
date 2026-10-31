@@ -31,6 +31,7 @@ import 'ui/workspaces/karaoke_workspace.dart';
 import 'services/audio_interruption.dart';
 import 'core/headless_args.dart';
 import 'ui/headless_master_page.dart';
+import 'ui/headless_karaoke_page.dart';
 
 // ==========================================
 // ENRUTADOR DE ESTADO (SPA - Single Page App)
@@ -70,7 +71,12 @@ class RouterNotifier extends Notifier<int> {
 
   int _inferRouteFromAudioSession() {
     try {
-      final file = File(MixStrategyFactory.getStrategy().getSessionPath());
+      final String session = MixStrategyFactory.getStrategy().getSessionPath();
+      final File legacy = File(session);
+      final File live = File(
+        '${legacy.parent.path}${Platform.pathSeparator}liveDj.json',
+      );
+      final File file = legacy.existsSync() ? legacy : live;
       if (!file.existsSync()) return 0;
       final data = jsonDecode(file.readAsStringSync());
       if (data is! Map) return 0;
@@ -130,6 +136,16 @@ Future<void> main([List<String> args = const []]) async {
 
     // 🛠️ BINDING 3: Inicialización del Motor de Reproducción de Audio (libmpv)
     MediaKit.ensureInitialized();
+
+    final String? karaokeFolder = parseKaraokeFolderArg(args);
+    if (karaokeFolder != null) {
+      runApp(
+        ProviderScope(
+          child: HeadlessKaraokeApp(folder: karaokeFolder),
+        ),
+      );
+      return;
+    }
 
     final String? labRescue = parseLabRescueArg(args);
     final String? masterFolder = labRescue ?? parseMasterFolderArg(args);

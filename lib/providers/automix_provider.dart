@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
+
 // 🛡️ FIX: Se cambió foundation.dart por material.dart para dar acceso al BuildContext
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -13,11 +14,22 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import '../core/hal/platform_strategy.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
+import '../core/audio/mix_pause.dart';
+import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
-import '../djiphone/iphone_library.dart';
+import '../core/dj_trace.dart';
 import '../core/audio/dj_audio_handler.dart';
 
-import '../core/lyric_files.dart';
+import '../core/audio_path.dart';
+import '../core/dna_mix.dart';
+import '../core/gatomix_store.dart';
+import '../services/track_tags.dart';
+import '../core/livedj_order.dart';
+import '../core/mode_session.dart';
+import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
+import '../core/lyric_files.dart' hide sameAudioPath;
+import '../core/session_restore.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_approx.dart';
 import '../ui/widgets/approx_lyric_icon.dart' show approxLyricRevision;
@@ -152,12 +164,15 @@ class AutomixNotifier extends Notifier<AutomixState> {
   StreamSubscription? _completedSub;
 
   bool _isCrossfading = false;
+  bool get nextTrackLocked => _isCrossfading;
   bool _parking = false;
   bool _isPrepModeBypass = false;
   int _lastSavedPositionMs = 0;
   int _sessionPositionMs = 0;
   bool _sessionWasPlaying = false;
   bool _freezePersist = false;
+  bool _queueHold = false;
+  bool _queueRestart = false;
   bool _mixOutIsManual = false;
   bool _cueInIsManual = false;
   bool _mixPlanReady = false;
@@ -168,6 +183,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
   String? _lastDurationPlanKey;
   int _lastUiPosMs = -1;
   final TempoDrift _drift = TempoDrift();
+  final MixPause _mix = MixPause();
+  PhaseLockSession? _phaseLock;
+  bool _deckAWasOn = false;
+  bool _deckBWasOn = false;
   int _lastLyricIndex = -2;
   String? _shownLyricsPath;
   List<LyricLine>? _lyricUndo;
@@ -248,8 +267,28 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
   }
 
-  String _getSessionFilePath() {
-    return _mixStrategy.getSessionPath();
+  String _getSessionFilePath() => automixStatePath();
+
+  /// La cola se vació: la sesión no vuelve a escribir la lista ni la posición
+  /// viejas hasta que entre una cola nueva.
+  void dropPersistedQueue() {
+    _queueHold = true;
+    _queueRestart = true;
+    _shuffleKnown.clear();
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = 0;
+    _sessionWasPlaying = false;
+    state = state.copyWith(
+      playlist: const <String>[],
+      currentIndex: -1,
+      position: Duration.zero,
+    );
+  }
+
+  void releaseQueueHold() {
+    _queueHold = false;
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = state.position.inMilliseconds;
   }
 
   Future<void> persistSession() => _saveSnapshot();
@@ -262,6 +301,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (!state.isPlaying) return false;
     _pausedByInterruption = true;
     _cancelOutroProbe();
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) djTrace(line);
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -276,6 +318,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
   Future<void> resumeAfterInterruption() async {
     if (!_pausedByInterruption) return;
     _pausedByInterruption = false;
+    if (_mix.armed) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) djTrace(line);
+      return;
+    }
+    _mix.resumeAll();
     try {
       await _activeAutomix.play();
     } catch (_) {}
@@ -286,6 +335,85 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
     unawaited(_planVariableMixWindow());
   }
+
+  void _releaseMix() {
+    _isCrossfading = false;
+    _mix.end();
+  }
+
+  Future<void> _dropPhase() async {
+    final PhaseLockSession? phase = _phaseLock;
+    _phaseLock = null;
+    if (phase == null) return;
+    await phase.finish();
+    phase.logLater(djTrace);
+  }
+
+  bool _deckPlaying(Player Function() read) {
+    try {
+      return read().state.playing;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _captureDecks() {
+    _deckAWasOn = _deckPlaying(() => _playerA);
+    _deckBWasOn = _deckPlaying(() => _playerB);
+  }
+
+  Future<void> _playDecksHeld() async {
+    if (_deckAWasOn) {
+      try {
+        await _playerA.play();
+      } catch (_) {}
+    }
+    if (_deckBWasOn) {
+      try {
+        await _playerB.play();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _toggleMixHold() async {
+    if (_mix.paused) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) djTrace(line);
+      return;
+    }
+    _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    await _saveSnapshot();
+  }
+
+  @visibleForTesting
+  void armMixForTest({
+    required int fadeMs,
+    required double rampBpm,
+    int elapsedMs = 0,
+  }) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+    _mix.beginFade(fadeMs, elapsedMs: elapsedMs);
+  }
+
+  @visibleForTesting
+  bool get mixPaused => _mix.paused;
+
+  @visibleForTesting
+  bool get crossfadeHeld => _isCrossfading;
+
+  @visibleForTesting
+  String? get lastMixHoldLine => _mix.lastLine;
 
   int? _readSavedUiRoute() {
     try {
@@ -303,20 +431,35 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
   Future<void> _saveSnapshot() async {
     try {
-      final file = File(_getSessionFilePath());
-      final pos = _freezePersist
-          ? _sessionPositionMs
-          : state.position.inMilliseconds;
-      final data = {
+      final String filePath = _getSessionFilePath();
+      if (_queueHold) {
+        clearModeQueueSync(filePath, playbackList: true);
+        return;
+      }
+      final bool restart = _queueRestart;
+      if (restart) {
+        _queueRestart = false;
+        _sessionPositionMs = 0;
+        _sessionWasPlaying = false;
+      }
+      final pos = restart
+          ? 0
+          : (_freezePersist
+                ? _sessionPositionMs
+                : state.position.inMilliseconds);
+      final data = <String, dynamic>{
         'playlist': state.playlist,
         'currentIndex': state.currentIndex,
         'positionMs': pos,
         'mixStrategy': state.mixStrategy.index,
         'autoMixArmed': state.autoMixArmed,
-        'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
+        'wasPlaying': restart
+            ? false
+            : (_freezePersist ? _sessionWasPlaying : state.isPlaying),
       };
       // Atómico y en fila (ver SessionStore): sobrevive cierres y updates.
-      await SessionStore.writeJson(file.path, data);
+      // No pisa la cola, lo ya sonado ni el orden: solo estos campos.
+      await patchModeDoc(filePath, data);
     } catch (_) {}
   }
 
@@ -328,30 +471,37 @@ class AutomixNotifier extends Notifier<AutomixState> {
       final rawList = ((data['playlist'] as List?) ?? const [])
           .map((e) => e.toString())
           .toList();
-      final rawIndex = data['currentIndex'] as int?;
-      // Pistas renombradas por Masterizar se reencuentran; el índice sigue a
-      // la pista actual aunque cambie la lista.
-      final playlist = <String>[];
-      int? index;
-      for (var i = 0; i < rawList.length; i++) {
-        final hit = resolvePlayableSessionPaths([rawList[i]]);
-        if (hit.isEmpty || playlist.contains(hit.first)) continue;
-        if (i == rawIndex) index = playlist.length;
-        playlist.add(hit.first);
-      }
-      final bool sameTrack = index != null;
-      if (index == null && playlist.isNotEmpty && rawIndex != null) {
-        index = rawIndex.clamp(0, playlist.length - 1);
-      }
-      final positionMs = sameTrack ? data['positionMs'] as int? : null;
-      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
-        0,
-        MixStrategy.values.length - 1,
+      // Pistas renombradas por Masterizar se reencuentran. Rutas equivalentes
+      // (mayúsculas, separadores, junctions) cuentan como una sola.
+      final AutomixSessionRestore restored = restoreAutomixSession(
+        data,
+        strategyCount: MixStrategy.values.length,
       );
+      final List<String> playlist = <String>[];
+      final Map<String, int> at = <String, int>{};
+      int? index;
+      for (var i = 0; i < restored.playlist.length; i++) {
+        final String c = canonicalAudioPath(restored.playlist[i]);
+        final String key = audioPathKey(c);
+        final int? prev = at[key];
+        if (prev != null) {
+          if (i == restored.index) index = prev;
+          continue;
+        }
+        if (i == restored.index) index = playlist.length;
+        at[key] = playlist.length;
+        playlist.add(c);
+      }
+      if (index == null && playlist.isNotEmpty && restored.index != null) {
+        index = restored.index!.clamp(0, playlist.length - 1);
+      }
+      final bool sameTrack = restored.positionMs != null && index != null;
+      final positionMs = sameTrack ? restored.positionMs : null;
+      final mixStrategyIdx = restored.mixStrategyIndex;
       // El modo (Shuffle/Secuencial) se respeta aunque no haya pista actual.
       state = state.copyWith(mixStrategy: MixStrategy.values[mixStrategyIdx]);
-      final autoMixArmed = data['autoMixArmed'] as bool? ?? true;
-      final wasPlaying = data['wasPlaying'] as bool? ?? false;
+      final autoMixArmed = restored.autoMixArmed;
+      final wasPlaying = restored.wasPlaying;
 
       if (playlist.isNotEmpty && index != null && index >= 0) {
         state = state.copyWith(
@@ -361,6 +511,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
           mixStrategy: MixStrategy.values[mixStrategyIdx],
           autoMixArmed: autoMixArmed,
         );
+        if (rawList.length != playlist.length ||
+            rawList.join('\n') != playlist.join('\n')) {
+          _sessionPositionMs = positionMs ?? 0;
+          _sessionWasPlaying = wasPlaying;
+          _freezePersist = true;
+          unawaited(_saveSnapshot());
+          _freezePersist = false;
+        }
 
         await _loadLyrics(playlist[index]);
         await _loadTrackMetadata(playlist[index]);
@@ -404,124 +562,93 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void shufflePlaylist() {
+    unawaited(_shufflePlaylistAsync());
+  }
+
+  Future<void> _shufflePlaylistAsync() async {
+    final List<String> paths = state.playlist
+        .where((p) => !isKaraokeAudioPath(p))
+        .toList();
+    await preloadQueueBpm(paths);
     _applyShuffleBank(advance: true);
   }
 
-  String _shuffleBanksPath() {
-    final session = File(_getSessionFilePath());
-    return '${session.parent.path}${Platform.pathSeparator}shuffle_banks.json';
-  }
-
-  String _shuffleListKey(List<String> paths) {
-    final sorted = List<String>.from(paths)..sort();
-    return jsonEncode(sorted);
-  }
-
-  Map<String, dynamic> _readShuffleBankFile() {
-    try {
-      final file = File(_shuffleBanksPath());
-      if (!file.existsSync()) return <String, dynamic>{};
-      final data = jsonDecode(file.readAsStringSync());
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map) return Map<String, dynamic>.from(data);
-    } catch (_) {}
-    return <String, dynamic>{};
-  }
-
-  void _writeShuffleBankFile(Map<String, dynamic> data) {
-    try {
-      File(_shuffleBanksPath()).writeAsStringSync(jsonEncode(data));
-    } catch (_) {}
-  }
-
-  List<List<String>> _buildTenShuffleBanks(List<String> paths) {
-    final banks = <List<String>>[];
-    final seen = <String>{};
-    var salt = 1;
-    while (banks.length < 10 && salt < 400) {
-      final copy = List<String>.from(paths);
-      copy.shuffle(Random(salt * 9973 + paths.length * 13));
-      final sig = copy.join('\n');
-      if (seen.add(sig)) banks.add(copy);
-      salt++;
-    }
-    while (banks.length < 10) {
-      banks.add(List<String>.from(paths));
-    }
-    return banks;
-  }
-
   void _applyShuffleBank({required bool advance}) {
-    if (state.playlist.length <= 2) {
-      state = state.copyWith(mixStrategy: MixStrategy.random);
+    // Al reabrir, el orden guardado es la verdad: no se vuelve a armar.
+    if (!advance) return;
+    final paths = dedupeAudioPaths(
+      state.playlist.where((p) => !isKaraokeAudioPath(p)).toList(),
+    );
+    if (paths.length <= 2) {
+      state = state.copyWith(
+        playlist: paths,
+        mixStrategy: MixStrategy.random,
+        currentIndex: paths.isEmpty
+            ? -1
+            : (state.currentTrackPath == null
+                  ? state.currentIndex
+                  : paths.indexWhere(
+                      (p) => sameAudioPath(p, state.currentTrackPath),
+                    )),
+      );
       _saveSnapshot();
       return;
     }
-
-    final paths = List<String>.from(state.playlist);
     _shuffleKnown.addAll(paths);
-    final key = _shuffleListKey(paths);
-    final all = _readShuffleBankFile();
-    final int spin = (all['spin'] as int?) ?? 0;
-    final lists = Map<String, dynamic>.from(
-      (all['lists'] as Map?) ?? <String, dynamic>{},
+    final String sessionPath = _getSessionFilePath();
+    GatomixStore.migrate(File(sessionPath).parent.path);
+    preloadQueueBpmSync(paths);
+    final String? playing = state.currentTrackPath;
+    final ModeWave wave = loadModeWave(sessionPath, <String>[
+      ...paths,
+      ?playing,
+    ]);
+    final HarmonicOrder built = buildHarmonicShuffle(
+      paths,
+      _extractBpm,
+      keyOf: camelotFromPath,
+      usedPairs: wave.pairs,
+      recentAge: wave.age,
+      playing: playing,
+      continueFrom: playing,
+      startWaveUp: wave.waveUp,
+      startInWave: wave.inWave,
     );
-    Map<String, dynamic> entry = <String, dynamic>{};
-    final raw = lists[key];
-    if (raw is Map) entry = Map<String, dynamic>.from(raw);
-
-    List<List<String>> banks = <List<String>>[];
-    final rawBanks = entry['banks'];
-    if (rawBanks is List) {
-      for (final row in rawBanks) {
-        if (row is List) {
-          banks.add(row.map((e) => e.toString()).toList());
+    String? head;
+    if (playing != null) {
+      for (final String path in paths) {
+        if (sameAudioPath(path, playing)) {
+          head = path;
+          break;
         }
       }
     }
-    final bool sameSet =
-        banks.length == 10 &&
-        banks.every((row) {
-          if (row.length != paths.length) return false;
-          final a = List<String>.from(row)..sort();
-          final b = List<String>.from(paths)..sort();
-          return listEquals(a, b);
-        });
-    if (!sameSet) {
-      banks = _buildTenShuffleBanks(paths);
-      final int previous = (entry['cursor'] as int?) ?? -1;
-      final int carried = previous >= 0 ? previous : (spin % 10) - 1;
-      if (previous < 0) all['spin'] = (spin + 1) % 10;
-      entry = <String, dynamic>{'cursor': carried, 'banks': banks};
-    }
-
-    final int last = (entry['cursor'] as int?) ?? -1;
-    final int use = advance ? (last + 1) % 10 : (last < 0 ? 0 : last % 10);
-    final List<String> order = List<String>.from(banks[use]);
-
-    final String? playing = state.currentTrackPath;
-    final String head;
-    if (playing != null && order.contains(playing)) {
-      head = playing;
-    } else {
-      head = order.first;
-    }
-    final List<String> rest = <String>[
-      for (final path in order)
-        if (path != head) path,
-    ];
+    final List<String> rest = List<String>.from(built.tracks);
     for (final path in paths) {
-      if (path != head && !rest.contains(path)) rest.add(path);
+      if (head != null && sameAudioPath(path, head)) continue;
+      if (!rest.any((r) => sameAudioPath(r, path))) rest.add(path);
     }
-
-    entry['cursor'] = use;
-    entry['banks'] = banks;
-    lists[key] = entry;
-    all['lists'] = lists;
-    _writeShuffleBankFile(all);
+    final List<String> playlist = <String>[
+      if (head != null) head,
+      ...rest.where((p) => head == null || !sameAudioPath(p, head)),
+    ];
+    GatomixStore.commitShuffleMemory(rest, anchor: head ?? playing);
+    unawaited(
+      patchModeDoc(
+        sessionPath,
+        queueWavePatch(
+          doc: readModeDoc(sessionPath),
+          order: rest,
+          anchor: head ?? playing,
+          waveUp: built.waveUp,
+          inWave: built.inWave,
+          previousBpm: rest.isEmpty ? 0 : _extractBpm(rest.last),
+        ),
+      ),
+    );
 
     state = state.copyWith(
-      playlist: [head, ...rest],
+      playlist: playlist,
       currentIndex: 0,
       mixStrategy: MixStrategy.random,
     );
@@ -529,7 +656,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _saveSnapshot();
     _recalculateMixWindow();
 
-    debugPrint("🔀 [DSP] Shuffle banco ${use + 1}/10. ${rest.length} pistas.");
+    debugPrint("🔀 [DSP] Shuffle armónico. ${rest.length} pistas.");
   }
 
   void toggleMixStrategy() {
@@ -548,17 +675,18 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   void syncDynamicPlaylist(List<String> newPlaylistOrdered) {
-    newPlaylistOrdered = newPlaylistOrdered
-        .where((p) => !isKaraokeSessionPath(p))
-        .toList();
-    final currentSet = state.playlist.toSet();
+    newPlaylistOrdered = dedupeAudioPaths(
+      newPlaylistOrdered.where((p) => !isKaraokeAudioPath(p)).toList(),
+    );
+    bool hasPath(Iterable<String> xs, String p) =>
+        xs.any((e) => sameAudioPath(e, p));
     final added = <String>[
       for (final path in newPlaylistOrdered)
-        if (!currentSet.contains(path) && !_shuffleKnown.contains(path)) path,
+        if (!hasPath(state.playlist, path) && !hasPath(_shuffleKnown, path))
+          path,
     ];
-    // Cola estable: añadir pistas ya no re-mezcla todo ni cambia el modo.
-    // El banco solo se aplica con lista vacía; con lista viva, las pistas
-    // nuevas se anexan abajo (rama siguiente) y el orden previo se conserva.
+    // Cola estable en secuencial. Con Shuffle, lo nuevo entra en el hueco
+    // armónico de lo que aún no suena. El banco solo se arma con lista vacía.
     if (added.isNotEmpty &&
         state.playlist.isEmpty &&
         state.mixStrategy == MixStrategy.random &&
@@ -573,25 +701,57 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
     var ordered = newPlaylistOrdered;
     if (state.mixStrategy == MixStrategy.random) {
-      final incoming = newPlaylistOrdered.toSet();
       final kept = <String>[
         for (final path in state.playlist)
-          if (incoming.contains(path)) path,
+          if (hasPath(newPlaylistOrdered, path)) path,
       ];
-      final keptSet = kept.toSet();
       final added = <String>[
         for (final path in newPlaylistOrdered)
-          if (!keptSet.contains(path)) path,
+          if (!hasPath(kept, path)) path,
       ];
-      if (added.length > 1) {
-        added.shuffle(Random(DateTime.now().millisecondsSinceEpoch));
+      if (added.isNotEmpty) {
+        preloadQueueBpmSync(added);
+        for (final String path in added) {
+          saveTrackMusic(
+            path,
+            bpm: _extractBpm(path),
+            camelot: harmonicKeyOf(path),
+          );
+        }
+        var lock = 0;
+        if (state.currentTrackPath != null) {
+          final int i = kept.indexWhere(
+            (String p) => sameAudioPath(p, state.currentTrackPath),
+          );
+          if (i >= 0) lock = i + 1;
+        }
+        if (_isCrossfading && state.nextTrackPath != null) {
+          final int i = kept.indexWhere(
+            (String p) => sameAudioPath(p, state.nextTrackPath),
+          );
+          if (i >= 0 && i + 1 > lock) lock = i + 1;
+        }
+        final List<String> merged = automixInsertAtGap(
+          queue: kept,
+          incoming: added,
+          bpmOf: _extractBpm,
+          keyOf: harmonicKeyOf,
+          lockedPrefix: lock,
+          playing: state.currentTrackPath,
+          pinned: _isCrossfading ? state.nextTrackPath : null,
+        );
+        ordered = dedupeAudioPaths(merged);
+      } else {
+        ordered = dedupeAudioPaths(kept);
       }
-      ordered = [...kept, ...added];
     }
+    ordered = dedupeAudioPaths(ordered);
     if (listEquals(state.playlist, ordered)) return;
     int newCurrentIndex = -1;
     if (state.currentTrackPath != null) {
-      newCurrentIndex = ordered.indexOf(state.currentTrackPath!);
+      newCurrentIndex = ordered.indexWhere(
+        (p) => sameAudioPath(p, state.currentTrackPath),
+      );
     }
     state = state.copyWith(playlist: ordered, currentIndex: newCurrentIndex);
     _saveSnapshot();
@@ -682,15 +842,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     await _activeAutomix.seek(position);
   }
 
-  double _extractBpm(String? path) {
-    if (path == null) return 0.0;
-    final fileName = path.replaceAll('\\', '/').split('/').last;
-    final match = RegExp(
-      r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-      caseSensitive: false,
-    ).firstMatch(fileName);
-    return match != null ? double.parse(match.group(1)!) : 0.0;
-  }
+  double _extractBpm(String? path) => knownBpm(path);
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
     final meta = await ref.read(dbServiceProvider).getTrackMetadata(path);
@@ -702,7 +854,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return meta.cueInMs!;
     }
 
-    final int durMs = player.state.duration.inMilliseconds;
+    final int durMs =
+        (await _trueDuration(path, player.state.duration)).inMilliseconds;
     if (durMs > 30000) return 10000;
     return 0;
   }
@@ -730,20 +883,17 @@ class AutomixNotifier extends Notifier<AutomixState> {
       if (state.lyrics.isNotEmpty) {
         final lastLyricMs = state.lyrics.last.timestamp.inMilliseconds;
         safeMixOutMs = lastLyricMs + 1500;
-      } else if (isRemix || isEdm) {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.65).toInt();
-      } else if (isTropical) {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.80).toInt();
       } else {
-        safeMixOutMs = (state.duration.inMilliseconds * 0.75).toInt();
+        final int tailMs = TrackTags.peek(state.currentTrackPath)?.tailMs ?? 0;
+        final int dur = state.duration.inMilliseconds;
+        final int eff = (tailMs > 0 && tailMs < dur ~/ 3) ? dur - tailMs : dur;
+        final double fraction = (isRemix || isEdm)
+            ? 0.65
+            : (isTropical ? 0.80 : 0.75);
+        safeMixOutMs = dnaPercentPoint(eff, fraction);
       }
     }
 
-    if (!_mixOutIsManual &&
-        safeMixOutMs > 0 &&
-        safeMixOutMs >= state.duration.inMilliseconds - 4000) {
-      safeMixOutMs = state.duration.inMilliseconds - 4000;
-    }
     if (!_cueInIsManual &&
         safeCueInMs > 0 &&
         safeCueInMs > state.duration.inMilliseconds ~/ 2) {
@@ -962,15 +1112,15 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   int _calculateNextIndex() {
-    if (state.playlist.length <= 1) return -1;
-    if (state.currentIndex + 1 < state.playlist.length) {
-      return state.currentIndex + 1;
-    }
-    return 0;
+    return nextDifferentAudioIndex(
+      state.playlist,
+      state.currentIndex,
+      state.currentTrackPath,
+    );
   }
 
   Future<void> _stopWhenNoNext() async {
-    _isCrossfading = false;
+    _releaseMix();
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -1017,19 +1167,23 @@ class AutomixNotifier extends Notifier<AutomixState> {
     int startIndex,
   ) async {
     // Las pistas _K de Karaoke nunca suenan en Automix (solo TV).
-    final kFile = RegExp(r'_k\.[a-z0-9]+$', caseSensitive: false);
-    if (startIndex >= 0 &&
-        startIndex < newPlaylist.length &&
-        newPlaylist.any((t) => kFile.hasMatch(t))) {
+    // Dos grafías de la misma ruta cuentan como una.
+    if (startIndex >= 0 && startIndex < newPlaylist.length) {
       final String picked = newPlaylist[startIndex];
-      final List<String> clean = newPlaylist
-          .where((t) => !kFile.hasMatch(t))
-          .toList();
-      int idx = clean.indexOf(picked);
+      final List<String> clean = dedupeAudioPaths(
+        newPlaylist.where((t) => !isKaraokeAudioPath(t)).toList(),
+      );
+      var idx = -1;
+      for (var i = 0; i < clean.length; i++) {
+        if (sameAudioPath(clean[i], picked)) {
+          idx = i;
+          break;
+        }
+      }
       if (idx < 0) {
         final int before = newPlaylist
             .take(startIndex)
-            .where((t) => !kFile.hasMatch(t))
+            .where((t) => !isKaraokeAudioPath(t))
             .length;
         idx = before < clean.length ? before : 0;
       }
@@ -1040,7 +1194,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _freezePersist = false;
 
     final String nextTrack = newPlaylist[startIndex];
-    if (_isCrossfading && !_deckHot) _isCrossfading = false;
+    if (_isCrossfading && !_deckHot) _releaseMix();
 
     if (!_deckHot || state.currentTrackPath == null) {
       state = state.copyWith(
@@ -1063,7 +1217,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       return;
     }
 
-    if (state.currentTrackPath == nextTrack) {
+    if (sameAudioPath(state.currentTrackPath, nextTrack)) {
       state = state.copyWith(playlist: newPlaylist, currentIndex: startIndex);
       if (!state.isPlaying) {
         await _activeAutomix.setVolume(100.0);
@@ -1075,6 +1229,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (!_isCrossfading) {
       _isCrossfading = true;
+      _mix.arm();
       _isPrepModeBypass = false;
 
       final Player fadingPlayer = _activeAutomix;
@@ -1087,7 +1242,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
             .read(automixEqualizerProvider.notifier)
             .adapt(incomingPlayer, nextTrack);
       } catch (e) {
-        _isCrossfading = false;
+        _releaseMix();
         return;
       }
 
@@ -1101,17 +1256,25 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       final fadingBpm = _extractBpm(state.currentTrackPath);
       final incomingBpm = _extractBpm(nextTrack);
-      double incomingRate = 1.0;
-      if (fadingBpm > 60 && incomingBpm > 60) {
-        final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-        if (ratio >= 0.88 && ratio <= 1.12) incomingRate = ratio;
-      }
+      final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
       try {
         await incomingPlayer.setRate(incomingRate);
-        await incomingPlayer.play();
+        await _playIncomingInPhase(
+          fading: fadingPlayer,
+          incoming: incomingPlayer,
+          inPath: nextTrack,
+          cueMs: cueInMs,
+          inBpm: incomingBpm,
+          rampRate: incomingRate,
+        );
+        if (!_mix.armed) {
+          await _dropPhase();
+          return;
+        }
       } catch (e) {
-        _isCrossfading = false;
+        await _dropPhase();
+        _releaseMix();
         return;
       }
 
@@ -1160,7 +1323,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (!_deckHot) {
       final String coldTrack = state.playlist[index];
-      _isCrossfading = false;
+      _releaseMix();
       state = state.copyWith(
         currentIndex: index,
         currentTrackPath: coldTrack,
@@ -1179,6 +1342,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     _isCrossfading = true;
+    _mix.arm();
     _isPrepModeBypass = false;
 
     final String nextTrack = state.playlist[index];
@@ -1192,7 +1356,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           .read(automixEqualizerProvider.notifier)
           .adapt(incomingPlayer, nextTrack);
     } catch (e) {
-      _isCrossfading = false;
+      _releaseMix();
       return;
     }
 
@@ -1207,20 +1371,25 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     final fadingBpm = _extractBpm(state.currentTrackPath);
     final incomingBpm = _extractBpm(nextTrack);
-    double incomingRate = 1.0;
-
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
-    }
+    final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
     try {
       await incomingPlayer.setRate(incomingRate);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: nextTrack,
+        cueMs: cueInMs,
+        inBpm: incomingBpm,
+        rampRate: incomingRate,
+      );
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
@@ -1267,6 +1436,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
   Future<void> _triggerCrossfade() async {
     if (_isCrossfading || state.nextTrackPath == null) return;
     _isCrossfading = true;
+    _mix.arm();
 
     final String nextTrack = state.nextTrackPath!;
     await _primeLyrics(nextTrack);
@@ -1284,7 +1454,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           .read(automixEqualizerProvider.notifier)
           .adapt(incomingPlayer, nextTrack);
     } catch (e) {
-      _isCrossfading = false;
+      _releaseMix();
       return;
     }
 
@@ -1299,20 +1469,25 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     final fadingBpm = _extractBpm(state.currentTrackPath);
     final incomingBpm = _extractBpm(nextTrack);
-    double incomingRate = 1.0;
-
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * fadingPlayer.state.rate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
-    }
+    final double incomingRate = _midpointRate(fadingBpm, incomingBpm);
 
     try {
       await incomingPlayer.setRate(incomingRate);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: nextTrack,
+        cueMs: cueInMs,
+        inBpm: incomingBpm,
+        rampRate: incomingRate,
+      );
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
@@ -1388,19 +1563,24 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
       await incomingPlayer.setVolume(0.0);
 
-      final fadeStopwatch = Stopwatch()..start();
+      final int mixEpoch = _mix.epoch;
+      final MixRunClock fadeClock = _mix.beginFade(mixDurationMs);
       final actualDuration = mixDurationMs;
 
-      while (fadeStopwatch.elapsedMilliseconds < actualDuration) {
-        final progress = (fadeStopwatch.elapsedMilliseconds / actualDuration)
+      while (
+        fadeClock.elapsedMilliseconds < actualDuration &&
+        _mix.epoch == mixEpoch
+      ) {
+        if (_mix.paused) {
+          await _mix.untilRunning();
+          continue;
+        }
+        final progress = (fadeClock.elapsedMilliseconds / actualDuration)
             .clamp(0.0, 1.0);
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final rateIn = (progress * 1.8).clamp(0.0, 1.0);
-        final rateOut = ((1.0 - progress) * 1.8).clamp(0.0, 1.0);
-
-        final smoothRateIn = pow(rateIn, 1.2).toDouble();
-        final smoothRateOut = pow(rateOut, 1.2).toDouble();
+        final smoothRateIn = dawnCrossfadeGain(progress);
+        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
 
         // 🔀 PERMUTA DE GRAVES en el cruce, donde ambas rondan el 0.9: la
         // saliente cede el bajo y la entrante lo recupera. Una única
@@ -1417,22 +1597,19 @@ class AutomixNotifier extends Notifier<AutomixState> {
         );
         await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
 
-        await Future.delayed(const Duration(milliseconds: 32));
+        await _mix.slice(32, fadeClock);
       }
     } catch (e) {
       debugPrint("🔴 [ERROR DSP AUTOMIX]: $e");
     } finally {
-      // 🛡️ FIX: el glide de tempo arranca en incomingRate. Fijar aquí el rate a
-      // 1.0 provocaba un salto de velocidad hacia atrás al iniciar la rampa.
-      // Mucha corrección: se queda en el BPM de entrada y TempoDrift reparte
-      // la diferencia en 5 pasos (10 %–50 %) hasta su BPM real.
+      await _dropPhase();
+      // B arrancó en el punto medio. La vuelta a su BPM la hace TempoDrift.
       _drift.begin(_extractBpm(state.currentTrackPath), incomingRate);
-      final bool keepRate = _drift.active && incomingRate != 1.0;
-      final bool willGlideRate = incomingRate != 1.0 && !keepRate;
+      final String? blocked = _drift.takeBlockedReport();
+      if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
 
       try {
         await incomingPlayer.setVolume(100.0);
-        if (!willGlideRate && !keepRate) await incomingPlayer.setRate(1.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
         await fadingPlayer.setVolume(0.0);
@@ -1440,57 +1617,115 @@ class AutomixNotifier extends Notifier<AutomixState> {
         await fadingPlayer.stop();
       } catch (_) {}
 
-      if (willGlideRate) {
-        try {
-          final pitchStopwatch = Stopwatch()..start();
-          final double rateDiff = 1.0 - incomingRate;
-          while (pitchStopwatch.elapsedMilliseconds < 3000) {
-            final double p = (pitchStopwatch.elapsedMilliseconds / 3000).clamp(
-              0.0,
-              1.0,
-            );
-            final double curve = sin(p * (pi / 2));
-            await incomingPlayer.setRate(incomingRate + (rateDiff * curve));
-            await Future.delayed(const Duration(milliseconds: 50));
-          }
-        } catch (_) {}
-        try {
-          await incomingPlayer.setRate(1.0);
-        } catch (_) {}
-      }
-
-      _isCrossfading = false;
+      _releaseMix();
     }
+  }
+
+  Future<void> _playIncomingInPhase({
+    required Player fading,
+    required Player incoming,
+    required String inPath,
+    required int cueMs,
+    required double inBpm,
+    required double rampRate,
+  }) async {
+    final String? outPath = state.currentTrackPath;
+    rust_dsp.BeatGrid? gridOut;
+    rust_dsp.BeatGrid? gridIn;
+    if (outPath != null) {
+      try {
+        final int outPos = fading.state.position.inMilliseconds;
+        final int cue = cueMs < 0 ? 0 : cueMs;
+        final rust_dsp.BeatGrid? tagOut = beatFromTag(outPath, outPos + 1000);
+        final rust_dsp.BeatGrid? tagIn = beatFromTag(inPath, cue);
+        final List<rust_dsp.BeatGrid> grids = tagOut != null && tagIn != null
+            ? <rust_dsp.BeatGrid>[tagOut, tagIn]
+            : await Future.wait<rust_dsp.BeatGrid>(<Future<rust_dsp.BeatGrid>>[
+                rust_dsp.beatGrid(
+                  inputPath: outPath,
+                  fromMs: BigInt.from(outPos + 1000),
+                  spanSecs: 12,
+                ),
+                rust_dsp.beatGrid(
+                  inputPath: inPath,
+                  fromMs: BigInt.from(cue),
+                  spanSecs: 12,
+                ),
+              ]).timeout(const Duration(seconds: 5));
+        if (grids[0].ok &&
+            grids[1].ok &&
+            grids[0].bpm > 0 &&
+            grids[1].bpm > 0) {
+          gridOut = grids[0];
+          gridIn = grids[1];
+        }
+      } catch (_) {}
+    }
+    _mix.setRampBpm(inBpm > 0 && rampRate > 0 ? inBpm * rampRate : 0);
+    if (gridOut == null || gridIn == null) {
+      await incoming.play();
+      return;
+    }
+    final double liveOut = fading.state.rate;
+    _phaseLock = await engageBeatLock(
+      outgoing: fading,
+      incoming: incoming,
+      outBeatMs: gridOut.beatMs,
+      outBpm: gridOut.bpm,
+      outRate: liveOut > 0 ? liveOut : 1,
+      inBeatMs: gridIn.beatMs,
+      inBpm: gridIn.bpm,
+      cueMs: (cueMs < 0 ? 0 : cueMs).toDouble(),
+      inRate: rampRate > 0 ? rampRate : 1,
+      rampRate: rampRate > 0 ? rampRate : 1,
+      incomingOnBeat: false,
+      hold: _mix,
+    );
+  }
+
+  double _midpointRate(double fadingBpm, double incomingBpm) {
+    final MidpointEntry entry = midpointEntry(fadingBpm, incomingBpm);
+    if (entry.blocked) djTrace('MIDPOINT FUERA ${entry.note}');
+    return entry.incomingRate;
   }
 
   final Map<String, int> _exactDurCache = {};
 
-  /// Duración real del archivo (Rust). Si difiere de la de libmpv en más de
-  /// 1.5 s manda la real: evita la barra que termina al 70-80 % y daña la mezcla.
+  /// Duración decodificada. Ni TLEN ni libmpv deciden la barra ni el disparo.
   Future<Duration> _trueDuration(String? path, Duration mpv) async {
-    if (path == null) return mpv;
+    if (path == null) return Duration.zero;
     try {
       int? ms = _exactDurCache[path];
-      if (ms == null) {
+      if (ms == null || ms <= 0) {
         ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
-        _exactDurCache[path] = ms;
+        if (ms > 0) _exactDurCache[path] = ms;
       }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint(
-          '⏱️ [AUTOMIX] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
-        );
+      if (ms > 0) {
+        if (ms != mpv.inMilliseconds) {
+          debugPrint(
+            '⏱️ [AUTOMIX] Duración decodificada ${ms ~/ 1000}s '
+            '(libmpv ${mpv.inSeconds}s): $path',
+          );
+        }
         return Duration(milliseconds: ms);
       }
-    } catch (_) {}
-    return mpv;
+    } catch (e) {
+      djTrace('DURACION FALLO $path $e');
+    }
+    djTrace('DURACION SIN MEDIR $path mpv=${mpv.inMilliseconds}');
+    return Duration.zero;
   }
 
-  /// Aplica la duración real a la pista actual y recalcula la ventana de mezcla.
+  /// La ventana espera la duración decodificada. La estimación no se publica.
   Future<void> _applyTrueDuration(String? path, Duration mpv) async {
-    if (path == null || mpv.inMilliseconds <= 0) return;
+    if (path == null) return;
     final Duration real = await _trueDuration(path, mpv);
-    if (real == mpv || state.currentTrackPath != path) return;
-    if (state.duration == real) return;
+    if (state.currentTrackPath != path) return;
+    if (real.inMilliseconds <= 0) return;
+    if (state.duration == real &&
+        _lastDurationPlanKey == '$path|${real.inMilliseconds}') {
+      return;
+    }
     _lastDurationPlanKey = '$path|${real.inMilliseconds}';
     state = state.copyWith(duration: real);
     try {
@@ -1512,16 +1747,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
     final Duration livePos = player.state.position;
     final bool livePlaying = player.state.playing;
     if (liveDur.inMilliseconds > 0) {
-      _lastDurationPlanKey =
-          '${state.currentTrackPath}|${liveDur.inMilliseconds}';
       state = state.copyWith(
-        duration: liveDur,
         position: livePos,
         isPlaying: livePlaying,
       );
-      try {
-        _recalculateMixWindow();
-      } catch (_) {}
       unawaited(_applyTrueDuration(state.currentTrackPath, liveDur));
     } else if (livePlaying || livePos.inMilliseconds > 0) {
       state = state.copyWith(isPlaying: livePlaying, position: livePos);
@@ -1530,8 +1759,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _positionSub = player.stream.position.listen((Duration pos) {
       final posMs = pos.inMilliseconds;
 
-      if (!_isCrossfading && state.duration.inMilliseconds > 0) {
+      if (!_isCrossfading && !_mix.paused && state.duration.inMilliseconds > 0) {
         final double curRate = player.state.rate;
+        final String? blocked = _drift.takeBlockedReport();
+        if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
         final double? tgt = _drift.tick(
           posMs: posMs,
           durMs: state.duration.inMilliseconds,
@@ -1539,7 +1770,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
           rate: curRate,
           nextBpm: _extractBpm(state.nextTrackPath),
         );
-        if (tgt != null) unawaited(_drift.ramp(player, curRate, tgt));
+        final String? blockedAfter = _drift.takeBlockedReport();
+        if (blockedAfter != null) djTrace('MIDPOINT FUERA $blockedAfter');
+        if (tgt != null) {
+          unawaited(
+            _drift.ramp(player, curRate, tgt, ms: _drift.rampMs, hold: _mix),
+          );
+        }
       }
 
       if (state.customCueInMs > 0 &&
@@ -1549,8 +1786,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
         return;
       }
 
-      // Red de seguridad: si el plan no quedó listo, igual se mezcla al pasar
-      // el punto de salida (nunca antes), en vez de llegar al final de la pista.
+      // El disparo es el punto de mezcla ya medido. No se adelanta.
       if (state.autoMixArmed &&
           (_mixPlanReady ||
               (state.customMixOutMs > 0 && posMs >= state.customMixOutMs)) &&
@@ -1562,7 +1798,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
           state.customMixOutMs,
         );
         if (posMs >= (triggerMs - 150)) {
-          if (!_isCrossfading && !_isPrepModeBypass) {
+          if (!_isCrossfading && !_isPrepModeBypass && !_mix.paused) {
             _triggerCrossfade();
           }
         }
@@ -1627,22 +1863,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     });
 
     _durationSub = player.stream.duration.listen((dur) {
-      final key = '${state.currentTrackPath}|${dur.inMilliseconds}';
-      if (key == _lastDurationPlanKey) return;
-      _lastDurationPlanKey = key;
-      state = state.copyWith(duration: dur);
-      _recalculateMixWindow();
       unawaited(_applyTrueDuration(state.currentTrackPath, dur));
-
-      if (state.currentTrackPath != null) {
-        globalAudioHandler.syncOs(
-          owner: 'automix',
-          path: state.currentTrackPath,
-          duration: dur,
-          playing: state.isPlaying,
-          position: state.position,
-        );
-      }
     });
 
     _playingSub = player.stream.playing.listen((playing) {
@@ -1803,10 +2024,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> togglePlayPause() async {
+    if (_mix.armed) {
+      await _toggleMixHold();
+      return;
+    }
     if (state.currentTrackPath == null) return;
     _isPrepModeBypass = false;
     _freezePersist = false;
-    _isCrossfading = false;
+    if (_isCrossfading) _releaseMix();
 
     final String path = state.currentTrackPath!;
     final bool deckEmpty = _activeAutomix.state.duration.inMilliseconds <= 0;
@@ -1828,6 +2053,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     if (state.isPlaying) {
       _cancelOutroProbe();
+      _mix.pauseAll();
       await _activeAutomix.pause();
       _saveSnapshot();
       return;
@@ -1837,6 +2063,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
         state.position.inMilliseconds < state.customCueInMs) {
       await _activeAutomix.seek(Duration(milliseconds: state.customCueInMs));
     }
+    _mix.resumeAll();
     await _activeAutomix.play();
     unawaited(_planVariableMixWindow());
     await Future.delayed(const Duration(milliseconds: 80));
@@ -1852,8 +2079,13 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> pause() async {
+    if (_mix.armed) {
+      if (!_mix.paused) await _toggleMixHold();
+      return;
+    }
     if (state.isPlaying) {
       _cancelOutroProbe();
+      _mix.pauseAll();
       await _activeAutomix.pause();
       _saveSnapshot();
     }
@@ -1901,6 +2133,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     }
 
     _isCrossfading = true;
+    _mix.arm();
     try {
       await incomingPlayer.setVolume(0.0);
       await incomingPlayer.open(Media(newPath), play: false);
@@ -1911,9 +2144,17 @@ class AutomixNotifier extends Notifier<AutomixState> {
         await incomingPlayer.seek(Duration(milliseconds: state.customCueInMs));
       }
       await incomingPlayer.setRate(1.0);
-      await incomingPlayer.play();
+      await _playIncomingInPhase(
+        fading: fadingPlayer,
+        incoming: incomingPlayer,
+        inPath: newPath,
+        cueMs: state.customCueInMs > 0 ? state.customCueInMs : 0,
+        inBpm: _extractBpm(newPath),
+        rampRate: 1.0,
+      );
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       debugPrint('🔴 [AUTOMIX SWAP] $e');
       return;
     }
@@ -1942,14 +2183,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
     try {
       await _playerB.stop();
     } catch (_) {}
-    _isCrossfading = false;
+    _releaseMix();
     await Future.delayed(const Duration(milliseconds: 600));
   }
 
   /// El deck activo a veces queda vacío (restore / park). La 2ª pista suena
   /// porque abre el standby; la 1ª reutilizaba el muerto. Siempre el otro.
   Future<void> _forceOpenAndPlay(String path, {int seekMs = 0}) async {
-    _isCrossfading = false;
+    _releaseMix();
     final Player incoming = _standbyPlayer;
     _drift.begin(_extractBpm(path), 1.0);
     try {
@@ -1991,7 +2232,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (!force && (state.isPlaying || _isCrossfading)) return;
     _parking = true;
     try {
-      if (force) _isCrossfading = false;
+      if (force) _releaseMix();
       _cancelOutroProbe();
       _sessionWasPlaying = state.isPlaying;
       if (state.position.inMilliseconds > 0) {
@@ -2298,49 +2539,34 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
     return {};
   }
 
-  String _getSessionFilePath() {
-    if (Platform.isIOS) {
-      final dir = Directory(IphoneLibrary.playlistsDir);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return '${dir.path}${Platform.pathSeparator}_played_tracks_session.json';
-    }
-    String baseDir;
-    if (Platform.isWindows) {
-      final userProfile = Platform.environment['USERPROFILE'];
-      baseDir = userProfile != null
-          ? '$userProfile\\Music\\DjPlaylists'
-          : 'C:\\Music\\DjPlaylists';
-    } else if (Platform.isMacOS || Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      baseDir = home != null ? '$home/Music/DjPlaylists' : '/tmp/DjPlaylists';
-    } else {
-      baseDir = '/storage/emulated/0/Music/DjPlaylists';
-    }
-    final dir = Directory(baseDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return '${dir.path}${Platform.pathSeparator}_played_tracks_session.json';
+  String _getSessionFilePath() => automixStatePath();
+
+  void clearAll() {
+    state = <String>{};
   }
 
   Future<void> _loadSession() async {
     try {
       final data = SessionStore.readJson(_getSessionFilePath());
-      if (data is List) {
-        state = {...data.map((e) => e.toString()), ...state};
+      final List<dynamic>? raw = data is List
+          ? data
+          : (data is Map ? data['played'] as List? : null);
+      if (raw != null) {
+        state = {...raw.map((e) => e.toString()), ...state};
       }
     } catch (_) {}
   }
 
   Future<void> _saveSession(Set<String> currentPlayed) async {
     try {
-      await SessionStore.writeJson(
-        _getSessionFilePath(),
-        currentPlayed.toList(),
-      );
+      await patchModeDoc(_getSessionFilePath(), <String, dynamic>{
+        'played': currentPlayed.toList(),
+      });
     } catch (_) {}
   }
 
   void addTrack(String track) {
-    if (!state.contains(track)) {
+    if (!state.any((p) => sameAudioPath(p, track))) {
       final newState = {...state, track};
       state = newState;
       _saveSession(newState);
@@ -2348,9 +2574,8 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
   }
 
   void removeTrack(String track) {
-    if (state.contains(track)) {
-      final newState = Set<String>.from(state);
-      newState.remove(track);
+    final newState = state.where((p) => !sameAudioPath(p, track)).toSet();
+    if (newState.length != state.length) {
       state = newState;
       _saveSession(newState);
     }
@@ -2358,43 +2583,119 @@ class PlayedTracksNotifier extends Notifier<Set<String>> {
 }
 
 class AutomixQueueNotifier extends Notifier<List<File>> {
+  Future<void> _addChain = Future<void>.value();
+  int _addEpoch = 0;
+
+  void _releaseHold() {
+    try {
+      ref.read(automixProvider.notifier).releaseQueueHold();
+    } catch (_) {}
+  }
+
+  bool _shuffleOn() {
+    try {
+      return ref.read(automixProvider).mixStrategy == MixStrategy.random;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  int _locked(List<String> paths) {
+    final AutomixState auto = ref.read(automixProvider);
+    var lock = 0;
+    if (auto.currentTrackPath != null) {
+      final int i = paths.indexWhere(
+        (String p) => sameAudioPath(p, auto.currentTrackPath),
+      );
+      if (i >= 0) lock = i + 1;
+    }
+    if (ref.read(automixProvider.notifier).nextTrackLocked &&
+        auto.nextTrackPath != null) {
+      final int i = paths.indexWhere(
+        (String p) => sameAudioPath(p, auto.nextTrackPath),
+      );
+      if (i >= 0 && i + 1 > lock) lock = i + 1;
+    }
+    return lock;
+  }
+
+  Future<void> _insertShuffle(List<File> files, int epoch) async {
+    if (epoch != _addEpoch) return;
+    final List<File> fresh = <File>[];
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      if (state.any((File e) => sameAudioPath(e.path, f.path))) continue;
+      fresh.add(f);
+    }
+    if (fresh.isEmpty) return;
+    final List<String> paths = fresh.map((File f) => f.path).toList();
+    try {
+      await preloadQueueBpm(paths);
+    } catch (_) {}
+    if (epoch != _addEpoch) return;
+    for (final String p in paths) {
+      saveTrackMusic(p, bpm: cachedBpm(p), camelot: harmonicKeyOf(p));
+    }
+    if (!_shuffleOn()) {
+      if (epoch != _addEpoch) return;
+      _releaseHold();
+      final List<File> next = <File>[...state, ...fresh];
+      state = next;
+      await _saveSession(next);
+      return;
+    }
+    final List<String> base = state.map((File f) => f.path).toList();
+    final AutomixState auto = ref.read(automixProvider);
+    if (epoch != _addEpoch) return;
+    final List<String> merged = automixInsertAtGap(
+      queue: base,
+      incoming: paths,
+      bpmOf: cachedBpm,
+      keyOf: harmonicKeyOf,
+      lockedPrefix: _locked(base),
+      playing: auto.currentTrackPath,
+      pinned: ref.read(automixProvider.notifier).nextTrackLocked
+          ? auto.nextTrackPath
+          : null,
+    );
+    if (epoch != _addEpoch) return;
+    _releaseHold();
+    final Map<String, File> byKey = <String, File>{
+      for (final File f in <File>[...state, ...fresh]) audioPathKey(f.path): f,
+    };
+    final List<File> next = <File>[
+      for (final String p in merged) byKey[audioPathKey(p)] ?? File(p),
+    ];
+    state = next;
+    await _saveSession(next);
+  }
+
   @override
   List<File> build() {
     _loadSession();
     return [];
   }
 
-  String _getSessionFilePath() {
-    if (Platform.isIOS) {
-      final dir = Directory(IphoneLibrary.playlistsDir);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return '${dir.path}${Platform.pathSeparator}_automix_session.json';
-    }
-    String baseDir;
-    if (Platform.isWindows) {
-      final userProfile = Platform.environment['USERPROFILE'];
-      baseDir = userProfile != null
-          ? '$userProfile\\Music\\DjPlaylists'
-          : 'C:\\Music\\DjPlaylists';
-    } else if (Platform.isMacOS || Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      baseDir = home != null ? '$home/Music/DjPlaylists' : '/tmp/DjPlaylists';
-    } else {
-      baseDir = '/storage/emulated/0/Music/DjPlaylists';
-    }
-    final dir = Directory(baseDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return '${dir.path}${Platform.pathSeparator}_automix_session.json';
-  }
+  String _getSessionFilePath() => automixStatePath();
 
   Future<void> _loadSession() async {
     try {
       final data = SessionStore.readJson(_getSessionFilePath());
-      if (data is List && state.isEmpty) {
+      final List<dynamic>? rawList = data is List
+          ? data
+          : (data is Map ? data['queue'] as List? : null);
+      if (rawList != null && state.isEmpty) {
         // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-        state = resolvePlayableSessionPaths(
-          data.map((e) => e.toString()).toList(),
-        ).map((p) => File(p)).toList();
+        // Duplicados guardados (otra grafía de la misma ruta) se limpian.
+        final List<String> raw = rawList.map((e) => e.toString()).toList();
+        final List<File> files = dedupeAudioFiles(
+          resolvePlayableSessionPaths(raw).map(File.new).toList(),
+        );
+        state = files;
+        if (raw.length != files.length ||
+            raw.join('\n') != files.map((f) => f.path).join('\n')) {
+          unawaited(_saveSession(files));
+        }
       }
     } catch (_) {}
   }
@@ -2402,44 +2703,80 @@ class AutomixQueueNotifier extends Notifier<List<File>> {
   Future<void> _saveSession(List<File> currentQueue) async {
     try {
       final paths = currentQueue.map((f) => f.path).toList();
-      await SessionStore.writeJson(_getSessionFilePath(), paths);
+      await patchModeDoc(_getSessionFilePath(), <String, dynamic>{
+        'queue': paths,
+      });
     } catch (_) {}
   }
 
   void addTrack(File file) {
-    final newState = state.where((f) => f.path != file.path).toList();
-    newState.add(file);
+    if (isKaraokeAudioPath(file.path)) return;
+    final File kept = File(canonicalAudioPath(file.path));
+    if (_shuffleOn()) {
+      final int epoch = _addEpoch;
+      _addChain = _addChain.then((_) => _insertShuffle(<File>[kept], epoch));
+      return;
+    }
+    _releaseHold();
+    final newState = state
+        .where((f) => !sameAudioPath(f.path, kept.path))
+        .toList();
+    newState.add(kept);
     state = newState;
     _saveSession(newState);
   }
 
   void addAll(List<File> files) {
+    if (_shuffleOn()) {
+      final List<File> kept = <File>[
+        for (final File f in files)
+          if (!isKaraokeAudioPath(f.path)) File(canonicalAudioPath(f.path)),
+      ];
+      final int epoch = _addEpoch;
+      _addChain = _addChain.then((_) => _insertShuffle(kept, epoch));
+      return;
+    }
+    _releaseHold();
     var newState = List<File>.from(state);
-    for (var f in files.where((f) => !isKaraokeSessionPath(f.path))) {
-      newState.removeWhere((existing) => existing.path == f.path);
-      newState.add(f);
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      final File kept = File(canonicalAudioPath(f.path));
+      newState.removeWhere(
+        (existing) => sameAudioPath(existing.path, kept.path),
+      );
+      newState.add(kept);
     }
     state = newState;
     _saveSession(newState);
   }
 
   void removeTrack(String path) {
-    final newState = state.where((f) => f.path != path).toList();
+    final newState = state.where((f) => !sameAudioPath(f.path, path)).toList();
     state = newState;
     _saveSession(newState);
   }
 
   void clearQueue() {
+    _addEpoch++;
+    _addChain = Future<void>.value();
     state = [];
-    _saveSession([]);
+    try {
+      ref.read(playedTracksProvider.notifier).clearAll();
+    } catch (_) {}
+    try {
+      ref.read(automixProvider.notifier).dropPersistedQueue();
+    } catch (_) {}
+    clearModeQueueSync(_getSessionFilePath(), playbackList: true);
   }
 
   void restoreQueue(List<String> paths) {
-    List<File> files = [];
-    for (String p in paths) {
-      if (isKaraokeSessionPath(p)) continue;
-      if (File(p).existsSync()) files.add(File(p));
-    }
+    final List<File> files = dedupeAudioFiles(
+      paths
+          .where((p) => !isKaraokeAudioPath(p) && File(p).existsSync())
+          .map(File.new)
+          .toList(),
+    );
+    _releaseHold();
     state = files;
     _saveSession(files);
   }
@@ -2463,15 +2800,12 @@ class TrackSortNotifier extends Notifier<TrackSortMode> {
     return TrackSortMode.alphabetical;
   }
 
-  String _path() {
-    final session = MixStrategyFactory.getStrategy().getSessionPath();
-    return '${File(session).parent.path}${Platform.pathSeparator}_automix_sort.json';
-  }
+  String _path() => automixStatePath();
 
   void updateMode(TrackSortMode mode) {
     state = mode;
     try {
-      SessionStore.writeJson(_path(), {'sortMode': mode.name});
+      patchModeDoc(_path(), <String, dynamic>{'sortMode': mode.name});
     } catch (_) {}
   }
 }
@@ -2486,27 +2820,23 @@ class BpmCacheNotifier extends Notifier<Map<String, double>> {
       return;
     }
 
-    final file = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.json',
-    );
-    if (file.existsSync()) {
-      try {
-        final content = await file.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        final Map<String, double> newCache = {};
-
-        decoded.forEach((key, value) {
-          if (value is num) {
-            newCache[key] = value.toDouble();
-          } else if (value is Map && value['bpm'] != null) {
-            newCache[key] = (value['bpm'] as num).toDouble();
-          }
-        });
-        state = newCache;
-      } catch (e) {
+    try {
+      final Map<String, dynamic> decoded = readDjMetadata(directoryPath);
+      if (decoded.isEmpty) {
         state = {};
+        return;
       }
-    } else {
+      final Map<String, double> newCache = {};
+
+      decoded.forEach((key, value) {
+        if (value is num) {
+          newCache[key] = value.toDouble();
+        } else if (value is Map && value['bpm'] != null) {
+          newCache[key] = (value['bpm'] as num).toDouble();
+        }
+      });
+      state = newCache;
+    } catch (e) {
       state = {};
     }
   }

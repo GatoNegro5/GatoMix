@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/brand_paths.dart';
+import '../core/gatomix_store.dart';
 import '../core/lab_quarantine.dart';
 import '../core/song_watchdog.dart';
 import '../providers/pipeline_provider.dart';
@@ -12,7 +13,7 @@ import 'workspaces/dsp_workspace.dart';
 
 /// Ventana mínima para `--master-folder <ruta>`: corre el Masterizar normal
 /// (mismo código y checkpoint) y anota el avance en
-/// `<carpeta>/.gatomix_master_headless.log`. Al terminar cierra la app.
+/// `<carpeta>/.gatomix.log`. Al terminar cierra la app.
 ///
 /// 1.0.13: `autoLab` → al terminar, las letras en FAIL van al Laboratorio;
 /// `labRescue` → [folder] es el LAB: tras masterizar, las que quedaron bien
@@ -56,21 +57,12 @@ class HeadlessMasterPage extends ConsumerStatefulWidget {
 }
 
 class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
-  late final File _log = File(
-    '${widget.folder}${Platform.pathSeparator}.gatomix_master_headless.log',
-  );
   String _last = '';
   DateTime _progressAt = DateTime.now();
   Timer? _watchdog;
 
   void _write(String line) {
-    try {
-      _log.writeAsStringSync(
-        '${DateTime.now().toIso8601String()} $line\n',
-        mode: FileMode.append,
-        flush: true,
-      );
-    } catch (_) {}
+    GatomixLog.append(widget.folder, line);
   }
 
   @override
@@ -87,6 +79,7 @@ class _HeadlessMasterPageState extends ConsumerState<HeadlessMasterPage> {
   }
 
   Future<void> _run() async {
+    GatomixStore.migrate(widget.folder);
     _write('INICIO ${widget.folder}');
     try {
       await const DspNlpWorkspace().runHeadlessMaster(

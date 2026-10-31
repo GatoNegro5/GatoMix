@@ -2,40 +2,44 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
+
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_selector/file_selector.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
+import '../core/audio_path.dart';
+import '../core/gatomix_radio.dart';
+import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
+import '../core/mode_session.dart';
+import '../core/livedj_next.dart';
 import '../core/livedj_order.dart';
+import '../core/dna_mix.dart';
+import '../core/phrase_grid.dart';
+import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
+import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
+import '../core/audio/mix_pause.dart';
+import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
+import '../core/dj_trace.dart';
+import '../core/exact_mix.dart';
 import '../services/track_tags.dart';
 import '../core/audio/dj_audio_handler.dart';
 import 'equalizer_provider.dart';
 import 'mix_formula.dart';
-import 'directory_provider.dart';
 import '../djiphone/iphone_library.dart';
 
 enum LiveDjMixStrategy { sequential, random }
 
 /// Bitácora de decisiones del mezclador (solo diagnóstico, no toca el audio).
-/// Archivo: <temp>/gatomix_livedj_trace.txt (se recorta solo al pasar 300 KB).
-void _djTrace(String msg) {
-  try {
-    final f = File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}gatomix_livedj_trace.txt',
-    );
-    if (f.existsSync() && f.lengthSync() > 300000) f.writeAsStringSync('');
-    f.writeAsStringSync(
-      '${DateTime.now().toIso8601String()} $msg\n',
-      mode: FileMode.append,
-    );
-  } catch (_) {}
-}
+void _djTrace(String msg) => djTrace(msg);
 
 enum LiveDjMixMode { activeSync, longBypass }
 
@@ -68,6 +72,9 @@ class LiveDjState {
   final Set<String> radioGenres;
   // Pista que la Radio ya eligió para sonar a continuación (null = sin elegir).
   final String? radioNextPath;
+  // Cola de la opción de radio ya armada, desde la posición actual.
+  // Vacía con la radio apagada. No se relee el JSON en cada build.
+  final List<String> radioUpcoming;
   // Géneros que SÍ tienen carpeta con pistas (el resto de chips se apaga).
   final Set<String> radioGenresAvailable;
 
@@ -85,6 +92,7 @@ class LiveDjState {
     this.radioOn = false,
     this.radioGenres = const <String>{},
     this.radioNextPath,
+    this.radioUpcoming = const <String>[],
     this.radioGenresAvailable = const <String>{},
   });
 
@@ -104,6 +112,7 @@ class LiveDjState {
     Set<String>? radioGenres,
     String? radioNextPath,
     bool clearRadioNextPath = false,
+    List<String>? radioUpcoming,
     Set<String>? radioGenresAvailable,
   }) {
     return LiveDjState(
@@ -125,6 +134,7 @@ class LiveDjState {
       radioNextPath: clearRadioNextPath
           ? null
           : (radioNextPath ?? this.radioNextPath),
+      radioUpcoming: radioUpcoming ?? this.radioUpcoming,
     );
   }
 }
@@ -168,6 +178,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // Pista realmente precargada en el deck standby. Si la cola cambia
   // (quitar, shuffle, otra pista) antes del cruce, se vuelve a cargar.
   String? _standbyArmedPath;
+  // Pista elegida para el relevo, antes de que el deck termine de abrirla.
+  // La rampa de tempo la usa; no espera al throttle de la UI.
+  String? _driftNextPath;
+  int _radioSaveSerial = 0;
+  Future<void> _radioSaveChain = Future<void>.value();
+  String? _radioRootOverride;
+  // La pista que sonaba antes de la que entra. El fallback no puede elegirla.
+  String? _radioPrevious;
+  Future<void> _queueAddChain = Future<void>.value();
+
+  @visibleForTesting
+  Future<void> get addSettled => _queueAddChain;
+  final Set<String> _queueAddPending = <String>{};
+  int _addEpoch = 0;
+  bool _queueHold = false;
+  bool _queueRestart = false;
+  RadioMemory? _radioMem;
+  LiveQueueFreeze? _radioFreeze;
+  bool _radioOffAfterFade = false;
   bool _isPrepModeBypass = false;
   int _lastSavedPositionMs = 0;
   int _lastUiPosMs = -1;
@@ -179,7 +208,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // Regulación sutil de tempo (ver tempo_drift.dart) y BPM real de la pista
   // entrante (etiqueta/nombre o medido por beat_grid).
   final TempoDrift _drift = TempoDrift();
+  final MixPause _mix = MixPause();
+  PhaseLockSession? _phaseLock;
+  bool _deckAWasOn = false;
+  bool _deckBWasOn = false;
+  // Deck entrante entre arm y su play. Una pausa en esa ventana no lo
+  // reanuda: al soltar suena el saliente y el fundido lo sube desde 0.
+  Player? _incomingQuiet;
   double _incomingNatBpm = 0.0;
+  // Análisis de Phrase 8, una pista por vez, fuera del tick.
+  Future<void> _phraseJobs = Future<void>.value();
+  final Set<String> _phrasePending = <String>{};
+  int _publishedFadeMs = 0;
 
   late final PlatformMixStrategy _liveStrategy;
 
@@ -203,6 +243,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     ref.listen<MixFormula>(mixFormulaProvider, (previous, next) {
       if (previous == next || !_sessionHydrated) return;
       _saveSnapshot();
+      if (next == MixFormula.phraseGrid || next == MixFormula.dnaEnergy) {
+        _schedulePhraseNeighbors();
+      }
     });
 
     ref.onDispose(() {
@@ -237,28 +280,180 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return 12000;
   }
 
-  double _extractBpm(String? path) {
-    if (path == null) return 0.0;
-    final fileName = path.replaceAll('\\', '/').split('/').last;
-    final match = RegExp(
-      r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-      caseSensitive: false,
-    ).firstMatch(fileName);
-    if (match != null) return double.parse(match.group(1)!);
-    // Sin BPM en el nombre: el que midió/guardó el masterizado (etiqueta TBPM).
-    return TrackTags.peek(path)?.bpm ?? 0.0;
+  double _extractBpm(String? path) => knownBpm(path);
+
+  /// Lo que usa el relevo visual. Phrase 8 y DNA publican el fundido real.
+  int get publishedFadeMs => _publishedFadeMs;
+
+  bool _wantsPhraseProfile() {
+    final MixFormula formula = ref.read(mixFormulaProvider);
+    return formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy;
+  }
+
+  int _phraseFallbackCue(String? path, int durMs) {
+    final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
+    if (durMs > 30000) return leadMs > 10000 ? leadMs : 10000;
+    return leadMs < durMs ~/ 3 ? leadMs : 0;
+  }
+
+  String? _phrasePeerPath() {
+    if (!_wantsPhraseProfile()) return null;
+    if (state.radioOn) {
+      final String? drift = _driftNextPath;
+      if (drift != null && drift.isNotEmpty) return drift;
+      return null;
+    }
+    return _queueHeadPath();
+  }
+
+  void _schedulePhraseNeighbors() {
+    if (!_sessionHydrated) return;
+    if (!_wantsPhraseProfile()) return;
+    _schedulePhraseGrid(state.currentTrackPath);
+    _schedulePhraseGrid(_phrasePeerPath());
+  }
+
+  void _schedulePhraseGrid(String? path) {
+    if (path == null || path.isEmpty) return;
+    if (!_wantsPhraseProfile()) return;
+    if (!_sessionHydrated) return;
+    if (PhraseGridMemory.peek(path) != null || PhraseGridMemory.gaveUp(path)) {
+      return;
+    }
+    final String key = audioPathKey(path);
+    if (!_phrasePending.add(key)) return;
+    if (!File(path).existsSync()) {
+      PhraseGridMemory.giveUp(path);
+      _phrasePending.remove(key);
+      return;
+    }
+    _phraseJobs = _phraseJobs.then((_) async {
+      try {
+        await _buildPhraseGrid(path);
+      } finally {
+        _phrasePending.remove(key);
+      }
+    });
+  }
+
+  Future<void> _buildPhraseGrid(String path) async {
+    if (PhraseGridMemory.peek(path) != null || PhraseGridMemory.gaveUp(path)) {
+      return;
+    }
+    try {
+      PhraseGridMemory.absorbDir(File(path).parent.path);
+    } catch (_) {}
+    if (PhraseGridMemory.peek(path) != null) {
+      _refreshPhraseMixOut();
+      return;
+    }
+    try {
+      double bpm = _extractBpm(path);
+      var beatMs = 0;
+      try {
+        final rust_dsp.BeatGrid grid =
+            beatFromTag(path, 0) ??
+            await rust_dsp.beatGrid(
+              inputPath: path,
+              fromMs: BigInt.zero,
+              spanSecs: 24,
+            );
+        if (grid.ok && grid.bpm >= 60 && grid.bpm <= 200) {
+          if (bpm < 60 || bpm > 200) bpm = grid.bpm;
+          beatMs = grid.beatMs.round();
+        }
+      } catch (_) {}
+      if (bpm < 60 || bpm > 200) {
+        PhraseGridMemory.giveUp(path);
+        return;
+      }
+      final Uint8List pcm = await rust_dsp.decodeMonoPcm(
+        inputPath: path,
+        startSecs: 0,
+        lengthSecs: 900,
+        targetRate: 22050,
+      );
+      final PhraseTrack? track = await Isolate.run(
+        () => analyzePhrasePcm(
+          pcm: pcm,
+          sampleRate: 22050,
+          bpm: bpm,
+          beatMs: beatMs,
+        ),
+      );
+      if (track == null) {
+        PhraseGridMemory.giveUp(path);
+        return;
+      }
+      PhraseGridMemory.save(path, track);
+      _refreshPhraseMixOut();
+    } catch (_) {
+      PhraseGridMemory.giveUp(path);
+    }
+  }
+
+  void _refreshPhraseMixOut() {
+    try {
+      if (!_wantsPhraseProfile()) return;
+      final String? path = state.currentTrackPath;
+      if (path == null || path.isEmpty) return;
+      final int dur = state.duration.inMilliseconds;
+      if (dur <= 0) return;
+      _mixOutCacheKey = null;
+      final int mix = _calculateRadioMixOut(dur, path);
+      if (mix <= 10000) return;
+      if (mix <= state.position.inMilliseconds + 1500) return;
+      if (mix == state.customMixOutMs) return;
+      state = state.copyWith(customMixOutMs: mix);
+    } catch (_) {}
   }
 
   Future<int> _calculateSmartCueIn(String path, Player player) async {
-    if (_isMixTrack(player.state.duration.inMilliseconds)) return 0;
-    final int durMs = player.state.duration.inMilliseconds;
+    // La duración la mide Rust. El deck no decide el cue.
+    final int durMs = _exactDurCache[path] ?? 0;
+    if (durMs <= 0) {
+      return 0;
+    }
+    if (_isMixTrack(durMs)) return 0;
     if (ref.read(mixFormulaProvider) == MixFormula.stealthGap) {
       return stealthCueInMs(durMs, const []);
     }
     // El silencio inicial medido por el masterizado nunca queda dentro del cue.
     final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
-    if (durMs > 30000) return leadMs > 10000 ? leadMs : 10000;
-    return leadMs < durMs ~/ 3 ? leadMs : 0;
+    final int fallback = durMs > 30000
+        ? (leadMs > 10000 ? leadMs : 10000)
+        : (leadMs < durMs ~/ 3 ? leadMs : 0);
+    if (ref.read(mixFormulaProvider) == MixFormula.dnaEnergy) {
+      final String? outPath = state.currentTrackPath;
+      final bool other = outPath != null && !sameAudioPath(outPath, path);
+      final bool locked = other && state.customMixOutMs > 10000;
+      return _dnaPair(
+        outDurationMs: other ? state.duration.inMilliseconds : durMs,
+        outPath: other ? outPath : null,
+        genreMixOutMs: locked ? state.customMixOutMs : 0,
+        exitLocked: locked,
+        inDurationMs: durMs,
+        inPath: path,
+        fallbackCueMs: fallback,
+        outRate: 1,
+      ).cueInMs;
+    }
+    if (ref.read(mixFormulaProvider) != MixFormula.phraseGrid) return fallback;
+    final String? outPath = state.currentTrackPath;
+    final bool other = outPath != null && !sameAudioPath(outPath, path);
+    final PhraseTrack? incoming = PhraseGridMemory.peek(path);
+    final double bpm = _extractBpm(path);
+    return planPhrase8(
+      outDurationMs: other ? state.duration.inMilliseconds : durMs,
+      inDurationMs: durMs,
+      fallbackMixOutMs: other ? state.customMixOutMs : 0,
+      fallbackCueMs: fallback,
+      incomingBpm: bpm >= 60 ? bpm : (incoming?.bpm ?? 0),
+      incomingRate: 1,
+      outgoing: other ? PhraseGridMemory.peek(outPath) : null,
+      incoming: incoming,
+      lockExit: other,
+    ).cueInMs;
   }
 
   // 🎛️ INYECCIÓN ADN DJ: Ahora el Cartridge aplica la regla 65%-80%
@@ -268,9 +463,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   int _mixOutCacheVal = 0;
 
   int _calculateRadioMixOut(int durationMs, String? path) {
-    final String key =
-        '$durationMs|$path|${ref.read(mixFormulaProvider)}|'
+    final MixFormula formula = ref.read(mixFormulaProvider);
+    String key =
+        '$durationMs|$path|$formula|'
         '${TrackTags.peek(path)?.tailMs ?? 0}|${TrackTags.peek(path)?.bpm ?? 0}';
+    if (formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy) {
+      final String? peer = _phrasePeerPath();
+      key =
+          '$key|${PhraseGridMemory.stamp(path)}|${PhraseGridMemory.stamp(peer)}|$peer';
+    }
     if (key == _mixOutCacheKey) return _mixOutCacheVal;
     final int v = _calculateRadioMixOutRaw(durationMs, path);
     _mixOutCacheKey = key;
@@ -319,10 +520,6 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       safeMixOutMs = (safeMixOutMs * effDurMs / durationMs).toInt();
     }
 
-    if (safeMixOutMs >= effDurMs - 4000) {
-      safeMixOutMs = effDurMs - 4000;
-    }
-
     if (ref.read(mixFormulaProvider) == MixFormula.stealthGap) {
       return stealthMixOutMs(
         durationMs: effDurMs,
@@ -331,13 +528,75 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
     }
     if (ref.read(mixFormulaProvider) == MixFormula.phraseGrid) {
-      return snapPhraseGridMixOut(
+      final int snapped = snapPhraseGridMixOut(
         durationMs: effDurMs,
         dnaMixOutMs: safeMixOutMs,
         bpm: _extractBpm(path),
       );
+      final String? peer = _phrasePeerPath();
+      final PhraseTrack? incoming = PhraseGridMemory.peek(peer);
+      final double peerBpm = _extractBpm(peer);
+      final int peerDur = incoming?.durationMs ?? 0;
+      return planPhrase8(
+        outDurationMs: effDurMs,
+        inDurationMs: peerDur,
+        fallbackMixOutMs: snapped,
+        fallbackCueMs: _phraseFallbackCue(peer, peerDur),
+        incomingBpm: peerBpm >= 60 ? peerBpm : (incoming?.bpm ?? 0),
+        incomingRate: 1,
+        outgoing: PhraseGridMemory.peek(path),
+        incoming: incoming,
+      ).mixOutMs;
     }
-    return safeMixOutMs;
+    final String? peer = _phrasePeerPath();
+    final PhraseTrack? incoming = PhraseGridMemory.peek(peer);
+    final int peerDur = incoming?.durationMs ?? 0;
+    final DnaDecision dna = _dnaPair(
+      outDurationMs: effDurMs,
+      outPath: path,
+      genreMixOutMs: safeMixOutMs,
+      exitLocked: false,
+      inDurationMs: peerDur,
+      inPath: peer,
+      fallbackCueMs: _phraseFallbackCue(peer, peerDur),
+      outRate: 1,
+    );
+    if (effDurMs > 0) {
+      final double pct = dna.mixOutMs * 100.0 / effDurMs;
+      debugPrint(
+        'DNA mixOut=${dna.mixOutMs} (${pct.toStringAsFixed(1)}%) '
+        'fuente=${dna.mixSource} fadeFin=${dna.mixOutMs + dna.fadeMs}',
+      );
+    }
+    return dna.mixOutMs;
+  }
+
+  DnaDecision _dnaPair({
+    required int outDurationMs,
+    required String? outPath,
+    required int genreMixOutMs,
+    required bool exitLocked,
+    required int inDurationMs,
+    required String? inPath,
+    required int fallbackCueMs,
+    required double outRate,
+  }) {
+    return decideDna(
+      outDurationMs: outDurationMs,
+      inDurationMs: inDurationMs,
+      genreMixOutMs: genreMixOutMs,
+      fallbackCueMs: fallbackCueMs,
+      outBpm: _extractBpm(outPath),
+      inBpm: _extractBpm(inPath),
+      outRate: outRate,
+      outKey: outPath == null || outPath.isEmpty ? null : harmonicKeyOf(outPath),
+      inKey: inPath == null || inPath.isEmpty ? null : harmonicKeyOf(inPath),
+      outgoing: PhraseGridMemory.peek(outPath),
+      incoming: PhraseGridMemory.peek(inPath),
+      echoSupported: AfCaps.has('aecho'),
+      eqSupported: AfCaps.has('equalizer'),
+      exitLocked: exitLocked,
+    );
   }
 
   Future<void> persistSession() => _saveSnapshot();
@@ -349,6 +608,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<bool> pauseForInterruption() async {
     if (!state.isPlaying) return false;
     _pausedByInterruption = true;
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) _djTrace(line);
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -363,6 +625,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> resumeAfterInterruption() async {
     if (!_pausedByInterruption) return;
     _pausedByInterruption = false;
+    if (_mix.armed) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) _djTrace(line);
+      return;
+    }
+    _mix.resumeAll();
     try {
       await _activePlayer.play();
     } catch (_) {}
@@ -372,6 +641,128 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       } catch (_) {}
     }
   }
+
+  void _releaseMix() {
+    _isCrossfading = false;
+    _incomingQuiet = null;
+    _mix.end();
+  }
+
+  Future<void> _dropPhase() async {
+    final PhaseLockSession? phase = _phaseLock;
+    _phaseLock = null;
+    if (phase == null) return;
+    await phase.finish();
+    phase.logLater(_djTrace);
+  }
+
+  bool _deckPlaying(Player Function() read) {
+    try {
+      return read().state.playing;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _captureDecks() {
+    _deckAWasOn = _deckPlaying(() => _playerA);
+    _deckBWasOn = _deckPlaying(() => _playerB);
+    final Player? quiet = _incomingQuiet;
+    if (quiet != null && _mix.fadeClock == null) {
+      if (identical(quiet, _playerA)) _deckAWasOn = false;
+      if (identical(quiet, _playerB)) _deckBWasOn = false;
+    }
+  }
+
+  Future<void> _playDecksHeld() async {
+    if (_deckAWasOn) {
+      try {
+        await _playerA.play();
+      } catch (_) {}
+    }
+    if (_deckBWasOn) {
+      try {
+        await _playerB.play();
+      } catch (_) {}
+    }
+  }
+
+  /// Pausa o reanuda la mezcla en el acto: relojes primero, decks después.
+  Future<void> _toggleMixHold() async {
+    if (_mix.paused) {
+      await _playDecksHeld();
+      final String? line = _mix.resumeAll();
+      if (line != null) _djTrace(line);
+      return;
+    }
+    _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) _djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    await _saveSnapshot();
+  }
+
+  @visibleForTesting
+  void armMixForTest({
+    required int fadeMs,
+    required double rampBpm,
+    int elapsedMs = 0,
+  }) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+    _mix.beginFade(fadeMs, elapsedMs: elapsedMs);
+  }
+
+  @visibleForTesting
+  void armMixPreFadeForTest({required double rampBpm}) {
+    _isCrossfading = true;
+    _mix.arm();
+    _mix.setRampBpm(rampBpm);
+  }
+
+  @visibleForTesting
+  int get mixEpoch => _mix.epoch;
+
+  /// Pausa entre [MixPause.arm] y el play del entrante: no arranca hasta que
+  /// la mezcla vuelve a correr. false = epoch distinto o mezcla suelta.
+  @visibleForTesting
+  Future<bool> holdIncomingBeforePlay(int epoch) async {
+    if (_mix.paused) await _mix.untilRunning();
+    if (_mix.epoch != epoch || !_mix.armed) {
+      await _dropPhase();
+      return false;
+    }
+    return true;
+  }
+
+  @visibleForTesting
+  Future<void> runFadeForTest({required int fadeMs}) async {
+    final int epoch = _mix.epoch;
+    final MixRunClock fadeClock = _mix.beginFade(fadeMs);
+    while (fadeClock.elapsedMilliseconds < fadeMs && _mix.epoch == epoch) {
+      if (_mix.paused) {
+        await _mix.untilRunning();
+        continue;
+      }
+      await _mix.slice(16, fadeClock);
+    }
+    _releaseMix();
+  }
+
+  @visibleForTesting
+  bool get mixPaused => _mix.paused;
+
+  @visibleForTesting
+  bool get crossfadeHeld => _isCrossfading;
+
+  @visibleForTesting
+  String? get lastMixHoldLine => _mix.lastLine;
 
   int? _readSavedUiRoute() {
     try {
@@ -387,9 +778,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return null;
   }
 
-  String _sessionFilePath() {
-    final shared = _liveStrategy.getSessionPath();
-    return '${File(shared).parent.path}${Platform.pathSeparator}_livedj_session.json';
+  String? _sessionFileOverride;
+
+  String _sessionFilePath() => _sessionFileOverride ?? liveDjStatePath();
+
+  @visibleForTesting
+  void useSessionFile(String path) {
+    _sessionFileOverride = path;
   }
 
   File _resolveSessionFile() {
@@ -399,25 +794,43 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> _saveSnapshot() async {
     try {
       final path = _sessionFilePath();
-      final pos = _freezePersist
-          ? _sessionPositionMs
-          : state.position.inMilliseconds;
-      final data = {
+      if (_queueHold && state.queue.isNotEmpty) {
+        _queueHold = false;
+      }
+      if (_queueHold && !state.radioOn) {
+        clearModeQueueSync(path);
+        return;
+      }
+      final bool restart = _queueRestart;
+      if (restart) {
+        _queueRestart = false;
+        _sessionPositionMs = 0;
+      }
+      final pos = restart
+          ? 0
+          : (_freezePersist
+                ? _sessionPositionMs
+                : state.position.inMilliseconds);
+      final data = <String, dynamic>{
         'schema': 2,
         'queue': state.queue.map((f) => f.path).toList(),
-        'currentTrackPath': state.currentTrackPath,
+        'currentTrackPath': restart ? null : state.currentTrackPath,
         'positionMs': pos,
         'mixMode': state.currentMixMode.index,
         'mixStrategy': state.mixStrategy.index,
         'mixFormula': ref.read(mixFormulaProvider).index,
-        'wasPlaying': _freezePersist ? _sessionWasPlaying : state.isPlaying,
+        'wasPlaying': restart
+            ? false
+            : (_freezePersist ? _sessionWasPlaying : state.isPlaying),
         'radioOn': state.radioOn,
         'radioGenres': state.radioGenres.toList(),
         'sortMode': state.sortMode.name,
+        if (_radioFreeze != null) 'radioFreeze': _radioFreeze!.toJson(),
       };
       // Atómico y en fila: un cierre o una actualización a mitad de guardado
       // ya no deja la sesión dañada (antes: cola vacía y modo Secuencial).
-      await SessionStore.writeJson(path, data);
+      // No pisa parejas ni ola: el parche deja el resto del archivo.
+      await patchModeDoc(path, data);
       debugPrint("✅ [TRACKER] Snapshot guardado en disco correctamente.");
     } catch (e, stack) {
       debugPrint(
@@ -430,85 +843,105 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     debugPrint(
       "🛠️ [TRACKER] shuffleQueue() INICIADO. Elementos en cola: ${state.queue.length}",
     );
+    _shuffleRun = _shuffleQueueAsync();
+    unawaited(_shuffleRun);
+  }
+
+  Future<void> _shuffleRun = Future<void>.value();
+
+  @visibleForTesting
+  Future<void> get shuffleSettled => _shuffleRun;
+
+  Future<void> _shuffleQueueAsync() async {
     try {
-      _applyLiveShuffleBank(advance: true);
+      // El modo cambia ya; la lista se arma por detrás y entra al terminar.
+      if (state.mixStrategy != LiveDjMixStrategy.random) {
+        state = state.copyWith(mixStrategy: LiveDjMixStrategy.random);
+      }
+      final List<String> paths = state.queue
+          .map((f) => f.path)
+          .where((p) => !isKaraokeAudioPath(p))
+          .toList();
+      await preloadQueueBpm(paths);
+      await _applyLiveShuffleBank(advance: true);
     } catch (e, stack) {
       debugPrint("🔴 [TRACKER ERROR FATAL] El Shuffle explotó: $e\n$stack");
     }
   }
 
-  String _liveShuffleBanksPath() {
-    final session = File(_sessionFilePath());
-    return '${session.parent.path}${Platform.pathSeparator}_livedj_shuffle_banks.json';
-  }
-
-  Map<String, dynamic> _readLiveShuffleBankFile() {
-    try {
-      final data = SessionStore.readJson(_liveShuffleBanksPath());
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map) return Map<String, dynamic>.from(data);
-    } catch (_) {}
-    return <String, dynamic>{};
-  }
-
-  void _writeLiveShuffleBankFile(Map<String, dynamic> data) {
-    try {
-      SessionStore.writeJsonSync(_liveShuffleBanksPath(), data);
-    } catch (_) {}
-  }
-
-  // Grupos de 20 vecinos en BPM: el 1º sube, el 2º baja, el 3º sube…
-  // Sin BPM van al final, una vez. Ver lib/core/livedj_order.dart.
-  List<String> _bpmGroupOrder(List<String> paths, int salt) {
-    return buildShuffleGroups(
-      paths,
-      _extractBpm,
-      salt,
-    ).expand((g) => g).toList();
-  }
-
-  // Firmas de grupos ya usados (persisten en _livedj_shuffle_banks.json):
-  // cada Shuffle arma grupos con composición nueva.
-  static const int _shuffleHistoryCap = 3000;
-
-  void _applyLiveShuffleBank({required bool advance}) {
-    if (state.queue.length <= 1) {
+  Future<void> _applyLiveShuffleBank({required bool advance}) async {
+    if (!advance) return;
+    final int epoch = _addEpoch;
+    final List<String> paths = dedupeAudioPaths(
+      state.queue
+          .map((f) => f.path)
+          .where((p) => !isKaraokeAudioPath(p))
+          .toList(),
+    );
+    if (paths.length <= 1) {
       debugPrint("⚠️ [TRACKER] Cola muy pequeña. Forzando solo UI.");
-      state = state.copyWith(mixStrategy: LiveDjMixStrategy.random);
+      state = state.copyWith(
+        queue: paths.map(File.new).toList(),
+        mixStrategy: LiveDjMixStrategy.random,
+      );
       _saveSnapshot();
       return;
     }
-
-    final paths = state.queue.map((f) => f.path).toList();
-    final all = _readLiveShuffleBankFile();
-    final List<String> hist = ((all['history'] as List?) ?? const [])
-        .map((e) => e.toString())
-        .toList();
-    final picked = pickFreshShuffle(paths, _extractBpm, hist.toSet(), Random());
-    final queued = <File>[
-      for (final g in picked.groups)
-        for (final p in g) File(p),
-    ];
-    for (final g in picked.groups) {
-      if (g.length > 1) hist.add(groupSignature(g));
+    final String sessionPath = _sessionFilePath();
+    final String? playing = state.currentTrackPath;
+    final Map<String, Object?> raw = await compute(
+      shuffleOffUi,
+      <String, Object?>{
+        'paths': paths,
+        'sessionPath': sessionPath,
+        'playing': playing,
+        'known': <String, double>{
+          for (final String p in paths)
+            if ((TrackTags.peek(p)?.bpm ?? 0) > 0) p: TrackTags.peek(p)!.bpm,
+        },
+      },
+    );
+    if (epoch != _addEpoch) return;
+    GatomixStore.forget(<String>{
+      File(sessionPath).parent.path,
+      for (final String p in paths) File(p).parent.path,
+    });
+    final Map<Object?, Object?> bpms = raw['bpm'] as Map<Object?, Object?>;
+    for (final MapEntry<Object?, Object?> e in bpms.entries) {
+      TrackTags.rememberBpm(e.key.toString(), (e.value as num).toDouble());
     }
-    final int over = hist.length - _shuffleHistoryCap;
-    all['history'] = over > 0 ? hist.sublist(over) : hist;
-    all['algo'] = 4;
-    all['lastSeed'] = picked.seed;
-    all.remove(
-      'lists',
-    ); // bancos fijos de la versión anterior (se repetían cada 10)
-    _writeLiveShuffleBankFile(all);
-
+    final List<String> ordered = <String>[
+      for (final Object? p in raw['tracks'] as List<Object?>) p.toString(),
+    ];
+    final bool waveUp = raw['waveUp'] as bool;
+    final int inWave = raw['inWave'] as int;
+    unawaited(
+      patchModeDoc(
+        sessionPath,
+        queueWavePatch(
+          doc: readModeDoc(sessionPath),
+          order: ordered,
+          anchor: playing,
+          waveUp: waveUp,
+          inWave: inWave,
+          previousBpm: ordered.isEmpty ? 0 : _extractBpm(ordered.last),
+        ),
+      ),
+    );
+    // Lo que entró a la cola mientras se armaba la lista no se pierde.
+    final Set<String> seen = <String>{
+      for (final String p in <String>[...ordered, ...paths]) audioPathKey(p),
+    };
+    final List<File> late = <File>[
+      for (final File f in state.queue)
+        if (!isKaraokeAudioPath(f.path) && seen.add(audioPathKey(f.path))) f,
+    ];
     state = state.copyWith(
-      queue: queued,
+      queue: <File>[...ordered.map(File.new), ...late],
       mixStrategy: LiveDjMixStrategy.random,
     );
     _saveSnapshot();
-    debugPrint(
-      "🔀 [TRACKER] Shuffle: ${picked.groups.length} grupos, ${queued.length} pistas.",
-    );
+    debugPrint("🔀 [TRACKER] Shuffle armónico: ${ordered.length} pistas.");
   }
 
   /// Orden de la cola en Secuencial. Se guarda y se vuelve a aplicar a lo
@@ -559,23 +992,27 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final queuePaths = ((data['queue'] as List?) ?? const [])
           .map((e) => e.toString())
           .toList();
-      // Pistas renombradas por Masterizar se reencuentran en su carpeta.
-      final queueFiles = resolvePlayableSessionPaths(
-        queuePaths,
-      ).map((p) => File(p)).toList();
-      String? currentTrackPath = data['currentTrackPath'] as String?;
+      // Pistas renombradas por Masterizar se reencuentran. Duplicados de
+      // la misma ruta (mayúsculas, separadores) y las _K se quitan al abrir.
+      final LiveDjSessionRestore restored = restoreLiveDjSession(
+        data,
+        strategyCount: LiveDjMixStrategy.values.length,
+        modeCount: LiveDjMixMode.values.length,
+      );
+      final List<File> queueFiles = dedupeAudioFiles(
+        restored.queue.map(File.new).toList(),
+      );
+      String? currentTrackPath = restored.currentTrackPath == null
+          ? null
+          : canonicalAudioPath(restored.currentTrackPath!);
       if (currentTrackPath != null) {
-        final hit = resolvePlayableSessionPaths([currentTrackPath]);
-        currentTrackPath = hit.isEmpty ? null : hit.first;
-      }
-      if (currentTrackPath != null) {
-        queueFiles.removeWhere((f) => f.path == currentTrackPath);
+        queueFiles.removeWhere((f) => sameAudioPath(f.path, currentTrackPath));
       }
       final LiveDjSortMode savedSort = LiveDjSortMode.values.firstWhere(
         (m) => m.name == data['sortMode'],
         orElse: () => LiveDjSortMode.manual,
       );
-      bool currentFromQueue = false;
+      var currentFromQueue = restored.currentFromQueue;
       if (currentTrackPath == null && queueFiles.isNotEmpty) {
         // La pista que pasa a "actual" sale de la cola (cartridge destructiva);
         // si no, volvería a sonar al terminar.
@@ -583,31 +1020,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         currentFromQueue = true;
       }
       // La posición guardada era de otra pista: no se aplica a la nueva.
-      final int? positionMs = currentFromQueue
-          ? null
-          : data['positionMs'] as int?;
+      final int? positionMs = currentFromQueue ? null : restored.positionMs;
 
-      final mixModeIdx = (data['mixMode'] as int? ?? 0).clamp(
-        0,
-        LiveDjMixMode.values.length - 1,
-      );
-      final mixStrategyIdx = (data['mixStrategy'] as int? ?? 0).clamp(
-        0,
-        LiveDjMixStrategy.values.length - 1,
-      );
+      final mixModeIdx = restored.mixModeIndex;
+      final mixStrategyIdx = restored.mixStrategyIndex;
       final mixFormulaIdx = data['mixFormula'] as int? ?? 0;
       if (mixFormulaIdx >= 0 && mixFormulaIdx < MixFormula.values.length) {
         ref.read(mixFormulaProvider.notifier).state =
             MixFormula.values[mixFormulaIdx];
       }
 
-      // Radio: estado y géneros persisten; el historial vive en su propio archivo.
+      // Radio: géneros en la sesión. La lista de cada opción vive en
+      // `LiveDj_Radio.json`, en la raíz de Música.
       final bool savedRadioOn = data['radioOn'] as bool? ?? false;
       final Set<String> savedGenres = ((data['radioGenres'] as List?) ?? [])
           .map((e) => e.toString())
           .where(kRadioGenreIds.contains)
           .toSet();
-      _loadRadioHistory();
+      _radioFreeze = LiveQueueFreeze.tryParse(data['radioFreeze']);
+      _radioMem = GatomixRadio.load(
+        _musicRoot(),
+        legacyPaths: <String>[_radioHistoryPath()],
+      );
 
       if (state.queue.isNotEmpty || state.currentTrackPath != null) {
         return;
@@ -622,7 +1056,21 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         mixStrategy: LiveDjMixStrategy.values[mixStrategyIdx],
         sortMode: savedSort,
       );
-      if (savedRadioOn) unawaited(_radioEnsureIndex());
+      final bool queueDirty =
+          queuePaths.length != queueFiles.length ||
+          queuePaths.join('\n') != queueFiles.map((f) => f.path).join('\n') ||
+          (data['currentTrackPath'] as String?) != currentTrackPath;
+      if (queueDirty) {
+        _sessionPositionMs = positionMs ?? 0;
+        _sessionWasPlaying = data['wasPlaying'] as bool? ?? false;
+        _freezePersist = true;
+        unawaited(_saveSnapshot());
+        _freezePersist = false;
+      }
+      if (savedRadioOn) {
+        _publishRadioUpcoming();
+        unawaited(_radioEnsureIndex());
+      }
 
       _freezePersist = false;
       if (currentTrackPath != null && _readSavedUiRoute() == 5) {
@@ -652,60 +1100,159 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (_) {
     } finally {
       _sessionHydrated = true;
+      _schedulePhraseNeighbors();
     }
   }
 
   void addTrack(File file) {
-    if (!state.queue.any((f) => f.path == file.path)) {
-      // Cola estable: la pista nueva va al final; lo ya cargado no se mueve
-      // ni cambia de modo (secuencial/shuffle solo lo cambia el botón).
-      state = state.copyWith(queue: [...state.queue, file]);
-      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
+    if (isKaraokeAudioPath(file.path)) return;
+    final File kept = File(canonicalAudioPath(file.path));
+    if (state.queue.any((File f) => sameAudioPath(f.path, kept.path))) return;
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      // Secuencial: la pista nueva va al final. El modo no cambia.
+      state = state.copyWith(queue: <File>[...state.queue, kept]);
+      _applySort();
       _saveSnapshot();
+      return;
     }
+    final String key = audioPathKey(kept.path);
+    if (!_queueAddPending.add(key)) return;
+    final int epoch = _addEpoch;
+    _queueAddChain = _queueAddChain.then(
+      (_) => _insertLiveRandom(<File>[kept], epoch),
+    );
   }
 
   void addAllTracks(List<File> files) {
-    final currentPaths = state.queue.map((f) => f.path).toSet();
-    final newFiles = files
-        .where((f) => !currentPaths.contains(f.path))
-        .toList();
-    if (newFiles.isNotEmpty) {
-      // Cola estable: solo se mezcla el lote nuevo (y solo en modo shuffle);
-      // lo ya cargado conserva su orden.
-      if (state.mixStrategy == LiveDjMixStrategy.random) {
-        final ordered = _bpmGroupOrder(
-          newFiles.map((f) => f.path).toList(),
-          Random().nextInt(1 << 30),
-        );
-        final byPath = {for (final f in newFiles) f.path: f};
-        newFiles
-          ..clear()
-          ..addAll(ordered.map((p) => byPath[p]!));
-      }
-      final bool wasEmpty = state.queue.isEmpty;
-      state = state.copyWith(queue: [...state.queue, ...newFiles]);
-      if (state.mixStrategy == LiveDjMixStrategy.sequential) _applySort();
-      _saveSnapshot();
-      // Cola vacía (p. ej. fin de cola) + shuffle activo: la carga nueva usa
-      // el mismo banco de shuffle del botón, así no arranca secuencial.
-      if (wasEmpty &&
-          state.mixStrategy == LiveDjMixStrategy.random &&
-          state.queue.length > 1) {
-        _applyLiveShuffleBank(advance: true);
-      }
+    final Set<String> currentPaths = <String>{
+      for (final File f in state.queue) audioPathKey(f.path),
+      ..._queueAddPending,
+    };
+    final List<File> newFiles = <File>[];
+    for (final File f in files) {
+      if (isKaraokeAudioPath(f.path)) continue;
+      final File kept = File(canonicalAudioPath(f.path));
+      if (currentPaths.add(audioPathKey(kept.path))) newFiles.add(kept);
     }
+    if (newFiles.isEmpty) return;
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      state = state.copyWith(queue: <File>[...state.queue, ...newFiles]);
+      _applySort();
+      _saveSnapshot();
+      return;
+    }
+    for (final File f in newFiles) {
+      _queueAddPending.add(audioPathKey(f.path));
+    }
+    final int epoch = _addEpoch;
+    _queueAddChain = _queueAddChain.then(
+      (_) => _insertLiveRandom(newFiles, epoch),
+    );
+  }
+
+  int _liveLockedPrefix() {
+    if (state.queue.isEmpty) return 0;
+    if (_isCrossfading) return 1;
+    if (_standbyArmedPath == null) return 0;
+    final int i = state.queue.indexWhere(
+      (File f) => sameAudioPath(f.path, _standbyArmedPath),
+    );
+    if (i >= 0) return i + 1;
+    return 0;
+  }
+
+  Future<void> _insertLiveRandom(List<File> files, int epoch) async {
+    if (epoch != _addEpoch) {
+      for (final File f in files) {
+        _queueAddPending.remove(audioPathKey(f.path));
+      }
+      return;
+    }
+    final List<File> fresh = <File>[];
+    for (final File f in files) {
+      _queueAddPending.remove(audioPathKey(f.path));
+      if (isKaraokeAudioPath(f.path)) continue;
+      if (state.queue.any((File e) => sameAudioPath(e.path, f.path))) continue;
+      if (state.currentTrackPath != null &&
+          sameAudioPath(state.currentTrackPath, f.path)) {
+        continue;
+      }
+      fresh.add(f);
+    }
+    if (fresh.isEmpty) return;
+    final List<String> paths = fresh.map((File f) => f.path).toList();
+    try {
+      await preloadQueueBpm(paths);
+    } catch (_) {}
+    if (epoch != _addEpoch) return;
+    await saveTrackMusicBatch(<TrackMusic>[
+      for (final String p in paths)
+        (path: p, bpm: _extractBpm(p), camelot: harmonicKeyOf(p)),
+    ]);
+    if (epoch != _addEpoch) return;
+    if (state.mixStrategy != LiveDjMixStrategy.random) {
+      state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
+      _applySort();
+      _saveSnapshot();
+      return;
+    }
+    if (state.queue.isEmpty && fresh.length > 1) {
+      state = state.copyWith(queue: fresh);
+      await _applyLiveShuffleBank(advance: true);
+      return;
+    }
+    if (epoch != _addEpoch) return;
+    final List<String> next = insertHarmonicTracks(
+      queue: state.queue.map((File f) => f.path).toList(),
+      incoming: paths,
+      bpmOf: _extractBpm,
+      keyOf: harmonicKeyOf,
+      lockedPrefix: _liveLockedPrefix(),
+      playing: state.currentTrackPath,
+      pinned: _standbyArmedPath,
+    );
+    final Map<String, File> byKey = <String, File>{
+      for (final File f in <File>[...state.queue, ...fresh])
+        audioPathKey(f.path): f,
+    };
+    state = state.copyWith(
+      queue: <File>[
+        for (final String p in next) byKey[audioPathKey(p)] ?? File(p),
+      ],
+    );
+    _saveSnapshot();
   }
 
   void removeTrack(String path) {
-    final newQueue = state.queue.where((f) => f.path != path).toList();
+    final newQueue = state.queue
+        .where((f) => !sameAudioPath(f.path, path))
+        .toList();
     state = state.copyWith(queue: newQueue);
     _saveSnapshot();
   }
 
   void clearQueue() {
-    state = state.copyWith(queue: []);
-    _saveSnapshot();
+    _addEpoch++;
+    _queueAddPending.clear();
+    _queueAddChain = Future<void>.value();
+    if (state.radioOn) {
+      // Fuera de este arreglo: la radio y su archivo no se vacían.
+      state = state.copyWith(queue: <File>[]);
+      _saveSnapshot();
+      return;
+    }
+    _queueHold = true;
+    _queueRestart = true;
+    _radioFreeze = null;
+    _sessionPositionMs = 0;
+    _lastSavedPositionMs = 0;
+    _sessionWasPlaying = false;
+    state = state.copyWith(
+      queue: <File>[],
+      position: Duration.zero,
+      clearCurrentTrackPath: true,
+    );
+    clearModeQueueSync(_sessionFilePath());
   }
 
   Future<void> savePlaylist() async {
@@ -738,38 +1285,35 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         final file = File(result.path);
         final content = await file.readAsString();
         final List<dynamic> paths = jsonDecode(content);
-        final List<File> newFiles = paths
-            .map((p) => File(p.toString()))
-            .where((f) => f.existsSync())
-            .toList();
+        final List<String> alive = await compute(
+          _existingPaths,
+          <String>[for (final dynamic p in paths) p.toString()],
+        );
+        final List<File> newFiles = dedupeAudioFiles(
+          alive.map(File.new).toList(),
+        );
 
         if (newFiles.isNotEmpty) {
-          final currentPaths = state.queue.map((f) => f.path).toSet();
-          final fresh = newFiles
-              .where((f) => !currentPaths.contains(f.path))
+          final Set<String> currentPaths = <String>{
+            for (final File f in state.queue) audioPathKey(f.path),
+          };
+          final List<File> fresh = newFiles
+              .where((f) => currentPaths.add(audioPathKey(f.path)))
               .toList();
+          if (fresh.isEmpty) return;
           if (state.mixStrategy == LiveDjMixStrategy.random) {
-            final ordered = _bpmGroupOrder(
-              fresh.map((f) => f.path).toList(),
-              Random().nextInt(1 << 30),
+            for (final File f in fresh) {
+              _queueAddPending.add(audioPathKey(f.path));
+            }
+            final int epoch = _addEpoch;
+            _queueAddChain = _queueAddChain.then(
+              (_) => _insertLiveRandom(fresh, epoch),
             );
-            final byPath = {for (final f in fresh) f.path: f};
-            fresh
-              ..clear()
-              ..addAll(ordered.map((p) => byPath[p]!));
-          }
-          if (fresh.isNotEmpty) {
-            final bool wasEmpty = state.queue.isEmpty;
-            state = state.copyWith(queue: [...state.queue, ...fresh]);
-            if (state.mixStrategy == LiveDjMixStrategy.sequential) {
-              _applySort();
-            }
+            await _queueAddChain;
+          } else {
+            state = state.copyWith(queue: <File>[...state.queue, ...fresh]);
+            _applySort();
             _saveSnapshot();
-            if (wasEmpty &&
-                state.mixStrategy == LiveDjMixStrategy.random &&
-                state.queue.length > 1) {
-              _applyLiveShuffleBank(advance: true);
-            }
           }
         }
       }
@@ -788,25 +1332,40 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   final Map<String, int> _exactDurCache = {};
 
-  /// Duración real del archivo (Rust/symphonia). Si difiere de la estimada por
-  /// libmpv en más de 1.5 s, manda la real. Sin dato: la de libmpv.
+  /// Duración decodificada (`exact_duration_ms`). Ni TLEN ni la estimación
+  /// de libmpv deciden la barra ni el disparo. Sin medición, duración 0.
   Future<Duration> _trueDuration(String path, Duration mpv) async {
-    // Etiquetas del masterizado (silencios, BPM) listas antes de calcular la mezcla.
     await TrackTags.load(path);
     try {
       int? ms = _exactDurCache[path];
-      if (ms == null) {
+      if (ms == null || ms <= 0) {
         ms = (await rust_dsp.exactDurationMs(inputPath: path)).toInt();
-        _exactDurCache[path] = ms;
+        if (ms > 0) _exactDurCache[path] = ms;
       }
-      if (ms > 0 && (ms - mpv.inMilliseconds).abs() > 1500) {
-        debugPrint(
-          '⏱️ [LIVEDJ] Duración corregida ${mpv.inSeconds}s → ${ms ~/ 1000}s: $path',
-        );
+      if (ms > 0) {
+        if (ms != mpv.inMilliseconds) {
+          debugPrint(
+            '⏱️ [LIVEDJ] Duración decodificada ${ms ~/ 1000}s '
+            '(libmpv ${mpv.inSeconds}s): $path',
+          );
+        }
         return Duration(milliseconds: ms);
       }
-    } catch (_) {}
-    return mpv;
+    } catch (e) {
+      _djTrace('DURACION FALLO $path $e');
+    }
+    _djTrace('DURACION SIN MEDIR $path mpv=${mpv.inMilliseconds}');
+    return Duration.zero;
+  }
+
+  void _rememberDriftNext() {
+    if (_isCrossfading) return;
+    final String? next = state.radioOn
+        ? ((state.radioNextPath != null && state.radioNextPath!.isNotEmpty)
+              ? state.radioNextPath
+              : _radioPending)
+        : _queueHeadPath();
+    if (next != null && next.isNotEmpty) _driftNextPath = next;
   }
 
   void _attachListeners(Player player) {
@@ -821,7 +1380,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       final String? tickPath = state.currentTrackPath;
       final durMs = state.duration.inMilliseconds;
 
-      if ((posMs - _lastUiPosMs).abs() >= 250) {
+      if (uiPositionShouldPublish(posMs, _lastUiPosMs)) {
         _lastUiPosMs = posMs;
         state = state.copyWith(position: pos);
       }
@@ -845,7 +1404,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         _sessionWasPlaying = state.isPlaying;
       }
 
-      if ((posMs - _lastSavedPositionMs).abs() > 15000) {
+      if (sessionPositionShouldSave(posMs, _lastSavedPositionMs)) {
         _lastSavedPositionMs = posMs;
         _saveSnapshot();
       }
@@ -857,49 +1416,102 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             ? state.customMixOutMs
             : _calculateRadioMixOut(durMs, state.currentTrackPath);
 
-        if (!_isCrossfading) {
+        if (!_isCrossfading && !_mix.paused) {
           final double curRate = player.state.rate;
+          final String? blocked = _drift.takeBlockedReport();
+          if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
           final double? tgt = _drift.tick(
             posMs: posMs,
             durMs: durMs,
             mixOutMs: barMixOut,
             rate: curRate,
-            nextBpm: _extractBpm(_standbyArmedPath),
+            nextBpm: _extractBpm(_driftNextPath ?? _standbyArmedPath),
           );
-          if (tgt != null) unawaited(_drift.ramp(player, curRate, tgt));
+          final String? blockedAfter = _drift.takeBlockedReport();
+          if (blockedAfter != null) _djTrace('MIDPOINT FUERA $blockedAfter');
+          if (tgt != null) {
+            unawaited(
+              _drift.ramp(player, curRate, tgt, ms: _drift.rampMs, hold: _mix),
+            );
+          }
         }
 
         // No se arma durante un cruce: el deck "standby" es el que aún suena
         // (saliendo); recargarlo mete pistas fantasma y deja el armado huérfano.
         if (!_isStandbyArmed &&
             !_isCrossfading &&
+            !_mix.paused &&
             posMs >= (barMixOut - 10000) &&
             barMixOut > 10000) {
           _isStandbyArmed = true;
           _standbyArmedPath = null;
+          // El deck se fija ya: un cruce durante el await invierte los
+          // reproductores y el standby pasa a ser el que está sonando.
+          final armDeck = _standbyPlayer;
+          final bool armingRadio = state.radioOn;
+          final int armEpoch = _radioEpoch;
           // Radio encendida: la pista sale del universo de géneros, no de la cola.
-          final String? armPathOrNull = state.radioOn
-              ? await _radioNextPath()
+          // Apagada: la misma que muestra la barra (cabeza, o BPM en Stealth).
+          final String? armPathOrNull = armingRadio
+              ? (_radioPendingReady() ?? await _radioNextPath())
               : (state.queue.isNotEmpty
                     ? state.queue[_nextQueueIndex()].path
                     : null);
-          if (armPathOrNull == null) return;
-          final String armPath = armPathOrNull;
-          if (!state.radioOn && armPath == tickPath) {
+          if (armingRadio &&
+              !radioArmStillValid(
+                radioOn: state.radioOn,
+                epoch: _radioEpoch,
+                armEpoch: armEpoch,
+              )) {
+            // La radio se apagó mientras elegía: no se precarga esa pista.
+            // El tick siguiente arma la cabeza de la cola, una sola vez.
             _isStandbyArmed = false;
+            _driftNextPath = _queueHeadPath();
             return;
           }
-          await _standbyPlayer.setVolume(0.0);
-          await _standbyPlayer.open(Media(armPath), play: false);
-          // Si durante la carga cambió la pista o empezó un cruce, este armado
-          // ya no vale: si no, se recarga el deck que está sonando.
-          if (state.currentTrackPath != tickPath ||
-              _isCrossfading ||
-              player != _activePlayer) {
+          if (armPathOrNull == null) return;
+          final String armPath = armPathOrNull;
+          // Ni la que suena ni la anterior: el relevo no puede reabrirlas.
+          if (sameAudioPath(armPath, tickPath) ||
+              (_radioPrevious != null &&
+                  sameAudioPath(armPath, _radioPrevious))) {
+            _isStandbyArmed = false;
+            _radioPending = null;
+            return;
+          }
+          if (!armStillValid(
+            tickPath: tickPath,
+            currentPath: state.currentTrackPath,
+            armPath: armPath,
+            isCrossfading: _isCrossfading,
+            sameActive: player == _activePlayer,
+            sameDeck: armDeck == _standbyPlayer,
+          )) {
+            _isStandbyArmed = false;
+            _standbyArmedPath = null;
+            return;
+          }
+          // La rampa ve el BPM de la entrante mientras el deck abre el archivo.
+          _driftNextPath = armPath;
+          await armDeck.setVolume(0.0);
+          await armDeck.open(Media(armPath), play: false);
+          // Si durante la carga cambió la pista, el deck o empezó un cruce,
+          // este armado ya no vale: si no, se recarga el deck que está sonando.
+          if (!armStillValid(
+            tickPath: tickPath,
+            currentPath: state.currentTrackPath,
+            armPath: armPath,
+            isCrossfading: _isCrossfading,
+            sameActive: player == _activePlayer,
+            sameDeck: armDeck == _standbyPlayer,
+          )) {
+            _isStandbyArmed = false;
+            _standbyArmedPath = null;
             return;
           }
           // Solo se da por precargada cuando la carga terminó de verdad.
           _standbyArmedPath = armPath;
+          _schedulePhraseNeighbors();
           ref
               .read(liveDjEqualizerProvider.notifier)
               .adapt(_standbyPlayer, armPath);
@@ -908,20 +1520,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         if (state.currentTrackPath != tickPath || player != _activePlayer) {
           return;
         }
-        // Red de seguridad: si el deck va a acabar antes que la duración de la
-        // barra (cabecera larga), se mezcla ~25 s antes de ese final real.
-        // Una estimación corta de arranque (menor que la mitad) no cuenta.
-        int endMs = durMs;
-        final int deckDur = player.state.duration.inMilliseconds;
-        if (deckDur > 45000 && deckDur + 1500 < durMs && deckDur > durMs ~/ 2) {
-          endMs = deckDur;
-        }
-        final bool nearEnd =
-            endMs > 60000 && posMs >= endMs - 25000 && posMs > 20000;
-        if ((posMs >= barMixOut && barMixOut > 10000) || nearEnd) {
-          if (!_isCrossfading && !_isPrepModeBypass) {
+        if (mixTriggerDue(
+          posMs: posMs,
+          exactMs: durMs,
+          mixOutMs: barMixOut,
+        )) {
+          if (!_isCrossfading && !_isPrepModeBypass && !_mix.paused) {
             _djTrace(
-              'TRIGGER pos=$posMs dur=$durMs end=$endMs bar=$barMixOut nearEnd=$nearEnd '
+              'TRIGGER pos=$posMs dur=$durMs bar=$barMixOut '
               'cur=${state.currentTrackPath} armed=$_standbyArmedPath q0=${state.queue.isNotEmpty ? state.queue.first.path : null}',
             );
             _triggerCrossfade();
@@ -931,20 +1537,13 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     });
 
     _durationSub = player.stream.duration.listen((mpvDur) async {
-      // No publicar la estimación corta de libmpv antes de la duración real:
-      // si no, el punto de mezcla cae a los pocos segundos y el cruce arranca.
+      // La barra y el punto de mezcla esperan la duración decodificada.
+      // La estimación de libmpv no se publica.
       final String? durPath = state.currentTrackPath;
-      Duration dur = mpvDur;
-      if (durPath != null && mpvDur.inMilliseconds > 0) {
-        dur = await _trueDuration(durPath, mpvDur);
-        if (state.currentTrackPath != durPath) return;
-      }
+      if (durPath == null) return;
+      final Duration dur = await _trueDuration(durPath, mpvDur);
+      if (state.currentTrackPath != durPath) return;
       if (dur.inMilliseconds <= 0 || state.currentTrackPath == null) return;
-      // Una estimación posterior más corta no achica la duración ya corregida.
-      if (state.currentTrackPath == durPath &&
-          state.duration.inMilliseconds > dur.inMilliseconds + 1500) {
-        dur = state.duration;
-      }
       state = state.copyWith(duration: dur);
       globalAudioHandler.syncOs(
         owner: 'livedj',
@@ -970,6 +1569,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         customMixOutMs: triggerMs,
         currentMixMode: mode,
       );
+      _rememberDriftNext();
     });
 
     _playingSub = player.stream.playing.listen((playing) {
@@ -1007,7 +1607,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       if (_isCrossfading) return;
       _isPrepModeBypass = false;
       _djTrace(
-        'COMPLETED SIN MEZCLA pos=${state.position.inMilliseconds} '
+        'NO DISPARO pos=${state.position.inMilliseconds} '
         'dur=${state.duration.inMilliseconds} trigger=${state.customMixOutMs} '
         'cur=${state.currentTrackPath} armed=$_standbyArmedPath radio=${state.radioOn}',
       );
@@ -1021,6 +1621,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<void> togglePlayPause() async {
+    if (_mix.armed) {
+      await _toggleMixHold();
+      return;
+    }
     if (state.queue.isEmpty &&
         state.currentTrackPath == null &&
         !state.radioOn) {
@@ -1061,7 +1665,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       return;
     }
 
+    final bool playingNow = _deckPlaying(() => _activePlayer);
+    if (playingNow) _mix.pauseAll();
     await _activePlayer.playOrPause();
+    if (!playingNow) _mix.resumeAll();
     if (!state.isPlaying) _saveSnapshot();
   }
 
@@ -1085,7 +1692,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<void> _stopWhenNoNext() async {
-    _isCrossfading = false;
+    _releaseMix();
     try {
       await _playerA.pause();
     } catch (_) {}
@@ -1143,19 +1750,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   // ───────────────────────── ON AIR Radio ─────────────────────────
-  // La radio NO toca la cola (congelada). Solo decide qué pista sigue:
-  // universo = carpetas de género dentro de Música (sin _K), salto de carpeta
-  // cada 2 temas, BPM cercano, sin artista seguido y sin repetir (historial).
+  // La cola de Live DJ se congela al encender. Cada opción de géneros tiene
+  // una lista ya armada en `LiveDj_Radio.json` y sigue desde su posición.
   Map<String, List<String>>? _radioIndex; // carpeta → pistas
   final Map<String, String> _radioFolderGenre = <String, String>{};
   Future<void>? _radioIndexing;
-  final Set<String> _radioHistory = <String>{};
   String? _radioPending;
-  String? _radioPendingFolder;
-  String? _radioLastFolder;
-  String _radioLastArtist = '';
-  int _radioStreak = 0;
+  // La PRÓXIMA de radio ya validada. Vale solo en la época en que se calculó;
+  // el relleno corre en segundo plano. La lista visible es el plan entero.
+  List<String> _radioAhead = const <String>[];
+  int _radioAheadEpoch = -1;
+  Future<void>? _radioRefillRun;
+  bool _radioRefillAgain = false;
   final Random _radioRng = Random();
+  int _radioEpoch = 0;
+  int _radioAssembleEpoch = -1;
+  Future<void>? _radioAssemble;
 
   static const Set<String> _radioExt = {
     'mp3',
@@ -1179,21 +1789,35 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return b.toString();
   }
 
-  String _radioMusicRoot() {
-    String base;
+  String _musicBase() {
     if (Platform.isIOS) {
-      base = IphoneLibrary.musicRoot;
+      if (IphoneLibrary.musicRoot.isNotEmpty) return IphoneLibrary.musicRoot;
     } else if (Platform.isAndroid) {
-      base = '/storage/emulated/0/Music';
+      return '/storage/emulated/0/Music';
     } else if (Platform.isWindows) {
-      final up = Platform.environment['USERPROFILE'];
-      base = up != null ? '$up\\Music' : 'C:\\Music';
+      final String? up = Platform.environment['USERPROFILE'];
+      return up != null ? '$up\\Music' : 'C:\\Music';
     } else {
-      final home = Platform.environment['HOME'];
-      base = home != null ? '$home/Music' : '/';
+      final String? home = Platform.environment['HOME'];
+      return home != null ? '$home/Music' : '/tmp/Music';
     }
+    return File(_sessionFilePath()).parent.path;
+  }
+
+  /// Raíz de Música, donde vive `LiveDj_Radio.json`.
+  String _musicRoot() {
+    final String base = _musicBase();
+    if (base.isEmpty || base == '/')
+      return File(_sessionFilePath()).parent.path;
+    return base;
+  }
+
+  String _radioMusicRoot() {
+    final String base = _musicBase();
     // Las carpetas de género viven en Música/ReGenial; si no existe, en Música.
-    final regenial = Directory('$base${Platform.pathSeparator}ReGenial');
+    final Directory regenial = Directory(
+      '$base${Platform.pathSeparator}ReGenial',
+    );
     return regenial.existsSync() ? regenial.path : base;
   }
 
@@ -1219,36 +1843,129 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return null;
   }
 
-  String _radioArtist(String path) {
-    var name = path.replaceAll('\\', '/').split('/').last;
-    final dot = name.lastIndexOf('.');
-    if (dot > 0) name = name.substring(0, dot);
-    final i = name.indexOf(' - ');
-    if (i <= 0) return '';
-    return _radioFold(name.substring(0, i)).trim();
-  }
-
   String _radioHistoryPath() =>
       '${File(_sessionFilePath()).parent.path}${Platform.pathSeparator}_livedj_radio.json';
 
-  void _loadRadioHistory() {
-    try {
-      final f = File(_radioHistoryPath());
-      if (!f.existsSync()) return;
-      final data = jsonDecode(f.readAsStringSync());
-      final list = (data['history'] as List?) ?? const [];
-      _radioHistory
-        ..clear()
-        ..addAll(list.map((e) => e.toString()));
-    } catch (_) {}
+  RadioMemory _radioMemory() => _radioMem ??= GatomixRadio.load(
+    _radioRootOverride ?? _musicRoot(),
+    legacyPaths: <String>[_radioHistoryPath()],
+  );
+
+  void _saveRadio(RadioMemory mem, {String? activeKey}) {
+    _radioMem = mem;
+    _publishRadioUpcoming();
+    final int serial = ++_radioSaveSerial;
+    final String root = _radioRootOverride ?? _musicRoot();
+    final Map<String, dynamic> doc = mem.toJson(activeKey: activeKey);
+    // Una sola escritura a la vez. Una posición ya superada no pisa a la nueva.
+    _radioSaveChain = _radioSaveChain.then((_) async {
+      if (serial != _radioSaveSerial) return;
+      await GatomixRadio.saveAsync(root, doc);
+    });
   }
 
-  void _saveRadioHistory() {
-    try {
-      File(
-        _radioHistoryPath(),
-      ).writeAsStringSync(jsonEncode({'history': _radioHistory.toList()}));
-    } catch (_) {}
+  bool _radioBanned(String path) {
+    return radioRepeatsRecent(
+      path,
+      playing: state.currentTrackPath,
+      previous: _radioPrevious,
+      recent: radioRecent(_radioMemory().history),
+    );
+  }
+
+  void _publishRadioUpcoming() {
+    final List<String> next = state.radioOn
+        ? radioUpcomingPaths(
+            plan: _radioMem?.planOf(radioGenreKey(state.radioGenres)),
+            nextPath: state.radioNextPath,
+            ahead: _radioAheadEpoch == _radioEpoch
+                ? _radioAhead
+                : const <String>[],
+          )
+        : const <String>[];
+    if (listEquals(state.radioUpcoming, next)) return;
+    state = state.copyWith(radioUpcoming: next);
+  }
+
+  /// La siguiente ya elegida, sin esperar ni tocar disco. null = no hay.
+  String? _radioPendingReady() {
+    final String? p = _radioPending;
+    if (p == null || p.isEmpty || _radioBanned(p)) return null;
+    return p;
+  }
+
+  /// Deja lista en segundo plano la próxima (_radioPending). Nunca corre
+  /// desde el tick ni hace trabajo extra durante el cruce.
+  Future<void> _radioRefill() {
+    if (!state.radioOn) return Future<void>.value();
+    final Future<void>? run = _radioRefillRun;
+    if (run != null) {
+      _radioRefillAgain = true;
+      return run;
+    }
+    return _radioRefillRun = _radioRefillLoop().whenComplete(() {
+      _radioRefillRun = null;
+    });
+  }
+
+  Future<void> _radioRefillLoop() async {
+    do {
+      _radioRefillAgain = false;
+      try {
+        await _radioRefillOnce();
+      } catch (e, st) {
+        debugPrint('🔴 [RADIO] relleno: $e\n$st');
+      }
+    } while (_radioRefillAgain && state.radioOn);
+  }
+
+  Future<void> _radioRefillOnce() async {
+    final int epoch = _radioEpoch;
+    bool live() => radioArmStillValid(
+      radioOn: state.radioOn,
+      epoch: _radioEpoch,
+      armEpoch: epoch,
+    );
+    // Solo la PRÓXIMA se valida por adelantado (_radioPending): el armado la
+    // lee sin esperar. La lista completa es el plan, no este relleno.
+    final String? first = await _radioNextPath();
+    if (!live() || first == null || first.isEmpty) return;
+    _radioAhead = <String>[first];
+    _radioAheadEpoch = epoch;
+    _publishRadioUpcoming();
+  }
+
+  bool _radioAccept(String path) {
+    if (isKaraokeAudioPath(path)) return false;
+    final String fname = path.replaceAll('\\', '/').split('/').last;
+    final int dot = fname.lastIndexOf('.');
+    if (dot < 0) return false;
+    return _radioExt.contains(fname.substring(dot + 1).toLowerCase());
+  }
+
+  List<String> _radioPoolNow() {
+    final Map<String, List<String>>? idx = _radioIndex;
+    if (idx == null || idx.isEmpty) return const <String>[];
+    List<String> from(bool Function(String folder) take) {
+      final List<String> out = <String>[];
+      final Set<String> seen = <String>{};
+      for (final MapEntry<String, List<String>> e in idx.entries) {
+        if (!take(e.key)) continue;
+        for (final String path in e.value) {
+          if (!_radioAccept(path)) continue;
+          if (seen.add(audioPathKey(path))) out.add(path);
+        }
+      }
+      return out;
+    }
+
+    final Set<String> genres = state.radioGenres;
+    final List<String> filtered = from((String folder) {
+      final String? g = _radioFolderGenre[folder];
+      return genres.isEmpty || (g != null && genres.contains(g));
+    });
+    if (filtered.isNotEmpty || genres.isEmpty) return filtered;
+    return from((String _) => true);
   }
 
   Future<void> _radioEnsureIndex() {
@@ -1267,7 +1984,12 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         await for (final e in root.list(followLinks: false)) {
           if (e is! Directory) continue;
           final name = e.path.replaceAll('\\', '/').split('/').last;
-          final genre = _radioGenreOfFolder(name);
+          if (_radioFold(name).contains('_k')) continue; // Karaoke
+          // Carpeta de ReGenial sin género conocido: entra en "Todo" (no en
+          // ningún filtro de género), así Todo = toda la biblioteca.
+          final String? genre =
+              _radioGenreOfFolder(name) ??
+              (root.path.toLowerCase().endsWith('regenial') ? 'todo' : null);
           if (genre == null) continue;
           final files = <String>[];
           try {
@@ -1335,186 +2057,605 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
   }
 
-  /// BPM más cercano al actual (±12 %); sin BPM, sorteo simple.
-  String _radioPickByBpm(List<String> list) {
-    final double cur = _extractBpm(state.currentTrackPath);
-    if (cur > 60) {
-      final sample = List<String>.from(list)..shuffle(_radioRng);
-      String? best;
-      double bestDiff = double.infinity;
-      for (final p in sample.take(80)) {
-        final b = _extractBpm(p);
-        if (b <= 60) continue;
-        final ratio = cur / b;
-        if (ratio < 0.88 || ratio > 1.12) continue;
-        final d = (cur - b).abs();
-        if (d < bestDiff) {
-          bestDiff = d;
-          best = p;
-        }
+  /// Siguiente de la lista ya armada. Si hay que armarla, el trabajo pesado
+  /// (BPM de todas las carpetas + Shuffle) va a otro isolate. Esta función
+  /// devuelve enseguida una pista compatible para que la mezcla no espere
+  /// y la ventana no se congele.
+  Future<String?> _radioNextPath({int depth = 0}) async {
+    final int epoch = _radioEpoch;
+    bool live() => radioArmStillValid(
+      radioOn: state.radioOn,
+      epoch: _radioEpoch,
+      armEpoch: epoch,
+    );
+    if (!live()) return null;
+    try {
+      final String? pending = _radioPending;
+      if (pending != null && pending.isNotEmpty && !_radioBanned(pending)) {
+        return pending;
       }
-      if (best != null) return best;
+      _radioPending = null;
+      await _radioEnsureIndex();
+      if (!live()) return null;
+      final String? already = _radioPending;
+      if (already != null && already.isNotEmpty && !_radioBanned(already)) {
+        return already;
+      }
+      final List<String> pool = _radioPoolNow();
+      if (pool.isEmpty) return _radioQueueFallback();
+      final String key = radioGenreKey(state.radioGenres);
+      final RadioMemory mem = _radioMemory();
+      final RadioResolve resolve = radioResolveNext(
+        memory: mem,
+        key: key,
+        pool: pool,
+        playing: state.currentTrackPath,
+        previous: _radioPrevious,
+        bpmOf: memoryBpm,
+        keyOf: camelotFromPath,
+        rng: _radioRng,
+        allowRebuild: false,
+      );
+      if (!live()) return null;
+      final RadioPlan? saved = mem.planOf(key);
+      if (resolve.followedPlan || resolve.rebuilt) {
+        _radioMem = resolve.memory;
+      }
+      final String? next = resolve.next;
+      if (next != null &&
+          depth < 8 &&
+          next.isNotEmpty &&
+          !File(next).existsSync()) {
+        _radioMem = _radioMemory().rememberMix(key: key, played: next);
+        _radioPending = null;
+        return await _radioNextPath(depth: depth + 1);
+      }
+      if (!live()) return null;
+      if (next != null && next.isNotEmpty && !_radioBanned(next)) {
+        _radioPending = next;
+        _driftNextPath = next;
+        state = state.copyWith(radioNextPath: next);
+        _publishRadioUpcoming();
+        if (resolve.needsAssemble) {
+          _ensureRadioAssemble(
+            epoch: epoch,
+            key: key,
+            pool: pool,
+            mem: resolve.memory,
+            saved: saved,
+            pinned: next,
+          );
+        }
+        return next;
+      }
+      if (resolve.needsAssemble) {
+        _ensureRadioAssemble(
+          epoch: epoch,
+          key: key,
+          pool: pool,
+          mem: resolve.memory,
+          saved: saved,
+          pinned: null,
+        );
+      }
+      return _radioQueueFallback();
+    } catch (e, st) {
+      debugPrint('🔴 [RADIO] $e\n$st');
+      return _radioQueueFallback();
     }
-    return list[_radioRng.nextInt(list.length)];
   }
 
-  /// Siguiente pista de la radio (se fija hasta consumirse o cambiar géneros).
-  Future<String?> _radioNextPath() async {
-    final pending = _radioPending;
-    if (pending != null && File(pending).existsSync()) return pending;
-    _radioPending = null;
-    await _radioEnsureIndex();
-    // Otra llamada pudo elegir mientras se esperaba el índice.
-    final already = _radioPending;
-    if (already != null && File(already).existsSync()) return already;
-    final idx = _radioIndex;
-    if (idx == null || idx.isEmpty) return _radioQueueFallback();
-
-    final genres = state.radioGenres;
-    var folders = <String>[
-      for (final e in idx.entries)
-        if (genres.isEmpty || genres.contains(_radioFolderGenre[e.key])) e.key,
-    ];
-    // Géneros elegidos que no existen en esta biblioteca: suena todo, no se para.
-    if (folders.isEmpty) folders = idx.keys.toList();
-    if (folders.isEmpty) return _radioQueueFallback();
-
-    // La carpeta seleccionada en el Explorador queda fuera de la radio.
-    String selPrefix = '';
-    try {
-      final sel = ref.read(liveDjDirectoryProvider).currentPath;
-      if (sel.isNotEmpty) {
-        selPrefix = sel + Platform.pathSeparator;
-        if (Platform.isWindows) selPrefix = selPrefix.toLowerCase();
-      }
-    } catch (_) {}
-    bool relaxSel = false; // nivel 3: la carpeta del Explorador también vale
-    bool outsideSel(String p) {
-      if (relaxSel || selPrefix.isEmpty) return true;
-      return !(Platform.isWindows ? p.toLowerCase() : p).startsWith(selPrefix);
+  void _ensureRadioAssemble({
+    required int epoch,
+    required String key,
+    required List<String> pool,
+    required RadioMemory mem,
+    required RadioPlan? saved,
+    required String? pinned,
+    bool replace = false,
+  }) {
+    if (!state.radioOn || epoch != _radioEpoch) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP antes de arrancar epoch=$epoch ahora=$_radioEpoch '
+        'on=${state.radioOn} pool=${pool.length}',
+      );
+      return;
     }
-
-    // nivel 0: estricto · 1: sin regla de artista · 2: historial reiniciado
-    for (int level = 0; level < 4; level++) {
-      if (level == 3) relaxSel = true;
-      if (level == 2) {
-        _radioHistory.clear();
-        _saveRadioHistory();
-      }
-      final cand = <String, List<String>>{};
-      for (final f in folders) {
-        final list = idx[f]!.where((p) {
-          if (!outsideSel(p)) return false;
-          if (level < 2 && _radioHistory.contains(p)) return false;
-          if (level < 1 &&
-              _radioLastArtist.isNotEmpty &&
-              _radioArtist(p) == _radioLastArtist) {
-            return false;
+    // Solo se salta si la lista guardada todavía cubre este pool. Un plan
+    // corto (o ninguno) no puede dejar el panel en una sola canción.
+    if (!radioAssembleShouldStart(
+      inFlight: _radioAssemble != null && _radioAssembleEpoch == epoch,
+      planOpen: saved != null &&
+          !saved.finished &&
+          radioPlanIsOpen(saved, pool),
+    )) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP en curso o lista abierta pool=${pool.length} '
+        'hist=${mem.history.length}',
+      );
+      return;
+    }
+    _radioAssembleEpoch = epoch;
+    final Map<String, Object?> msg = <String, Object?>{
+      'pool': List<String>.from(pool),
+      'seed': _radioRng.nextInt(1 << 31),
+      'pinned': pinned,
+      'playing': state.currentTrackPath,
+      'hasSaved': saved != null,
+      'order': saved?.order ?? const <String>[],
+      'position': saved?.position ?? 0,
+      'pairs': saved?.pairs ?? const <String>[],
+      'previousPairs': saved?.previousPairs ?? const <String>[],
+      'readTags': false,
+    };
+    final Stopwatch sw = Stopwatch()..start();
+    _djTrace(
+      'RADIO ASSEMBLE START pool=${pool.length} key=$key epoch=$epoch '
+      'hist=${mem.history.length}',
+    );
+    _radioAssemble = compute(assembleRadioOffUi, msg)
+        .then((Map<String, Object?> raw) async {
+          sw.stop();
+          final bool applied = _applyRadioPlan(
+            raw: raw,
+            epoch: epoch,
+            key: key,
+            pool: pool,
+            replace: replace,
+            elapsedMs: sw.elapsedMilliseconds,
+          );
+          if (!applied) return;
+          final List<String> untagged = <String>[
+            for (final Object? p in (raw['untagged'] as List?) ?? const <Object>[])
+              p.toString(),
+          ];
+          if (untagged.isEmpty || epoch != _radioEpoch || !state.radioOn) {
+            return;
           }
-          return true;
-        }).toList();
-        if (list.isNotEmpty) cand[f] = list;
-      }
-      if (cand.isEmpty) continue;
+          final Stopwatch sw2 = Stopwatch()..start();
+          _djTrace(
+            'RADIO REFINE START pool=${pool.length} sinBpm=${untagged.length} key=$key',
+          );
+          final Map<String, Object?> tagged = Map<String, Object?>.from(msg);
+          tagged['readTags'] = true;
+          final Map<String, Object?> raw2 = await compute(
+            assembleRadioOffUi,
+            tagged,
+          );
+          sw2.stop();
+          _applyRadioPlan(
+            raw: raw2,
+            epoch: epoch,
+            key: key,
+            pool: pool,
+            replace: true,
+            elapsedMs: sw2.elapsedMilliseconds,
+          );
+        })
+        .catchError((Object e, StackTrace st) {
+          _djTrace(
+            'RADIO ASSEMBLE FALLO pool=${pool.length} ${sw.elapsedMilliseconds}ms $e',
+          );
+          debugPrint('🔴 [RADIO] $e\n$st');
+        })
+        .whenComplete(() {
+          if (_radioAssembleEpoch == epoch) _radioAssemble = null;
+        });
+  }
 
-      String folder;
-      final last = _radioLastFolder;
-      if (last != null && _radioStreak < 2 && cand.containsKey(last)) {
-        folder = last; // 2 temas por carpeta
-      } else {
-        final others = cand.keys.where((k) => k != last).toList();
-        final pool = others.isNotEmpty ? others : cand.keys.toList();
-        folder = pool[_radioRng.nextInt(pool.length)];
-      }
+  /// Al encender la radio o cambiar el filtro: si la lista guardada trae
+  /// menos pistas que el pool del filtro, se rearma con todo el pool.
+  Future<void> _radioRearmIfShort() async {
+    final int epoch = _radioEpoch;
+    await _radioEnsureIndex();
+    if (!state.radioOn || epoch != _radioEpoch) return;
+    final List<String> pool = _radioPoolNow();
+    if (pool.isEmpty) return;
+    final String key = radioGenreKey(state.radioGenres);
+    final RadioMemory mem = _radioMemory();
+    final RadioPlan? saved = mem.planOf(key);
+    if (saved == null || saved.order.length >= pool.length) return;
+    _djTrace(
+      'RADIO PLAN CORTO lista=${saved.order.length} pool=${pool.length} '
+      'key=$key: se rearma con todo el pool',
+    );
+    _ensureRadioAssemble(
+      epoch: epoch,
+      key: key,
+      pool: pool,
+      mem: mem,
+      saved: saved,
+      pinned: null,
+      replace: true,
+    );
+  }
 
-      final pick = _radioPickByBpm(cand[folder]!);
-      if (!File(pick).existsSync()) {
-        idx[folder]!.remove(pick);
-        return _radioNextPath();
-      }
-      _radioPending = pick;
-      _radioPendingFolder = folder;
-      state = state.copyWith(radioNextPath: pick);
-      return pick;
+  @visibleForTesting
+  Future<void> rearmRadioIfShort() async {
+    await _radioRearmIfShort();
+    final Future<void>? run = _radioAssemble;
+    if (run != null) await run;
+  }
+
+  bool _applyRadioPlan({
+    required Map<String, Object?> raw,
+    required int epoch,
+    required String key,
+    required List<String> pool,
+    required bool replace,
+    required int elapsedMs,
+  }) {
+    if (epoch != _radioEpoch || !state.radioOn) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP epoca epoch=$epoch ahora=$_radioEpoch '
+        'on=${state.radioOn} pool=${pool.length} ${elapsedMs}ms',
+      );
+      return false;
     }
-    return _radioQueueFallback();
+    if (raw['ok'] != true) {
+      _djTrace(
+        'RADIO ASSEMBLE FALLO pool=${pool.length} ${elapsedMs}ms ${raw['error']}',
+      );
+      return false;
+    }
+    RadioPlan plan = RadioPlan(
+      order: <String>[
+        for (final Object? p in (raw['order'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+      position: raw['position'] is int ? raw['position'] as int : 0,
+      pairs: <String>[
+        for (final Object? p in (raw['pairs'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+      previousPairs: <String>[
+        for (final Object? p
+            in (raw['previousPairs'] as List?) ?? const <Object>[])
+          p.toString(),
+      ],
+    );
+    if (plan.order.isEmpty) {
+      _djTrace(
+        'RADIO ASSEMBLE FALLO pool=${pool.length} orden vacía ${elapsedMs}ms',
+      );
+      return false;
+    }
+    // El plan lleva TODAS las pistas del pool: las que el armado dejó fuera
+    // (la que suena, la anterior, recientes) van al final de la vuelta.
+    final Set<String> inPlan = <String>{
+      for (final String p in plan.order) audioPathKey(p),
+    };
+    final List<String> missing = <String>[
+      for (final String p in pool)
+        if (inPlan.add(audioPathKey(p))) p,
+    ];
+    if (missing.isNotEmpty) {
+      plan = plan.copy(order: <String>[...plan.order, ...missing]);
+    }
+    final RadioPlan? have = _radioMemory().planOf(key);
+    if (!replace &&
+        have != null &&
+        !have.finished &&
+        radioPlanIsOpen(have, pool)) {
+      _djTrace(
+        'RADIO ASSEMBLE DROP plan ya abierto lista=${have.order.length} '
+        'pool=${pool.length} ${elapsedMs}ms',
+      );
+      return false;
+    }
+    final String? onAir = state.currentTrackPath;
+    if (onAir != null &&
+        !plan.finished &&
+        plan.position < plan.order.length &&
+        sameAudioPath(plan.order[plan.position], onAir)) {
+      plan = advanceRadioPlan(plan, onAir);
+    }
+    if (_radioPrevious != null &&
+        !plan.finished &&
+        plan.position < plan.order.length &&
+        sameAudioPath(plan.order[plan.position], _radioPrevious!)) {
+      plan = advanceRadioPlan(plan, _radioPrevious!);
+    }
+    _djTrace(
+      'RADIO ASSEMBLE FIN pool=${pool.length} lista=${plan.order.length} '
+      '${elapsedMs}ms key=$key',
+    );
+    _saveRadio(_radioMemory().putPlan(key, plan), activeKey: key);
+    if (state.radioOn && epoch == _radioEpoch && !_isCrossfading) {
+      unawaited(_radioRefill());
+    }
+    if (_isStandbyArmed) return true;
+    if (plan.finished || plan.order.isEmpty) return true;
+    if (plan.position < 0 || plan.position >= plan.order.length) return true;
+    final String next = plan.order[plan.position];
+    if (_radioPending != null && !sameAudioPath(_radioPending, next)) {
+      return true;
+    }
+    if (!state.radioOn || epoch != _radioEpoch) return true;
+    if (!File(next).existsSync()) return true;
+    _radioPending = next;
+    _driftNextPath = next;
+    state = state.copyWith(radioNextPath: next);
+    _publishRadioUpcoming();
+    return true;
   }
 
   /// Último recurso: la radio nunca se para; suena una pista de la cola.
   String? _radioQueueFallback() {
-    final cur = state.currentTrackPath;
-    for (final f in state.queue) {
-      if (f.path != cur && File(f.path).existsSync()) return f.path;
+    for (final File f in state.queue) {
+      if (_radioBanned(f.path)) continue;
+      if (File(f.path).existsSync()) return f.path;
     }
     return null;
   }
 
   void _radioConsumed(String path) {
-    _radioHistory.add(path);
-    final folder = _radioPendingFolder;
-    if (folder != null) {
-      if (folder == _radioLastFolder) {
-        _radioStreak++;
-      } else {
-        _radioLastFolder = folder;
-        _radioStreak = 1;
-      }
+    final String key = radioGenreKey(state.radioGenres);
+    _radioPrevious = state.currentTrackPath;
+    _saveRadio(
+      _radioMemory().rememberMix(key: key, played: path),
+      activeKey: key,
+    );
+    final double bpm = _extractBpm(path);
+    if (bpm > 0) {
+      saveTrackMusic(path, bpm: bpm, camelot: harmonicKeyOf(path));
     }
-    _radioLastArtist = _radioArtist(path);
     _radioPending = null;
-    _radioPendingFolder = null;
+    if (_radioAhead.isNotEmpty) {
+      _radioAhead = <String>[
+        for (final String p in _radioAhead)
+          if (!sameAudioPath(p, path)) p,
+      ];
+    }
     state = state.copyWith(clearRadioNextPath: true);
-    _saveRadioHistory();
+    _publishRadioUpcoming();
+  }
+
+  @visibleForTesting
+  void useRadioLibrary(String root) {
+    _radioRootOverride = root;
+  }
+
+  @visibleForTesting
+  void seedRadioIndex({required String genre, required List<String> files}) {
+    _radioIndex = <String, List<String>>{'/seed': files};
+    _radioFolderGenre['/seed'] = genre;
+  }
+
+  @visibleForTesting
+  Future<void> refillRadioAhead() => _radioRefill();
+
+  @visibleForTesting
+  String? get radioPendingReadyNow => _radioPendingReady();
+
+  @visibleForTesting
+  RadioMemory get radioMemoryNow => _radioMem ?? RadioMemory.empty;
+
+  @visibleForTesting
+  Future<void> flushRadioSave() => _radioSaveChain;
+
+  @visibleForTesting
+  void seedOffAirQueue({
+    required List<String> queue,
+    String? playing,
+    bool radioOn = false,
+    String? radioNextPath,
+    List<String> radioUpcoming = const <String>[],
+  }) {
+    state = state.copyWith(
+      queue: <File>[for (final String p in queue) File(p)],
+      currentTrackPath: playing,
+      clearCurrentTrackPath: playing == null || playing.isEmpty,
+      radioOn: radioOn,
+      radioNextPath: radioNextPath,
+      clearRadioNextPath: radioNextPath == null || radioNextPath.isEmpty,
+      radioUpcoming: radioUpcoming,
+    );
+  }
+
+  @visibleForTesting
+  int debugNextQueueIndex() => _nextQueueIndex();
+
+  @visibleForTesting
+  void seedRadio({
+    required RadioMemory memory,
+    required String genre,
+    String? playing,
+    String? previous,
+  }) {
+    _radioMem = memory;
+    _radioPrevious = previous;
+    _radioPending = null;
+    _radioEpoch++;
+    state = state.copyWith(
+      radioOn: true,
+      radioGenres: <String>{genre},
+      currentTrackPath: playing,
+      clearCurrentTrackPath: playing == null || playing.isEmpty,
+      clearRadioNextPath: true,
+      isPlaying: playing != null && playing.isNotEmpty,
+    );
+    _publishRadioUpcoming();
+  }
+
+  @visibleForTesting
+  void showRadioGenre(String genre) {
+    _radioEpoch++;
+    _radioPending = null;
+    if (!_isCrossfading) {
+      _isStandbyArmed = false;
+      _standbyArmedPath = null;
+      _driftNextPath = null;
+    }
+    state = state.copyWith(
+      radioOn: true,
+      radioGenres: <String>{genre},
+      clearRadioNextPath: true,
+    );
+    _publishRadioUpcoming();
+  }
+
+  @visibleForTesting
+  String? followRadioNext(
+    List<String> pool, {
+    double Function(String path)? bpmOf,
+  }) {
+    final String key = radioGenreKey(state.radioGenres);
+    final RadioResolve resolve = radioResolveNext(
+      memory: _radioMemory(),
+      key: key,
+      pool: pool,
+      playing: state.currentTrackPath,
+      previous: _radioPrevious,
+      bpmOf: bpmOf ?? memoryBpm,
+      keyOf: camelotFromPath,
+      rng: _radioRng,
+      allowRebuild: false,
+    );
+    if (resolve.rebuilt) {
+      _saveRadio(resolve.memory, activeKey: key);
+    } else {
+      _radioMem = resolve.memory;
+    }
+    final String? next = resolve.next;
+    if (next == null || _radioBanned(next)) return null;
+    _radioPending = next;
+    state = state.copyWith(radioNextPath: next);
+    _publishRadioUpcoming();
+    return next;
+  }
+
+  @visibleForTesting
+  void finishRadioMix(String played) {
+    _radioConsumed(played);
+    state = state.copyWith(
+      currentTrackPath: played,
+      isPlaying: true,
+      position: Duration.zero,
+    );
+  }
+
+  void _captureRadioFreeze() {
+    if (_radioFreeze != null) return;
+    _radioFreeze = LiveQueueFreeze(
+      queue: state.queue.map((File f) => f.path).toList(),
+      current: state.currentTrackPath,
+      positionMs: state.position.inMilliseconds,
+      wasPlaying: state.isPlaying,
+    );
+  }
+
+  /// Apaga la radio sin tocar el deck que suena: ni pausa, ni open, ni seek,
+  /// ni setRate. La cola congelada vuelve de memoria. El relevo de radio se
+  /// cancela y la siguiente vuelve a salir de esa cola (cabeza, o BPM si Stealth).
+  void _turnRadioOff() {
+    _radioEpoch++;
+    _radioPending = null;
+    _radioAssemble = null;
+    _radioOffAfterFade = false;
+    final List<String> live = <String>[
+      for (final File f in state.queue) f.path,
+    ];
+    final RadioOffEffect effect = effectOfRadioOff(
+      queue: live,
+      frozenQueue: _radioFreeze?.queue,
+      playing: state.currentTrackPath,
+    );
+    _radioFreeze = null;
+    final bool sameQueue =
+        live.length == effect.queue.length &&
+        listEquals(live, effect.queue);
+    state = state.copyWith(
+      radioOn: false,
+      clearRadioNextPath: true,
+      radioUpcoming: const <String>[],
+      queue: sameQueue ? null : effect.queue.map(File.new).toList(),
+    );
+    if (!_isCrossfading) {
+      final String? head = _queueHeadPath();
+      if (_standbyArmedPath == null ||
+          head == null ||
+          !sameAudioPath(_standbyArmedPath, head)) {
+        _isStandbyArmed = false;
+        _standbyArmedPath = null;
+      }
+      _driftNextPath = head;
+    }
+    unawaited(_saveSnapshot());
   }
 
   Future<void> toggleRadio() async {
     final bool on = !state.radioOn;
-    state = state.copyWith(radioOn: on, clearRadioNextPath: true);
+    if (!on) {
+      _turnRadioOff();
+      return;
+    }
+    _captureRadioFreeze();
+    _radioEpoch++;
     _radioPending = null;
-    _radioPendingFolder = null;
-    _saveSnapshot();
-    if (on) {
-      unawaited(_radioEnsureIndex());
-      if (state.currentTrackPath == null && !_isCrossfading) {
-        _isPrepModeBypass = false;
-        await forceNext();
-      } else {
-        unawaited(_radioNextPath()); // que el "siguiente" salga de inmediato
-      }
+    state = state.copyWith(radioOn: true, clearRadioNextPath: true);
+    _publishRadioUpcoming();
+    unawaited(_saveSnapshot());
+    unawaited(_radioEnsureIndex());
+    unawaited(_radioRearmIfShort());
+    if (state.currentTrackPath == null && !_isCrossfading) {
+      _isPrepModeBypass = false;
+      await forceNext();
+    } else {
+      unawaited(_radioRefill());
     }
   }
 
   void clearRadioGenres() {
-    state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
+    _radioEpoch++;
     _radioPending = null;
-    _radioPendingFolder = null;
-    _saveSnapshot();
-    if (state.radioOn) unawaited(_radioNextPath());
+    if (state.radioOn && !_isCrossfading) {
+      _isStandbyArmed = false;
+      _standbyArmedPath = null;
+      _driftNextPath = null;
+    }
+    state = state.copyWith(radioGenres: <String>{}, clearRadioNextPath: true);
+    _publishRadioUpcoming();
+    unawaited(_saveSnapshot());
+    if (state.radioOn) {
+      unawaited(_radioRearmIfShort());
+      unawaited(_radioRefill());
+    }
   }
 
   void toggleRadioGenre(String genre) {
     if (!kRadioGenreIds.contains(genre)) return;
-    final next = Set<String>.from(state.radioGenres);
+    final Set<String> next = Set<String>.from(state.radioGenres);
     if (!next.remove(genre)) next.add(genre);
-    state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
+    _radioEpoch++;
     _radioPending = null;
-    _radioPendingFolder = null;
-    _saveSnapshot();
-    if (state.radioOn) unawaited(_radioNextPath());
+    if (state.radioOn && !_isCrossfading) {
+      _isStandbyArmed = false;
+      _standbyArmedPath = null;
+      _driftNextPath = null;
+    }
+    state = state.copyWith(radioGenres: next, clearRadioNextPath: true);
+    _publishRadioUpcoming();
+    unawaited(_saveSnapshot());
+    if (state.radioOn) {
+      unawaited(_radioRearmIfShort());
+      unawaited(_radioRefill());
+    }
   }
 
   int _nextQueueIndex() {
-    if (state.queue.isEmpty) return -1;
-    if (ref.read(mixFormulaProvider) != MixFormula.stealthGap ||
-        state.currentTrackPath == null) {
-      return 0;
-    }
-    final int picked = pickStealthNextIndex(
-      remaining: state.queue.map((f) => f.path).toList(),
+    return offAirNextIndex(
+      paths: <String>[for (final File f in state.queue) f.path],
       currentPath: state.currentTrackPath,
-      bpmOf: _extractBpm,
+      stealth: ref.read(mixFormulaProvider) == MixFormula.stealthGap,
+      bpmOf: (String path) => _extractBpm(path),
     );
-    return picked < 0 ? 0 : picked;
+  }
+
+  String? _queueHeadPath() {
+    final int i = _nextQueueIndex();
+    if (i < 0 || i >= state.queue.length) return null;
+    return state.queue[i].path;
   }
 
   Future<void> _triggerCrossfade({
@@ -1524,15 +2665,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }) async {
     if (_isCrossfading || (state.queue.isEmpty && !state.radioOn)) return;
     _isCrossfading = true;
+    _mix.arm();
+    final int armEpoch = _mix.epoch;
 
     // Radio encendida y sin pista elegida a mano: la sigue la radio (la cola
     // queda congelada). Un toque explícito a una fila (queueIndex) sí suena.
     final bool radioPick = state.radioOn && queueIndex == null;
     final String nextTrack;
     if (radioPick) {
-      final String? picked = await _radioNextPath();
+      String? picked;
+      try {
+        picked = await _radioNextPath();
+      } catch (e, st) {
+        debugPrint('🔴 [RADIO] siguiente: $e\n$st');
+      }
+      picked ??= _radioQueueFallback();
       if (picked == null) {
-        _isCrossfading = false;
         await _stopWhenNoNext();
         return;
       }
@@ -1545,7 +2693,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           _nextFromCompletion &&
           _standbyArmedPath != null) {
         final int ai = state.queue.indexWhere(
-          (f) => f.path == _standbyArmedPath,
+          (f) => sameAudioPath(f.path, _standbyArmedPath),
         );
         if (ai >= 0) nextIdx = ai;
       }
@@ -1554,23 +2702,38 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         'NEXT elegido idx=$nextIdx de ${state.queue.length} jit=$forceJit',
       );
       if (nextIdx < 0 || nextIdx >= state.queue.length) {
-        _isCrossfading = false;
         await _stopWhenNoNext();
         return;
       }
       nextTrack = state.queue[nextIdx].path;
     }
-    if (!radioPick &&
+    final bool sameNow =
         state.currentTrackPath != null &&
-        nextTrack == state.currentTrackPath) {
+        sameAudioPath(nextTrack, state.currentTrackPath);
+    final bool samePrev =
+        radioPick &&
+        _radioPrevious != null &&
+        sameAudioPath(nextTrack, _radioPrevious);
+    if (sameNow || samePrev) {
       _djTrace('ABORT mezcla contra la misma pista $nextTrack');
-      _isCrossfading = false;
+      if (radioPick) {
+        _radioPending = null;
+        final String key = radioGenreKey(state.radioGenres);
+        if (_radioMemory().planOf(key) != null) {
+          _saveRadio(
+            _radioMemory().rememberMix(key: key, played: nextTrack),
+            activeKey: key,
+          );
+        }
+      }
+      _releaseMix();
       _isStandbyArmed = false;
       _standbyArmedPath = null;
       return;
     }
     final Player fadingPlayer = _activePlayer;
     final Player incomingPlayer = _standbyPlayer;
+    _incomingQuiet = incomingPlayer;
 
     if (!_isStandbyArmed || forceJit || _standbyArmedPath != nextTrack) {
       try {
@@ -1613,7 +2776,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         );
         _isStandbyArmed = false;
         _standbyArmedPath = null;
-        _isCrossfading = false;
+        _releaseMix();
         return;
       }
     }
@@ -1646,18 +2809,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         final String? outPath = state.currentTrackPath;
         if (outPath != null) {
           final int outPos = fadingPlayer.state.position.inMilliseconds;
-          final res = await Future.wait([
-            rust_dsp.beatGrid(
-              inputPath: outPath,
-              fromMs: BigInt.from(outPos + 1000),
-              spanSecs: 12,
-            ),
-            rust_dsp.beatGrid(
-              inputPath: nextTrack,
-              fromMs: BigInt.from(cueInMs),
-              spanSecs: 12,
-            ),
-          ]).timeout(const Duration(seconds: 5));
+          final rust_dsp.BeatGrid? tagOut = beatFromTag(outPath, outPos + 1000);
+          final rust_dsp.BeatGrid? tagIn = beatFromTag(nextTrack, cueInMs);
+          final List<rust_dsp.BeatGrid> res = tagOut != null && tagIn != null
+              ? <rust_dsp.BeatGrid>[tagOut, tagIn]
+              : await Future.wait([
+                  rust_dsp.beatGrid(
+                    inputPath: outPath,
+                    fromMs: BigInt.from(outPos + 1000),
+                    spanSecs: 12,
+                  ),
+                  rust_dsp.beatGrid(
+                    inputPath: nextTrack,
+                    fromMs: BigInt.from(cueInMs),
+                    spanSecs: 12,
+                  ),
+                ]).timeout(const Duration(seconds: 5));
           if (res[0].ok && res[1].ok) {
             gridOut = res[0];
             gridIn = res[1];
@@ -1669,19 +2836,49 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
 
     _incomingNatBpm = incomingBpm;
-    // BPM con el que SUENA ahora el saliente (puede ir regulado, ver TempoDrift).
+    // En el cruce las dos suenan en el punto medio. Vale también para eco y filtro.
     final double outRate = fadingPlayer.state.rate;
-    if (fadingBpm > 60 && incomingBpm > 60) {
-      final ratio = (fadingBpm * outRate) / incomingBpm;
-      if (ratio >= 0.88 && ratio <= 1.12) {
-        incomingRate = ratio;
-      }
+    final MidpointEntry entry = midpointEntry(fadingBpm, incomingBpm);
+    if (entry.blocked) {
+      _djTrace('MIDPOINT FUERA ${entry.note}');
+    } else {
+      incomingRate = entry.incomingRate;
+    }
+    _mix.setRampBpm(
+      _incomingNatBpm > 0 && incomingRate > 0
+          ? _incomingNatBpm * incomingRate
+          : 0,
+    );
+
+    DnaDecision? dnaPlan;
+    if (!isManualSkip &&
+        nextMode != LiveDjMixMode.longBypass &&
+        ref.read(mixFormulaProvider) == MixFormula.dnaEnergy) {
+      final int lockedOut = state.customMixOutMs;
+      dnaPlan = _dnaPair(
+        outDurationMs: state.duration.inMilliseconds,
+        outPath: state.currentTrackPath,
+        genreMixOutMs: lockedOut > 10000 ? lockedOut : 0,
+        exitLocked: lockedOut > 10000,
+        inDurationMs: trackDur.inMilliseconds,
+        inPath: nextTrack,
+        fallbackCueMs: _phraseFallbackCue(nextTrack, trackDur.inMilliseconds),
+        outRate: outRate,
+      );
     }
 
     try {
       // Punto de arranque del entrante: su golpe más cercano a partir del cue.
+      // Phrase 8, si ya hay perfil, entra en el downbeat de la frase.
       int startMs = cueInMs;
-      if (gridIn != null) {
+      final PhraseTrack? phraseIn = PhraseGridMemory.peek(nextTrack);
+      final MixFormula downbeatFormula = ref.read(mixFormulaProvider);
+      final bool onPhraseDownbeat =
+          (downbeatFormula == MixFormula.phraseGrid ||
+              downbeatFormula == MixFormula.dnaEnergy) &&
+          phraseIn != null &&
+          phraseIn.hitsDownbeat(cueInMs);
+      if (gridIn != null && !onPhraseDownbeat) {
         final double pIn = 60000.0 / gridIn.bpm;
         final double ki = ((cueInMs - gridIn.beatMs) / pIn).ceilToDouble();
         startMs = (gridIn.beatMs + ki * pIn).round();
@@ -1692,36 +2889,62 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       }
       // Filtros y corrección de tono ANTES de sonar: cambiarlos con el deck ya
       // andando reinicia la cadena de audio y el tempo tarda 2-3 s en asentarse.
-      _prepareIncomingDeck(incomingPlayer, nextMode);
+      _prepareIncomingDeck(
+        incomingPlayer,
+        nextMode,
+        afOverride: dnaPlan == null || dnaPlan.legacy
+            ? null
+            : _dnaIncomingAf(dnaPlan, incomingPlayer),
+      );
       await incomingPlayer.setRate(incomingRate);
       await incomingPlayer.setVolume(0.0);
-      if (gridOut != null && gridIn != null) {
-        // Espera al próximo golpe del saliente (≤ 1 compás de pulso) y arranca ahí.
-        final Duration fresh = await fadingPlayer.stream.position.first.timeout(
-          const Duration(seconds: 1),
-        );
-        final Stopwatch sw = Stopwatch()..start();
-        final double pOut = 60000.0 / gridOut.bpm;
-        final double nowOut = fresh.inMilliseconds.toDouble();
-        final double kOut = ((nowOut + 60 - gridOut.beatMs) / pOut)
-            .ceilToDouble();
-        final double nextBeat = gridOut.beatMs + kOut * pOut;
-        // 20 ms: latencia de arranque del deck entrante.
-        // El saliente avanza `outRate` ms de pista por cada ms real.
-        final int waitMs = ((nextBeat - nowOut) / outRate).round() - 20;
-        final int left = waitMs - sw.elapsedMilliseconds;
-        if (left > 0 && left < 1500) {
-          await Future.delayed(Duration(milliseconds: left));
-        }
+      if (_mix.paused) {
+        try {
+          await incomingPlayer.pause();
+        } catch (_) {}
       }
-      await incomingPlayer.play();
+      if (!await holdIncomingBeforePlay(armEpoch)) {
+        _incomingQuiet = null;
+        _releaseMix();
+        return;
+      }
+      _incomingQuiet = null;
+      if (gridOut != null &&
+          gridIn != null &&
+          gridOut.bpm > 0 &&
+          gridIn.bpm > 0 &&
+          incomingRate > 0) {
+        final double liveOut = fadingPlayer.state.rate;
+        _phaseLock = await engageBeatLock(
+          outgoing: fadingPlayer,
+          incoming: incomingPlayer,
+          outBeatMs: gridOut.beatMs,
+          outBpm: gridOut.bpm,
+          outRate: liveOut > 0 ? liveOut : outRate,
+          inBeatMs: gridIn.beatMs,
+          inBpm: gridIn.bpm,
+          cueMs: startMs.toDouble(),
+          inRate: incomingRate,
+          rampRate: incomingRate,
+          incomingOnBeat: true,
+          hold: _mix,
+        );
+      } else {
+        await incomingPlayer.play();
+      }
+      if (!_mix.armed) {
+        await _dropPhase();
+        return;
+      }
     } catch (e) {
-      _isCrossfading = false;
+      await _dropPhase();
+      _releaseMix();
       return;
     }
 
     _usePlayerA = !_usePlayerA;
     _isStandbyArmed = false;
+    _standbyArmedPath = null;
     _attachListeners(_activePlayer);
 
     // Se quita por ruta (no por índice): la cola pudo cambiar durante la
@@ -1733,8 +2956,40 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     // Empieza la última canción de la cola: la Radio se enciende sola.
     final bool autoRadio = !radioPick && !state.radioOn && newQueue.isEmpty;
-    if (autoRadio) unawaited(_radioEnsureIndex());
+    if (autoRadio) {
+      unawaited(_radioEnsureIndex());
+      _radioFreeze ??= LiveQueueFreeze(
+        queue: newQueue.map((File f) => f.path).toList(),
+        current: nextTrack,
+        positionMs: cueInMs,
+        wasPlaying: true,
+      );
+    }
     if (radioPick) _radioConsumed(nextTrack);
+
+    final String? fadingPath = state.currentTrackPath;
+    final int fadingMixOut = state.customMixOutMs;
+    final int fadingDurMs = state.duration.inMilliseconds;
+    int? phraseFadeOverride;
+    if (!isManualSkip &&
+        nextMode != LiveDjMixMode.longBypass &&
+        ref.read(mixFormulaProvider) == MixFormula.phraseGrid) {
+      phraseFadeOverride = phraseGridFadeMs(
+        bpm: phraseSoundingBpm(
+          incomingBpm: incomingBpm,
+          incomingRate: incomingRate,
+        ),
+        instrumental: phraseCrossIsInstrumental(
+          outgoing: PhraseGridMemory.peek(fadingPath),
+          incoming: PhraseGridMemory.peek(nextTrack),
+          outMs: fadingMixOut,
+          inMs: cueInMs,
+        ),
+        durationMs: trackDur.inMilliseconds,
+      );
+    }
+    _publishedFadeMs = phraseFadeOverride ??
+        (dnaPlan != null && !dnaPlan.legacy ? dnaPlan.fadeMs : 0);
 
     state = state.copyWith(
       radioOn: autoRadio ? true : null,
@@ -1748,6 +3003,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     );
 
     _saveSnapshot();
+    _schedulePhraseNeighbors();
     // Con la Radio encendida el siguiente se elige apenas empieza esta pista.
     if (state.radioOn) unawaited(_radioNextPath());
 
@@ -1760,13 +3016,25 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       manualMixDurationMs: isManualSkip
           ? _planManualMixDurationMs(nextTrack, trackDur.inMilliseconds)
           : null,
+      phraseFadeOverride: phraseFadeOverride,
+      dnaKind: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.kind,
+      dnaFadeMs: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.fadeMs,
+      dnaBassSwap: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.bassSwap,
+      dnaEchoDelayMs: dnaPlan?.echoDelayMs ?? 0,
+      dnaEchoFeedback: dnaPlan?.echoFeedback ?? 0,
+      outgoingDurationMs: fadingDurMs,
+      outgoingMixOutMs: fadingMixOut,
     );
   }
 
   /// Deja el deck entrante listo ANTES de `play()`: corrección de tono y cadena
   /// `af` (con corte de graves en modo activeSync). Mismos valores que antes
   /// ponía el motor de mezcla ya con el deck sonando.
-  void _prepareIncomingDeck(Player incoming, LiveDjMixMode mode) {
+  void _prepareIncomingDeck(
+    Player incoming,
+    LiveDjMixMode mode, {
+    String? afOverride,
+  }) {
     try {
       final eqN = ref.read(liveDjEqualizerProvider.notifier);
       final String base = eqN.filterFor(incoming);
@@ -1777,9 +3045,23 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       platform?.setProperty('audio-pitch-correction', 'yes');
       platform?.setProperty(
         'af',
-        mode == LiveDjMixMode.activeSync ? lowCut : base,
+        afOverride ?? (mode == LiveDjMixMode.activeSync ? lowCut : base),
       );
     } catch (_) {}
+  }
+
+  String _dnaIncomingAf(DnaDecision plan, Player incoming) {
+    final String base = ref
+        .read(liveDjEqualizerProvider.notifier)
+        .filterFor(incoming);
+    if (plan.kind == DnaKind.longBlend) {
+      return AfCaps.sanitize(
+        [base, _bassKillFilter, dnaHighShelfCut]
+            .where((String s) => s.isNotEmpty)
+            .join(','),
+      );
+    }
+    return AfCaps.sanitize(base);
   }
 
   Future<void> _executeMixEngine({
@@ -1789,6 +3071,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     double incomingRate = 1.0,
     bool isManualSkip = false,
     int? manualMixDurationMs,
+    int? phraseFadeOverride,
+    DnaKind? dnaKind,
+    int? dnaFadeMs,
+    bool? dnaBassSwap,
+    int dnaEchoDelayMs = 0,
+    double dnaEchoFeedback = 0,
+    int outgoingDurationMs = 0,
+    int outgoingMixOutMs = 0,
   }) async {
     final eqN = ref.read(liveDjEqualizerProvider.notifier);
     String inBase() => eqN.filterFor(incomingPlayer);
@@ -1796,7 +3086,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final platformOut = fadingPlayer.platform as dynamic;
     final platformIn = incomingPlayer.platform as dynamic;
 
-    final bool useBassSwap = mixProfile == LiveDjMixMode.activeSync;
+    final bool useBassSwap =
+        mixProfile == LiveDjMixMode.activeSync && (dnaBassSwap ?? true);
+    final String? dnaOutExtra = dnaKind == DnaKind.longBlend
+        ? dnaHighShelfCut
+        : (dnaKind == DnaKind.filterSweep
+              ? dnaHighpassMild
+              : (dnaKind == DnaKind.echoOut && AfCaps.has('aecho')
+                    ? dnaEchoChain(dnaEchoDelayMs, dnaEchoFeedback)
+                    : null));
+    final String? dnaOutMid = dnaKind == DnaKind.filterSweep
+        ? dnaHighpassHard
+        : null;
     final String lowCutIn = AfCaps.sanitize(
       [inBase(), _bassKillFilter].where((s) => s.isNotEmpty).join(','),
     );
@@ -1808,38 +3109,82 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     try {
       // El deck entrante ya quedó preparado antes de sonar (_prepareIncomingDeck).
       platformOut?.setProperty('audio-pitch-correction', 'yes');
-      platformOut?.setProperty('af', outBase());
+      platformOut?.setProperty(
+        'af',
+        dnaOutExtra == null
+            ? outBase()
+            : AfCaps.sanitize(
+                [outBase(), dnaOutExtra].where((String s) => s.isNotEmpty).join(','),
+              ),
+      );
 
       await incomingPlayer.setVolume(0.0);
 
-      final fadeStopwatch = Stopwatch()..start();
+      final bool phraseNow =
+          ref.read(mixFormulaProvider) == MixFormula.phraseGrid;
+      final bool stealthNow =
+          ref.read(mixFormulaProvider) == MixFormula.stealthGap;
       final fadeOutDurationMs = isManualSkip
           ? (manualMixDurationMs ?? 12000)
           : (mixProfile == LiveDjMixMode.longBypass
                 ? 4000
-                : (ref.read(mixFormulaProvider) == MixFormula.phraseGrid ||
-                          ref.read(mixFormulaProvider) == MixFormula.stealthGap
-                      ? phraseFadeMs(
-                          incomingBpm: _extractBpm(state.currentTrackPath),
-                          incomingDurationMs: state.duration.inMilliseconds,
-                        )
-                      : 18000));
+                : (dnaFadeMs ??
+                      (phraseNow && phraseFadeOverride != null
+                          ? phraseFadeOverride
+                          : (phraseNow || stealthNow
+                                ? phraseFadeMs(
+                                    incomingBpm: _extractBpm(
+                                      state.currentTrackPath,
+                                    ),
+                                    incomingDurationMs:
+                                        state.duration.inMilliseconds,
+                                  )
+                                : 18000))));
+      final FittedFade fitted = fitMixFade(
+        exactDurationMs: outgoingDurationMs,
+        mixOutMs: outgoingMixOutMs,
+        wantedFadeMs: fadeOutDurationMs,
+      );
+      if (fitted.shortened) _djTrace(fitted.note);
+      final int fadeMs = fitted.fadeMs;
+      final int mixEpoch = _mix.epoch;
+      final MixRunClock fadeClock = _mix.beginFade(fadeMs);
 
-      while (fadeStopwatch.elapsedMilliseconds < fadeOutDurationMs) {
-        final progress = (fadeStopwatch.elapsedMilliseconds / fadeOutDurationMs)
-            .clamp(0.0, 1.0);
+      while (fadeClock.elapsedMilliseconds < fadeMs && _mix.epoch == mixEpoch) {
+        if (_mix.paused) {
+          await _mix.untilRunning();
+          continue;
+        }
+        final progress = (fadeClock.elapsedMilliseconds / fadeMs).clamp(
+          0.0,
+          1.0,
+        );
 
         // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final rateIn = (progress * 1.8).clamp(0.0, 1.0);
-        final rateOut = ((1.0 - progress) * 1.8).clamp(0.0, 1.0);
-
-        final smoothRateIn = pow(rateIn, 1.2).toDouble();
-        final smoothRateOut = pow(rateOut, 1.2).toDouble();
+        final smoothRateIn = dawnCrossfadeGain(progress);
+        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
 
         if (useBassSwap && !bassSwapped && progress >= 0.5) {
           bassSwapped = true;
-          platformOut?.setProperty('af', lowCutOut);
+          platformOut?.setProperty(
+            'af',
+            dnaOutExtra == null
+                ? lowCutOut
+                : AfCaps.sanitize(
+                    [lowCutOut, dnaOutExtra]
+                        .where((String s) => s.isNotEmpty)
+                        .join(','),
+                  ),
+          );
           platformIn?.setProperty('af', inBase());
+        } else if (dnaOutMid != null && !bassSwapped && progress >= 0.5) {
+          bassSwapped = true;
+          platformOut?.setProperty(
+            'af',
+            AfCaps.sanitize(
+              [outBase(), dnaOutMid].where((String s) => s.isNotEmpty).join(','),
+            ),
+          );
         }
 
         await incomingPlayer.setVolume(
@@ -1847,20 +3192,19 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         );
         await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
 
-        await Future.delayed(const Duration(milliseconds: 32));
+        await _mix.slice(32, fadeClock);
       }
     } catch (e) {
       debugPrint("🔴 [ERROR DSP]: $e");
     } finally {
-      // La diferencia entre el BPM de entrada y el real se reparte en 5
-      // (10 %–50 %). Al 50 % la canción va en su BPM. Vale para Stealth.
+      await _dropPhase();
+      // B arrancó en el punto medio. Los pasos de vuelta los aplica TempoDrift.
       _drift.begin(_incomingNatBpm, incomingRate);
-      final bool keepRate = _drift.active && incomingRate != 1.0;
-      final bool willGlideRate = incomingRate != 1.0 && !keepRate;
+      final String? blocked = _drift.takeBlockedReport();
+      if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
 
       try {
         await incomingPlayer.setVolume(100.0);
-        if (!willGlideRate && !keepRate) await incomingPlayer.setRate(1.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
         await fadingPlayer.setVolume(0.0);
@@ -1869,27 +3213,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       } catch (_) {}
       // El deck saliente quedó vacío: ningún armado previo sigue siendo válido.
       _standbyArmedPath = null;
+      _driftNextPath = null;
 
-      if (willGlideRate) {
-        try {
-          final pitchStopwatch = Stopwatch()..start();
-          final double rateDiff = 1.0 - incomingRate;
-          while (pitchStopwatch.elapsedMilliseconds < 3000) {
-            final double p = (pitchStopwatch.elapsedMilliseconds / 3000).clamp(
-              0.0,
-              1.0,
-            );
-            final double curve = sin(p * (pi / 2));
-            await incomingPlayer.setRate(incomingRate + (rateDiff * curve));
-            await Future.delayed(const Duration(milliseconds: 50));
-          }
-        } catch (_) {}
-        try {
-          await incomingPlayer.setRate(1.0);
-        } catch (_) {}
+      _releaseMix();
+      if (_radioOffAfterFade) {
+        _radioOffAfterFade = false;
+        if (state.radioOn || _radioFreeze != null) _turnRadioOff();
       }
-
-      _isCrossfading = false;
+      // Terminada la mezcla: se reponen las próximas en segundo plano.
+      if (state.radioOn) unawaited(_radioRefill());
     }
   }
 
@@ -1898,7 +3230,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (!force && (state.isPlaying || _isCrossfading)) return;
     _parking = true;
     try {
-      if (force) _isCrossfading = false;
+      if (force) _releaseMix();
       _sessionWasPlaying = state.isPlaying;
       if (state.position.inMilliseconds > 0) {
         _sessionPositionMs = state.position.inMilliseconds;
@@ -1929,3 +3261,48 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 final liveDjProvider = NotifierProvider<LiveDjNotifier, LiveDjState>(
   LiveDjNotifier.new,
 );
+
+/// Lo pesado del Shuffle, fuera del hilo de la interfaz: migrar el JSON de
+/// la carpeta, BPM guardados, parejas/ola, el orden armónico y la memoria
+/// de Shuffle. Devuelve el orden y los BPM leídos; quien llama olvida sus
+/// cachés de esas carpetas y anota los BPM.
+Map<String, Object?> shuffleOffUi(Map<String, Object?> msg) {
+  final List<String> paths = <String>[
+    for (final Object? p in msg['paths'] as List<Object?>) p.toString(),
+  ];
+  final String sessionPath = msg['sessionPath'] as String;
+  final String? playing = msg['playing'] as String?;
+  final Map<Object?, Object?> known = msg['known'] as Map<Object?, Object?>;
+  for (final MapEntry<Object?, Object?> e in known.entries) {
+    TrackTags.rememberBpm(e.key.toString(), (e.value as num).toDouble());
+  }
+  GatomixStore.migrate(File(sessionPath).parent.path);
+  preloadQueueBpmSync(paths);
+  final ModeWave wave = loadModeWave(sessionPath, <String>[...paths, ?playing]);
+  final HarmonicOrder order = buildHarmonicShuffle(
+    paths,
+    knownBpm,
+    keyOf: camelotFromPath,
+    usedPairs: wave.pairs,
+    recentAge: wave.age,
+    playing: playing,
+    continueFrom: playing,
+    startWaveUp: wave.waveUp,
+    startInWave: wave.inWave,
+  );
+  GatomixStore.commitShuffleMemory(order.tracks, anchor: playing);
+  return <String, Object?>{
+    'tracks': order.tracks,
+    'waveUp': order.waveUp,
+    'inWave': order.inWave,
+    'bpm': <String, double>{
+      for (final String p in paths)
+        if (knownBpm(p) > 0) p: knownBpm(p),
+    },
+  };
+}
+
+List<String> _existingPaths(List<String> paths) => <String>[
+  for (final String p in paths)
+    if (File(p).existsSync()) p,
+];

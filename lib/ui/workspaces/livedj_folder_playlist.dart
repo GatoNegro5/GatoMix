@@ -1,12 +1,16 @@
 import 'dart:io';
+
 import '../widgets/approx_lyric_icon.dart';
+
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/id3_names.dart';
+import '../../core/livedj_next.dart';
 import '../../core/net/artist_info.dart';
+import '../../core/queue_bpm.dart';
 import '../../core/track_file_name.dart';
 import '../../providers/livedj_provider.dart';
 import 'livedj_sort_button.dart';
@@ -49,8 +53,7 @@ class _PlayerPane extends ConsumerStatefulWidget {
 class _PlayerPaneState extends ConsumerState<_PlayerPane>
     with TickerProviderStateMixin {
   double? _dragPosition;
-  String? _stealthNextName;
-  String? _stealthCacheKey;
+  final LiveDjNextLabel _nextLabel = LiveDjNextLabel();
   late final AnimationController _relevo;
   late final AnimationController _beat;
   String? _handoffFrom;
@@ -92,13 +95,17 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
     final LiveDjState live = ref.read(liveDjProvider);
     final MixFormula formula = ref.read(mixFormulaProvider);
     final double bpm = relevoBpm(next);
-    final int ms = relevoDurationMs(
+    int ms = relevoDurationMs(
       derive: true,
       mode: live.currentMixMode,
       formula: formula,
       bpm: bpm,
       durationMs: live.duration.inMilliseconds,
     );
+    if (formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy) {
+      final int published = ref.read(liveDjProvider.notifier).publishedFadeMs;
+      if (published > 0) ms = published;
+    }
     setState(() {
       _handoffFrom = prev;
       _handoffTo = next;
@@ -113,51 +120,6 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
       _relevo.duration = Duration(milliseconds: ms);
       _relevo.forward(from: 0);
     });
-  }
-
-  String? _nextName(LiveDjState state, MixFormula mixFormula) {
-    if (state.radioOn) {
-      final rn = state.radioNextPath;
-      return rn == null
-          ? 'RADIO ▸ eligiendo…'
-          : 'RADIO ▸ ${rn.replaceAll('\\', '/').split('/').last}';
-    }
-    if (state.queue.isEmpty) {
-      _stealthCacheKey = null;
-      return null;
-    }
-    if (mixFormula == MixFormula.stealthGap && state.currentTrackPath != null) {
-      final key =
-          '${state.currentTrackPath}|${state.queue.map((f) => f.path).join('|')}';
-      if (_stealthCacheKey != key) {
-        _stealthCacheKey = key;
-        final i = pickStealthNextIndex(
-          remaining: state.queue.map((f) => f.path).toList(),
-          currentPath: state.currentTrackPath,
-          bpmOf: (p) {
-            final fileName = p.replaceAll('\\', '/').split('/').last;
-            final match = RegExp(
-              r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-              caseSensitive: false,
-            ).firstMatch(fileName);
-            return match != null ? double.parse(match.group(1)!) : 0.0;
-          },
-        );
-        _stealthNextName =
-            (i >= 0 ? state.queue[i].path : state.queue.first.path)
-                .replaceAll('\\', '/')
-                .split('/')
-                .last;
-      }
-      return _stealthNextName;
-    }
-    _stealthCacheKey = null;
-    if (state.currentTrackPath == null) {
-      return state.queue.length > 1
-          ? state.queue[1].path.replaceAll('\\', '/').split('/').last
-          : null;
-    }
-    return state.queue.first.path.replaceAll('\\', '/').split('/').last;
   }
 
   @override
@@ -175,86 +137,49 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
       }
       _beginRelevo(prev, next);
     });
-    final state = ref.watch(liveDjProvider);
-    final mixFormula = ref.watch(mixFormulaProvider);
-    final track = state.currentTrackPath;
+    // El reloj no reconstruye la carátula: solo estos campos, y la posición
+    // la mira `_PlayClock`.
+    final String? track = ref.watch(
+      liveDjProvider.select((s) => s.currentTrackPath),
+    );
+    final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
+    final bool radioOn = ref.watch(liveDjProvider.select((s) => s.radioOn));
+    final String? radioNext = ref.watch(
+      liveDjProvider.select((s) => s.radioNextPath),
+    );
+    final LiveDjMixStrategy strategy = ref.watch(
+      liveDjProvider.select((s) => s.mixStrategy),
+    );
+    final bool playing = ref.watch(liveDjProvider.select((s) => s.isPlaying));
+    final Duration dur = ref.watch(liveDjProvider.select((s) => s.duration));
+    final int mixOut = ref.watch(
+      liveDjProvider.select((s) => s.customMixOutMs),
+    );
+    final MixFormula mixFormula = ref.watch(mixFormulaProvider);
     final wide = MediaQuery.sizeOf(context).width >= 800;
-    final pos = state.position;
-    final dur = state.duration;
-    final nextName = _nextName(state, mixFormula);
-    final isShuffle = state.mixStrategy == LiveDjMixStrategy.random;
-    final canToggle = track != null || state.queue.isNotEmpty;
-    final canSkip = state.queue.isNotEmpty || state.radioOn;
+    final String? nextName = _nextLabel.text(
+      radioOn: radioOn,
+      radioNextPath: radioNext,
+      queuePaths: <String>[for (final File f in queue) f.path],
+      currentPath: track,
+      stealth: mixFormula == MixFormula.stealthGap,
+      bpmOf: knownBpm,
+    );
+    final isShuffle = strategy == LiveDjMixStrategy.random;
+    final canToggle = track != null || queue.isNotEmpty;
+    final canSkip = queue.isNotEmpty || radioOn;
 
     final Widget controls = Padding(
       padding: EdgeInsets.fromLTRB(wide ? 24 : 12, 0, wide ? 16 : 10, 0),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Text(
-                "${pos.inMinutes.toString().padLeft(2, '0')}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
-                style: TextStyle(
-                  color: GatoMixTheme.cyanAccent,
-                  fontFamily: 'Consolas',
-                  fontSize: wide ? 16 : 13,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                "-${(dur - pos).inMinutes.toString().padLeft(2, '0')}:${((dur - pos).inSeconds % 60).toString().padLeft(2, '0')}",
-                style: TextStyle(
-                  color: Colors.white54,
-                  fontFamily: 'Consolas',
-                  fontSize: wide ? 14 : 12,
-                ),
-              ),
-            ],
-          ),
-          SizedBox(
-            height: 28,
-            child: SliderTheme(
-              data: const SliderThemeData(
-                trackHeight: 3,
-                thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
-                overlayShape: RoundSliderOverlayShape(overlayRadius: 12),
-                activeTrackColor: GatoMixTheme.syncActive,
-                inactiveTrackColor: Colors.white10,
-                thumbColor: Colors.white,
-              ),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Slider(
-                    value:
-                        _dragPosition ??
-                        (dur.inMilliseconds > 0
-                            ? pos.inMilliseconds.toDouble().clamp(
-                                0.0,
-                                dur.inMilliseconds.toDouble(),
-                              )
-                            : 0.0),
-                    min: 0.0,
-                    max: dur.inMilliseconds > 0
-                        ? dur.inMilliseconds.toDouble()
-                        : 1.0,
-                    onChangeStart: (v) => setState(() => _dragPosition = v),
-                    onChanged: (v) => setState(() => _dragPosition = v),
-                    onChangeEnd: (v) {
-                      if (dur.inMilliseconds > 0) {
-                        ref
-                            .read(liveDjProvider.notifier)
-                            .seek(Duration(milliseconds: v.toInt()));
-                      }
-                      setState(() => _dragPosition = null);
-                    },
-                  ),
-                  _mixMarker(12, state.customMixOutMs, dur.inMilliseconds),
-                ],
-              ),
-            ),
+          _PlayClock(
+            wide: wide,
+            dur: dur,
+            mixOutMs: mixOut,
+            dragPosition: _dragPosition,
+            onDrag: (double? v) => setState(() => _dragPosition = v),
           ),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -279,12 +204,9 @@ class _PlayerPaneState extends ConsumerState<_PlayerPane>
                     ? () => ref.read(liveDjProvider.notifier).togglePlayPause()
                     : null,
                 icon: Icon(
-                  state.isPlaying
-                      ? Icons.pause_circle_filled
-                      : Icons.play_circle_fill,
-                  color: const Color(
-                    0xFF39FF14,
-                  ).withValues(alpha: canToggle ? 1 : 0.28),
+                  playing ? Icons.pause_circle_filled : Icons.play_circle_fill,
+                  color: const Color(0xFF39FF14)
+                      .withValues(alpha: canToggle ? 1 : 0.28),
                   size: wide ? 46 : 40,
                 ),
               ),
@@ -516,7 +438,16 @@ class _QueuePane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final bool radioOn = ref.watch(liveDjProvider.select((s) => s.radioOn));
+    final List<String> upcoming = ref.watch(
+      liveDjProvider.select((s) => s.radioUpcoming),
+    );
     final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
+    final List<String> paths = liveDjSidePaths(
+      radioOn: radioOn,
+      queuePaths: <String>[for (final File f in queue) f.path],
+      radioUpcoming: upcoming,
+    );
     return ColoredBox(
       color: GatoMixTheme.bgDark,
       child: Column(
@@ -527,7 +458,7 @@ class _QueuePane extends ConsumerWidget {
             alignment: Alignment.centerLeft,
             color: GatoMixTheme.bgPanel,
             child: Text(
-              'COLA (${queue.length})',
+              'COLA (${paths.length})',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -539,11 +470,11 @@ class _QueuePane extends ConsumerWidget {
             ),
           ),
           Expanded(
-            child: queue.isEmpty
-                ? const Center(
+            child: paths.isEmpty
+                ? Center(
                     child: Text(
-                      'COLA VACÍA',
-                      style: TextStyle(
+                      radioOn ? 'RADIO ▸ eligiendo…' : 'COLA VACÍA',
+                      style: const TextStyle(
                         color: GatoMixTheme.textHidden,
                         fontSize: 12,
                       ),
@@ -551,10 +482,9 @@ class _QueuePane extends ConsumerWidget {
                   )
                 : ListView.builder(
                     physics: const BouncingScrollPhysics(),
-                    itemCount: queue.length,
+                    itemCount: paths.length,
                     itemBuilder: (context, index) {
-                      final File file = queue[index];
-                      return _QueueLine(path: file.path);
+                      return _QueueLine(path: paths[index]);
                     },
                   ),
           ),
@@ -717,7 +647,12 @@ class _RadioChips extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(liveDjProvider);
+    final Set<String> genres = ref.watch(
+      liveDjProvider.select((s) => s.radioGenres),
+    );
+    final Set<String> available = ref.watch(
+      liveDjProvider.select((s) => s.radioGenresAvailable),
+    );
     Widget chip(
       String label,
       bool selected,
@@ -764,16 +699,108 @@ class _RadioChips extends ConsumerWidget {
       child: ListView(
         scrollDirection: Axis.horizontal,
         children: [
-          chip('Todo', state.radioGenres.isEmpty, notifier.clearRadioGenres),
+          chip('Todo', genres.isEmpty, notifier.clearRadioGenres),
           for (final id in kRadioGenreIds)
             chip(
               kRadioGenreLabels[id]!,
-              state.radioGenres.contains(id),
+              genres.contains(id),
               () => notifier.toggleRadioGenre(id),
-              enabled: state.radioGenresAvailable.contains(id),
+              enabled: available.contains(id),
             ),
         ],
       ),
+    );
+  }
+}
+
+/// Reloj y barra. Mira solo la posición: la carátula no se reconstruye
+/// en cada tick.
+class _PlayClock extends ConsumerWidget {
+  final bool wide;
+  final Duration dur;
+  final int mixOutMs;
+  final double? dragPosition;
+  final ValueChanged<double?> onDrag;
+
+  const _PlayClock({
+    required this.wide,
+    required this.dur,
+    required this.mixOutMs,
+    required this.dragPosition,
+    required this.onDrag,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final Duration pos = ref.watch(liveDjProvider.select((s) => s.position));
+    final int durMs = dur.inMilliseconds;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            Text(
+              "${pos.inMinutes.toString().padLeft(2, '0')}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
+              style: TextStyle(
+                color: GatoMixTheme.cyanAccent,
+                fontFamily: 'Consolas',
+                fontSize: wide ? 16 : 13,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              "-${(dur - pos).inMinutes.toString().padLeft(2, '0')}:${((dur - pos).inSeconds % 60).toString().padLeft(2, '0')}",
+              style: TextStyle(
+                color: Colors.white54,
+                fontFamily: 'Consolas',
+                fontSize: wide ? 14 : 12,
+              ),
+            ),
+          ],
+        ),
+        SizedBox(
+          height: 28,
+          child: SliderTheme(
+            data: const SliderThemeData(
+              trackHeight: 3,
+              thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: RoundSliderOverlayShape(overlayRadius: 12),
+              activeTrackColor: GatoMixTheme.syncActive,
+              inactiveTrackColor: Colors.white10,
+              thumbColor: Colors.white,
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Slider(
+                  value:
+                      dragPosition ??
+                      (durMs > 0
+                          ? pos.inMilliseconds.toDouble().clamp(
+                              0.0,
+                              durMs.toDouble(),
+                            )
+                          : 0.0),
+                  min: 0.0,
+                  max: durMs > 0 ? durMs.toDouble() : 1.0,
+                  onChangeStart: onDrag,
+                  onChanged: onDrag,
+                  onChangeEnd: (double v) {
+                    if (durMs > 0) {
+                      ref
+                          .read(liveDjProvider.notifier)
+                          .seek(Duration(milliseconds: v.toInt()));
+                    }
+                    onDrag(null);
+                  },
+                ),
+                _mixMarker(12, mixOutMs, durMs),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -801,7 +828,16 @@ class _NowCover extends StatelessWidget {
                 builder: (context, snap) {
                   final photo = snap.data?.photoPath;
                   if (photo != null && File(photo).existsSync()) {
-                    return Image.file(File(photo), fit: BoxFit.cover);
+                    final int px =
+                        (side * MediaQuery.devicePixelRatioOf(context))
+                            .round()
+                            .clamp(64, 1600);
+                    return Image.file(
+                      File(photo),
+                      fit: BoxFit.cover,
+                      cacheWidth: px,
+                      cacheHeight: px,
+                    );
                   }
                   return fallback;
                 },

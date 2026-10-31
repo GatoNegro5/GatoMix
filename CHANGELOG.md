@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 3.0.31+50 — BPM por la recta de los golpes y DNA entre 60 % y 80 %
+
+- **BPM.** El peine y la autocorrelación solo eligen la métrica (×2, ×1/2, ×4/3, ×3/4) según la envolvente de onsets (hop 256). El número es 60 dividido por la pendiente de la recta de mínimos cuadrados de los golpes de Ellis, afinados con parábola, sobre la canción. TBPM queda con 2 decimales y punto (`146.67`). `GMX_GRID` guarda ancla y periodo, y tramos si el residuo pasa de 60 ms o el tempo se mueve más de 0,02 BPM. La etiqueta previa no sesga la medida. `17312`, `09548` y `146,70` se leen como 173,12, 95,48 y 146,70. `GMX_ANALYSIS=3031`: si el audio ya está masterizado y la versión es vieja, solo se reescriben BPM, rejilla y duración. La versión actual se salta. Un archivo nuevo sigue el masterizado completo.
+- **DNA.** La salida se busca entre el 60 % y el 80 % de la duración efectiva. Orden: outro, hueco sin voz, golpe de frase del género. El fundido termina antes del final. Phrase 8 y Stealth no cambian. Log: `DNA mixOut=<ms> (<%>) fuente=outro|hueco|frase fadeFin=<ms>`.
+- **Barrido.** «Revisar BPM» re-mide la biblioteca tocando solo etiquetas y anota `BPM_FIX archivo viejo->nuevo`.
+- API Dart–Rust: no cambia.
+- Igual en Windows, Android, macOS e iPhone: el medidor está en Rust y lo usan Masterizar, Descargas, LAB, Live DJ y Automix. El iPhone entra por `lib/djiphone/`.
+
+## 3.0.30+49 — empate de golpe en lazo cerrado y pausa total en la mezcla
+
+- **Fase.** Live DJ (DNA, Phrase 8 y Stealth) y Automix leen la posición oída (`audio-pts`, si no `time-pos`, si no el último dato más el tiempo medido). La espera al golpe resta la latencia de arranque medida en ese dispositivo (promedio móvil). Sin medida todavía, usa el retardo de salida de libmpv (`time-pos − audio-pts`) o cero, y el lazo corrige. Durante la mezcla se mide el desfase de los dos decks y, si pasa de 5 ms, la entrante se mueve como mucho un 1 % encima del rate de la rampa, sin sustituirlo. La bitácora anota `PHASE inicial=… final=… latencia=… pasos=…`.
+- **Pausa.** En medio de la mezcla, pausa congela los dos decks, el fundido, la rampa de BPM, el lazo de fase y el resto de relojes de la mezcla en ese instante. Play sigue desde ese punto: mismos volúmenes y rates, con el tiempo de pausa fuera de los relojes. No abre otra mezcla ni salta de canción. La bitácora anota `PAUSA en mezcla t=… fade=… rampa=…` y `REANUDA …`. Fuera de la mezcla, la pausa, la reanudación tras una llamada, la Radio, el seek y el salto manual siguen como estaban.
+- API Dart–Rust: no cambia.
+- Igual en Windows, Android, macOS e iPhone: el código vive en `lib/providers` y `lib/core/audio`, y el iPhone entra por `lib/djiphone/`.
+
+## 3.0.29+48 — rampa de BPM al punto medio, duración real, lista de Radio
+
+- **Tempo.** Live DJ (DNA, incluido eco y filtro, Phrase 8 y Stealth) y Automix igualan en el punto medio: la saliente llega ahí antes del cruce y la entrante arranca ahí, en fase, y vuelve a su BPM después. Si el rate queda fuera de 0.88–1.12 se anota en la bitácora y no se recorta. `setRate` no cambia el volumen; el cruce sigue con la curva `pow`.
+- **Duración.** La barra, la línea roja y el disparo usan solo `exact_duration_ms`. Se quitó la red que mezclaba a 25 s del final. Si la pista termina sin mezcla, suena la precargada y queda en `gatomix_livedj_trace.txt`. Masterizar reescribe el TLEN con la duración medida. Si difiere más de 10 s, marca `GMX_LEN_MISMATCH` y el resumen lista «posible audio pegado / versión distinta». No recorta el audio. «Revisar duraciones» recorre la carpeta, respalda en `.gatomix_original/` y solo escribe la etiqueta.
+- **Radio.** Al encender «Todo» el panel muestra la lista completa. El armado ya no se descarta a los 90 s ni por un plan que no cubre la biblioteca. La bitácora anota inicio, fin y fallo con tiempo y tamaño del pool. Apagar Radio no corta el audio.
+- API Dart–Rust: nueva `rewrite_tlen` (solo TLEN). El resto de la API no cambia.
+- Igual en Windows, Android, macOS e iPhone: el código vive en `lib/providers`, `lib/core` y Rust, y el iPhone entra por `lib/djiphone/`.
+
+
+
 ![GatoMix](assets/branding/gatomix_logo.png)
 
 ## 1.0.14+28 — LOG CAMBIO (Masterizar: ninguna canción cuelga un lote)

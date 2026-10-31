@@ -1,10 +1,16 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../core/exact_mix.dart';
+import '../core/gatomix_store.dart';
+import '../core/master_skip.dart';
+import '../core/queue_bpm.dart';
+import '../core/stored_grid.dart';
+import '../services/track_tags.dart';
+import '../ui/workspaces/livedj_bpm_badge.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_ai_align.dart';
 import '../core/lab_quarantine.dart';
@@ -30,6 +36,9 @@ class MasterOutcome {
   final String? lyricCheck;
   final String lyricCheckReason;
 
+  /// Vacío, o la línea «posible audio pegado / versión distinta».
+  final String lenNote;
+
   const MasterOutcome({
     required this.path,
     required this.trimHeadMs,
@@ -38,6 +47,7 @@ class MasterOutcome {
     this.stopped = false,
     this.lyricCheck,
     this.lyricCheckReason = '',
+    this.lenNote = '',
   });
 }
 
@@ -73,9 +83,45 @@ class MasterTrack {
 
     await _ensureBackup(current);
 
-    final int durMs = (await rust_dsp.getAudioDurationMs(
-      inputPath: current,
-    )).toInt();
+    final Map<String, String> earlyTags = readGmxTagsFromFile(current);
+    final AnalysisPlan earlyPlan = planAnalysis(
+      earlyTags,
+      karaoke: isKaraokePath(current),
+    );
+    if (earlyPlan == AnalysisPlan.skip) {
+      return MasterOutcome(
+        path: current,
+        trimHeadMs: 0,
+        lyric: null,
+        detail: 'analisis $kGmxAnalysis',
+      );
+    }
+    if (earlyPlan == AnalysisPlan.retag) {
+      final double oldBpm = readTbpmSync(current);
+      final double neu = await rust_dsp.autoDetectAndInjectBpm(inputPath: current);
+      try {
+        await rewriteDurationTag(current);
+      } catch (e) {
+        debugPrint('🔴 [TLEN] $e');
+      }
+      final String name = File(current).uri.pathSegments.last;
+      debugPrint('BPM_FIX $name $oldBpm->$neu');
+      TrackTags.forget(current);
+      if (neu > 0) TrackTags.rememberBpm(current, neu);
+      forgetKnownBpm(current);
+      forgetLiveDjBpm(current);
+      forgetStoredGrid(current);
+      if (neu > 0) saveTrackMusic(current, bpm: neu);
+      return MasterOutcome(
+        path: current,
+        trimHeadMs: 0,
+        lyric: null,
+        detail: 'BPM_FIX $name $oldBpm->$neu',
+      );
+    }
+
+    final int durMs = (await rust_dsp.getAudioDurationMs(inputPath: current))
+        .toInt();
     final bool mega = lyricLooksMegamix(
       current.replaceAll(r"\\", "/").split("/").last,
       durMs,
@@ -236,6 +282,25 @@ class MasterTrack {
       onStage?.call('DB_ISAR');
       await _assignCues(ref, current);
     }
+    if (stop()) return abortedAt(current);
+
+    onStage?.call('TLEN');
+    var lenNote = '';
+    try {
+      final TlenReport report = await rewriteDurationTag(current);
+      final String? line = stuckAudioLine(
+        name: File(current).uri.pathSegments.last,
+        tlenMs: report.tlenMs,
+        audioMs: report.audioMs,
+        mismatch: report.mismatch,
+      );
+      if (line != null) {
+        lenNote = line;
+        detail = detail.isEmpty ? line : '$detail · $line';
+      }
+    } catch (e) {
+      debugPrint('🔴 [TLEN] $e');
+    }
 
     return MasterOutcome(
       path: current,
@@ -244,7 +309,14 @@ class MasterTrack {
       detail: detail,
       lyricCheck: check.mark,
       lyricCheckReason: check.reason,
+      lenNote: lenNote,
     );
+  }
+
+  /// Respalda una vez en `.gatomix_original/` y reescribe solo el TLEN.
+  static Future<TlenReport> rewriteDurationTag(String path) async {
+    await _ensureBackup(path);
+    return TlenReport.parse(await rust_dsp.rewriteTlen(inputPath: path));
   }
 
   /// OK / FIXED / REVIEW. Nunca toca una letra manual ([gmx_manual]): si
@@ -266,9 +338,8 @@ class MasterTrack {
       await _mark(path, 'GMX_LYR_CHECK', 'SKIP');
       return (mark: 'SKIP', reason: skip);
     }
-    final int durationMs = (await rust_dsp.getAudioDurationMs(
-      inputPath: path,
-    )).toInt();
+    final int durationMs = (await rust_dsp.getAudioDurationMs(inputPath: path))
+        .toInt();
     final worker = ref.read(nlpWorkerProvider);
     final int? voice = await worker.probeVoiceOnsetMs(path);
     final LyricTimingVerdict v = checkLyricTiming(
@@ -480,13 +551,8 @@ class MasterTrack {
 
   static bool _lrcIsAuto(String lrcPath) {
     final File f = File(lrcPath);
-    final File reg = File(
-      '${f.parent.path}${Platform.pathSeparator}_lyrics_auto.json',
-    );
-    if (!reg.existsSync()) return false;
     try {
-      final dynamic decoded = jsonDecode(reg.readAsStringSync());
-      return decoded is Map && decoded.containsKey(f.uri.pathSegments.last);
+      return readLyricsAuto(f.parent.path).containsKey(f.uri.pathSegments.last);
     } catch (_) {
       return false;
     }
@@ -619,19 +685,13 @@ class MasterTrack {
 
   static Future<void> _retargetBpmCache(String oldPath, String newPath) async {
     final Directory parent = File(newPath).parent;
-    final File cache = File(
-      '${parent.path}${Platform.pathSeparator}_dj_metadata.json',
-    );
-    if (!cache.existsSync()) return;
     try {
-      final dynamic decoded = jsonDecode(await cache.readAsString());
-      if (decoded is! Map) return;
-      final Map<String, dynamic> map = Map<String, dynamic>.from(decoded);
+      final Map<String, dynamic> map = readDjMetadata(parent.path);
       if (!map.containsKey(oldPath)) return;
       map[newPath] = map[oldPath];
       map[File(newPath).uri.pathSegments.last] = map[oldPath];
       map.remove(oldPath);
-      await cache.writeAsString(jsonEncode(map));
+      writeDjMetadata(parent.path, map);
     } catch (_) {}
   }
 
@@ -670,9 +730,8 @@ class MasterTrack {
     final db = ref.read(dbServiceProvider);
     final existing = await db.getTrackMetadata(path);
     final bool isManual = existing?.isManualCue ?? false;
-    final int physical = (await rust_dsp.getAudioDurationMs(
-      inputPath: path,
-    )).toInt();
+    final int physical = (await rust_dsp.getAudioDurationMs(inputPath: path))
+        .toInt();
     int leadMs = 0;
     int tailMs = 0;
     try {

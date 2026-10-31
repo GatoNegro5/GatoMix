@@ -1,5 +1,6 @@
-import 'dart:convert';
 import 'dart:io';
+
+import 'package:gatomix/core/gatomix_store.dart';
 import 'package:gatomix/services/track_tags.dart';
 import 'package:flutter/material.dart';
 
@@ -32,10 +33,8 @@ String _baseName(String p) {
 Future<_BpmIndex?> _loadIndex(String dir) {
   return _indexCache.putIfAbsent(dir, () async {
     try {
-      final f = File('$dir${Platform.pathSeparator}_dj_metadata.json');
-      if (!await f.exists()) return null;
-      final decoded = jsonDecode(await f.readAsString());
-      if (decoded is! Map) return null;
+      final Map<String, dynamic> decoded = readDjMetadata(dir);
+      if (decoded.isEmpty) return null;
       final idx = _BpmIndex();
       decoded.forEach((key, value) {
         double? bpm;
@@ -65,11 +64,12 @@ double _parseBpmText(List<int> bytes) {
   final String text = String.fromCharCodes(
     bytes.where((b) => b == 0x2C || b == 0x2E || (b >= 0x30 && b <= 0x39)),
   );
-  final match = RegExp(r'(\d{1,6}(?:[.,]\d+)?)').firstMatch(text);
-  if (match == null) return 0.0;
-  final double raw =
-      double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 0.0;
-  return TrackTags.musicalBpm(raw);
+  return TrackTags.decodeTbpm(text);
+}
+
+void forgetLiveDjBpm(String path) {
+  _bpmCache.remove(path);
+  _indexCache.clear();
 }
 
 /// Lee la etiqueta ID3v2 `TBPM` saltando frames grandes (carátulas).

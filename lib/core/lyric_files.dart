@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'audio_path.dart' as audio_path;
+
 /// Escribe [text] en el `.lrc`. El `.lrc.bak` guarda SIEMPRE el original
 /// previo al LAB: se crea solo la primera vez y nunca se pisa, así aplicar
 /// o guardar varias veces no pierde la letra original.
@@ -156,16 +158,10 @@ void notifyLrcChanged(String audioPath) {
   if (audioPath.isNotEmpty) _lrcChanges.add(audioPath);
 }
 
-/// Misma ruta de audio con `\` o `/`; sin distinguir mayúsculas en Windows.
-bool sameAudioPath(String? a, String? b) {
-  if (a == null || b == null || a.isEmpty || b.isEmpty) return false;
-  String n(String p) {
-    final String x = p.replaceAll('\\', '/');
-    return Platform.isWindows ? x.toLowerCase() : x;
-  }
-
-  return n(a) == n(b);
-}
+/// Misma ruta de audio: absoluta, separadores `/`, NFC y sin mayúsculas
+/// en Windows, macOS e iOS.
+bool sameAudioPath(String? a, String? b, {bool? foldCase}) =>
+    audio_path.sameAudioPath(a, b, foldCase: foldCase);
 
 enum LabLrcRestore { none, moved, keptOrigin }
 

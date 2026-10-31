@@ -78,6 +78,9 @@ class AfCaps {
       } else {
         _ok.remove('equalizer');
       }
+      if (await accepts('aecho=0.8:0.9:500:0.4', 'aecho')) {
+        _ok.add('aecho');
+      }
       for (final f in _optional) {
         final String chain = '$f=limit=0.95:level=disabled';
         if (await accepts(chain, f)) {
