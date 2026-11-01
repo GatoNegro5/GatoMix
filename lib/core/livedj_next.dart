@@ -211,3 +211,12 @@ RadioOffEffect effectOfRadioOff({
 }
 
 String _base(String path) => path.replaceAll('\\', '/').split('/').last;
+
+/// Un pending de radio solo se puede usar o guardar si no es la pista que
+/// suena ni la que acaba de sonar. Una tarea tardía no debe devolverla.
+bool radioPendingUsable(String? pending, {String? playing, String? previous}) {
+  if (pending == null || pending.isEmpty) return false;
+  if (playing != null && sameAudioPath(pending, playing)) return false;
+  if (previous != null && sameAudioPath(pending, previous)) return false;
+  return true;
+}

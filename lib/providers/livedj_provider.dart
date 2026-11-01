@@ -1891,6 +1891,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   String? _radioPendingReady() {
     final String? p = _radioPending;
     if (p == null || p.isEmpty || _radioBanned(p)) return null;
+    if (!radioPendingUsable(
+      p,
+      playing: state.currentTrackPath,
+      previous: _radioPrevious,
+    )) {
+      _radioPending = null;
+      return null;
+    }
     return p;
   }
 
@@ -1930,6 +1938,16 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     // lee sin esperar. La lista completa es el plan, no este relleno.
     final String? first = await _radioNextPath();
     if (!live() || first == null || first.isEmpty) return;
+    if (!radioPendingUsable(
+      first,
+      playing: state.currentTrackPath,
+      previous: _radioPrevious,
+    )) {
+      if (sameAudioPath(_radioPending, first)) {
+        _radioPending = null;
+      }
+      return;
+    }
     _radioAhead = <String>[first];
     _radioAheadEpoch = epoch;
     _publishRadioUpcoming();
@@ -2071,15 +2089,32 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     if (!live()) return null;
     try {
       final String? pending = _radioPending;
-      if (pending != null && pending.isNotEmpty && !_radioBanned(pending)) {
+      if (radioPendingUsable(
+            pending,
+            playing: state.currentTrackPath,
+            previous: _radioPrevious,
+          ) &&
+          !_radioBanned(pending!)) {
         return pending;
       }
       _radioPending = null;
       await _radioEnsureIndex();
       if (!live()) return null;
       final String? already = _radioPending;
-      if (already != null && already.isNotEmpty && !_radioBanned(already)) {
+      if (radioPendingUsable(
+            already,
+            playing: state.currentTrackPath,
+            previous: _radioPrevious,
+          ) &&
+          !_radioBanned(already!)) {
         return already;
+      }
+      if (!radioPendingUsable(
+        already,
+        playing: state.currentTrackPath,
+        previous: _radioPrevious,
+      )) {
+        _radioPending = null;
       }
       final List<String> pool = _radioPoolNow();
       if (pool.isEmpty) return _radioQueueFallback();
@@ -2111,7 +2146,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         return await _radioNextPath(depth: depth + 1);
       }
       if (!live()) return null;
-      if (next != null && next.isNotEmpty && !_radioBanned(next)) {
+      if (next != null &&
+          next.isNotEmpty &&
+          radioPendingUsable(
+            next,
+            playing: state.currentTrackPath,
+            previous: _radioPrevious,
+          ) &&
+          !_radioBanned(next)) {
         _radioPending = next;
         _driftNextPath = next;
         state = state.copyWith(radioNextPath: next);
@@ -2373,6 +2415,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     }
     if (!state.radioOn || epoch != _radioEpoch) return true;
     if (!File(next).existsSync()) return true;
+    if (!radioPendingUsable(
+      next,
+      playing: state.currentTrackPath,
+      previous: _radioPrevious,
+    )) {
+      _radioPending = null;
+      return true;
+    }
     _radioPending = next;
     _driftNextPath = next;
     state = state.copyWith(radioNextPath: next);
@@ -2725,6 +2775,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
             activeKey: key,
           );
         }
+        unawaited(_radioNextPath());
       }
       _releaseMix();
       _isStandbyArmed = false;
