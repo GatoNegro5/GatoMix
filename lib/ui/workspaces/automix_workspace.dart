@@ -51,18 +51,19 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
       }
     });
 
+    final bool compactLibrary = Platform.isAndroid || Platform.isIOS;
     final Widget threeSelectorPanels = Row(
       children: [
-        Expanded(
-          flex: 2,
-          child: Material(
-            color: GatoMixTheme.bgPanel,
-            child: Platform.isAndroid || Platform.isIOS
-                ? const AutomixMobileLibrary()
-                : const LibraryTreePanel(),
+        if (!compactLibrary) ...<Widget>[
+          const Expanded(
+            flex: 2,
+            child: Material(
+              color: GatoMixTheme.bgPanel,
+              child: LibraryTreePanel(),
+            ),
           ),
-        ),
-        const VerticalDivider(width: 1, color: Colors.white10),
+          const VerticalDivider(width: 1, color: Colors.white10),
+        ],
         const Expanded(flex: 4, child: FolderContentPanel()),
         const VerticalDivider(width: 1, color: Colors.white10),
         const Expanded(flex: 5, child: AutomixPanel()),
@@ -90,13 +91,16 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
 }
 
 class AutomixMobileLibrary extends ConsumerWidget {
-  const AutomixMobileLibrary({super.key});
+  final ScrollController? scrollController;
+
+  const AutomixMobileLibrary({super.key, this.scrollController});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final List<File> queue = ref.watch(automixQueueProvider);
     return MusicPickerScreen(
       rootPath: gatomixMusicRoot(),
+      scrollController: scrollController,
       queuePaths: <String>[for (final File file in queue) file.path],
       onEnqueue: (File file) {
         ref.read(playedTracksProvider.notifier).removeTrack(file.path);
@@ -861,7 +865,36 @@ class AutomixPanel extends ConsumerWidget {
             vertical: isMobile ? 4 : 8,
           ),
           color: GatoMixTheme.bgPanel,
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (Platform.isAndroid || Platform.isIOS)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () {
+                      showMusicPickerSheet(
+                        context,
+                        child: (ScrollController controller) =>
+                            AutomixMobileLibrary(scrollController: controller),
+                      );
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      minimumSize: const Size(0, 32),
+                    ),
+                    child: const Text(
+                      '+ Agregar canciones',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              Row(
             children: [
               Icon(
                 Icons.shuffle,
@@ -1036,6 +1069,8 @@ class AutomixPanel extends ConsumerWidget {
                     ],
                   ),
                 ),
+              ),
+            ],
               ),
             ],
           ),

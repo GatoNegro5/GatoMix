@@ -15,6 +15,7 @@ import 'package:gatomix/providers/livedj_provider.dart';
 import 'package:gatomix/providers/pipeline_provider.dart';
 import 'package:gatomix/providers/theme_provider.dart';
 import 'package:gatomix/services/audio_interruption.dart';
+import 'package:gatomix/services/lyric_retry_queue.dart';
 import 'package:gatomix/ui/widgets/app_version_label.dart';
 import 'package:gatomix/ui/workspaces/automix_workspace.dart';
 import 'package:gatomix/ui/workspaces/dsp_workspace.dart';
@@ -148,6 +149,7 @@ class DjIphoneApp extends ConsumerWidget {
     return MaterialApp(
       title: 'GatoMix',
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: lyricRetryMessengerKey,
       theme: appTheme,
       builder: (context, child) {
         return _DjIphoneLifecycle(child: child ?? const SizedBox.shrink());
@@ -178,6 +180,7 @@ class _DjIphoneLifecycleState extends ConsumerState<_DjIphoneLifecycle>
     // Llamadas / otras apps de audio: pausa y reanuda como app profesional.
     _focusGuard = AudioInterruptionGuard(ref);
     unawaited(_focusGuard.start());
+    ref.read(lyricRetryQueueProvider).start();
   }
 
   @override

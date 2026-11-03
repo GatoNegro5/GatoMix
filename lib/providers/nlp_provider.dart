@@ -823,9 +823,17 @@ class NlpWorker {
   }
 
   /// Resultado de intentar la letra de una pista.
+  /// found = letra nueva o ya válida · notFound = sin coincidencia ·
+  /// serverDown = tras 3 intentos sigue 429/5xx/timeout.
+  /// La lógica de descarga no cambia: el detalle sigue en [processSingleFileStatus].
+  Future<LyricFetchOutcome> processSingleFile(String filePath) async {
+    return lyricFetchOutcomeFor(await processSingleFileStatus(filePath));
+  }
+
   /// ok = letra nueva · kept = ya tenía una letra válida (no se toca) ·
-  /// noMatch = sin coincidencia segura · failed = error / pista inexistente.
-  Future<LyricStatus> processSingleFile(String filePath) async {
+  /// noMatch = sin coincidencia segura · failed = error / pista inexistente ·
+  /// retry = servidor caído (429/5xx/timeout tras los intentos).
+  Future<LyricStatus> processSingleFileStatus(String filePath) async {
     if (_enCarpetaOriginal(filePath)) return LyricStatus.kept;
     final file = File(filePath);
     if (!file.existsSync()) return LyricStatus.failed;
@@ -978,7 +986,7 @@ class NlpWorker {
         counts[LyricStatus.kept] = counts[LyricStatus.kept]! + 1;
         continue;
       }
-      final st = await processSingleFile(f.path);
+      final st = await processSingleFileStatus(f.path);
       counts[st] = counts[st]! + 1;
       await Future.delayed(const Duration(milliseconds: 150));
     }
@@ -988,10 +996,25 @@ class NlpWorker {
 
 enum LyricStatus { ok, kept, noMatch, failed, retry, plain, doubt }
 
+/// serverDown solo si el estado es el reintento tras 429/5xx/timeout.
+LyricFetchOutcome lyricFetchOutcomeFor(LyricStatus status) {
+  switch (status) {
+    case LyricStatus.retry:
+      return LyricFetchOutcome.serverDown;
+    case LyricStatus.noMatch:
+    case LyricStatus.failed:
+      return LyricFetchOutcome.notFound;
+    case LyricStatus.ok:
+    case LyricStatus.kept:
+    case LyricStatus.plain:
+    case LyricStatus.doubt:
+      return LyricFetchOutcome.found;
+  }
+}
+
 int? _autoBytes(dynamic size) {
   if (size is num) return size.toInt();
-  if (size is Map && size['bytes'] is num)
-    return (size['bytes'] as num).toInt();
+  if (size is Map && size['bytes'] is num) return (size['bytes'] as num).toInt();
   return null;
 }
 

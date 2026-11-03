@@ -96,8 +96,31 @@ const Map<String, String> _accents = {
 bool lyricHttpTransient(int status) =>
     status == 429 || status == 503 || status >= 500;
 
-/// 1,5 s, 3 s y 6 s. [attempt] es 0 en el primer fallo.
-int lyricRetryDelayMs(int attempt) => 1500 * (1 << attempt);
+/// Espera tras un fallo de LRCLIB. [attempt] es 0 en el primer fallo.
+/// El corte observado duró ~20 s: 3 s y luego 10 s, antes del tercer intento.
+int lyricRetryDelayMs(int attempt) => attempt <= 0 ? 3000 : 10000;
+
+/// Resultado de pedir la letra al ingerir una canción.
+enum LyricFetchOutcome { found, notFound, serverDown }
+
+const String kLyricServerBusyNotice =
+    'MP3 listo. La letra se reintentará sola cada minuto en segundo plano.';
+
+const String kLyricNotFoundNotice = 'No se encontró letra para esta canción.';
+
+const String kLyricAddedNoticePrefix = 'Letra agregada: ';
+
+/// Texto de estado al ingerir. Null si la letra llegó o ya estaba.
+String? lyricIngestNotice(LyricFetchOutcome outcome) {
+  switch (outcome) {
+    case LyricFetchOutcome.serverDown:
+      return kLyricServerBusyNotice;
+    case LyricFetchOutcome.notFound:
+      return kLyricNotFoundNotice;
+    case LyricFetchOutcome.found:
+      return null;
+  }
+}
 
 /// UTF-8 leído como Latin-1 (`AÃ±os` → `Años`) y la capitalización
 /// partida (`mINUTO` → `Minuto`). La comparación igual pasa a minúsculas.

@@ -627,12 +627,13 @@ class _OnAirBadge extends ConsumerWidget {
             Icon(Icons.sensors, color: color, size: 12),
             const SizedBox(width: 5),
             Text(
-              'ON AIR Radio',
+              radioOn ? 'APAGA MODO RADIO' : 'PRENDE MODO RADIO',
               style: TextStyle(
                 color: color,
                 fontWeight: FontWeight.bold,
                 fontSize: 10,
               ),
+              maxLines: 1,
             ),
           ],
         ),

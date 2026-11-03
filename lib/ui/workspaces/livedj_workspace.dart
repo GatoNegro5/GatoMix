@@ -65,19 +65,20 @@ class LiveDjWorkspace extends ConsumerWidget {
       backgroundColor: GatoMixTheme.bgDark,
       body: Row(
         children: [
-          // Explorador: columna izquierda a toda la altura, arranca arriba.
-          Expanded(
-            flex: 5,
-            child: Material(
-              color: GatoMixTheme.bgPanel,
-              child: Platform.isAndroid || Platform.isIOS
-                  ? const LiveDjMobileLibrary()
-                  : LibraryTreePanel(provider: liveDjDirectoryProvider),
+          // Escritorio: explorador a la izquierda. En móvil esa columna no va;
+          // las canciones se agregan desde la hoja del Cartridge.
+          if (!compact) ...<Widget>[
+            Expanded(
+              flex: 5,
+              child: Material(
+                color: GatoMixTheme.bgPanel,
+                child: LibraryTreePanel(provider: liveDjDirectoryProvider),
+              ),
             ),
-          ),
-          const VerticalDivider(width: 1, color: Colors.white10),
+            const VerticalDivider(width: 1, color: Colors.white10),
+          ],
           Expanded(
-            flex: 19,
+            flex: compact ? 1 : 19,
             child: Column(
               children: [
                 Expanded(
@@ -105,13 +106,16 @@ class LiveDjWorkspace extends ConsumerWidget {
 }
 
 class LiveDjMobileLibrary extends ConsumerWidget {
-  const LiveDjMobileLibrary({super.key});
+  final ScrollController? scrollController;
+
+  const LiveDjMobileLibrary({super.key, this.scrollController});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
     return MusicPickerScreen(
       rootPath: gatomixMusicRoot(),
+      scrollController: scrollController,
       queuePaths: <String>[for (final File file in queue) file.path],
       onEnqueue: (File file) {
         ref.read(liveDjProvider.notifier).addTrack(file);
@@ -428,7 +432,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
               Icon(Icons.sensors, color: radioColor, size: 12),
               const SizedBox(width: 5),
               Text(
-                "ON AIR Radio",
+                radioOn ? 'APAGA MODO RADIO' : 'PRENDE MODO RADIO',
                 style: TextStyle(
                   color: radioColor,
                   fontWeight: FontWeight.bold,
@@ -1357,7 +1361,36 @@ class LiveDjCartridgePanel extends ConsumerWidget {
               bottom: BorderSide(color: Colors.white10),
             ),
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (Platform.isAndroid || Platform.isIOS)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () {
+                      showMusicPickerSheet(
+                        context,
+                        child: (ScrollController controller) =>
+                            LiveDjMobileLibrary(scrollController: controller),
+                      );
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      minimumSize: const Size(0, 32),
+                    ),
+                    child: const Text(
+                      '+ Agregar canciones',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              Row(
             children: [
               const Icon(Icons.shuffle, color: Colors.pinkAccent, size: 18),
               const SizedBox(width: 8),
@@ -1423,6 +1456,8 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                 onPressed: () =>
                     ref.read(liveDjProvider.notifier).loadPlaylist(),
                 tooltip: "Cargar Playlist",
+              ),
+            ],
               ),
             ],
           ),

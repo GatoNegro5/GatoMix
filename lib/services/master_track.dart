@@ -142,7 +142,7 @@ class MasterTrack {
     } else if (withLyrics) {
       onStage?.call('LYRICS');
       final worker = ref.read(nlpWorkerProvider);
-      lyric = await worker.processSingleFile(current);
+      lyric = await worker.processSingleFileStatus(current);
       detail = worker.lastDetail;
       final String? lyrMark = switch (lyric) {
         LyricStatus.ok => 'SYNC',

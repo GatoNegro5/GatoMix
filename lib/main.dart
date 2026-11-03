@@ -30,6 +30,7 @@ import 'ui/workspaces/lan_sync_workspace.dart';
 import 'ui/workspaces/livedj_workspace.dart';
 import 'ui/workspaces/karaoke_workspace.dart';
 import 'services/audio_interruption.dart';
+import 'services/lyric_retry_queue.dart';
 import 'core/headless_args.dart';
 import 'ui/headless_master_page.dart';
 import 'ui/headless_karaoke_page.dart';
@@ -202,6 +203,7 @@ class GatoMixApp extends ConsumerWidget {
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: lyricRetryMessengerKey,
       theme: appTheme,
       builder: (context, child) {
         return _MobileAudioLifecycle(child: child ?? const SizedBox.shrink());
@@ -233,6 +235,7 @@ class _MobileAudioLifecycleState extends ConsumerState<_MobileAudioLifecycle>
     // Llamadas / otras apps de audio: pausa y reanuda como app profesional.
     _focusGuard = AudioInterruptionGuard(ref);
     unawaited(_focusGuard.start());
+    ref.read(lyricRetryQueueProvider).start();
   }
 
   @override
