@@ -12,6 +12,7 @@ import '../../core/lab_quarantine.dart';
 import '../../djiphone/iphone_library.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/automix_provider.dart';
+import '../mobile/music_picker_screen.dart';
 import '../widgets/approx_lyric_icon.dart';
 import '../../providers/pipeline_provider.dart';
 import '../../providers/theme_provider.dart';
@@ -52,11 +53,13 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
 
     final Widget threeSelectorPanels = Row(
       children: [
-        const Expanded(
+        Expanded(
           flex: 2,
           child: Material(
             color: GatoMixTheme.bgPanel,
-            child: LibraryTreePanel(),
+            child: Platform.isAndroid || Platform.isIOS
+                ? const AutomixMobileLibrary()
+                : const LibraryTreePanel(),
           ),
         ),
         const VerticalDivider(width: 1, color: Colors.white10),
@@ -82,6 +85,66 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
           child: threeSelectorPanels,
         ),
       ],
+    );
+  }
+}
+
+class AutomixMobileLibrary extends ConsumerWidget {
+  const AutomixMobileLibrary({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final List<File> queue = ref.watch(automixQueueProvider);
+    return MusicPickerScreen(
+      rootPath: gatomixMusicRoot(),
+      queuePaths: <String>[for (final File file in queue) file.path],
+      onEnqueue: (File file) {
+        ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        ref.read(automixQueueProvider.notifier).addTrack(file);
+      },
+      onUndo: (File file) {
+        ref.read(automixQueueProvider.notifier).removeTrack(file.path);
+      },
+      onPlayNext: (File file) {
+        final String? current = ref.read(automixProvider).currentTrackPath;
+        if (current != null && sameAudioPath(current, file.path)) return;
+        final List<String> paths = queueWithPlayNext(
+          <String>[for (final File item in ref.read(automixQueueProvider)) item.path],
+          current,
+          file.path,
+        );
+        ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        ref.read(automixQueueProvider.notifier).restoreQueue(paths);
+        ref.read(automixProvider.notifier).syncDynamicPlaylist(paths);
+      },
+      onAddFolder: (List<File> files) {
+        for (final File file in files) {
+          ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        }
+        ref.read(automixQueueProvider.notifier).addAll(files);
+      },
+      onMixFolder: (List<File> files) async {
+        if (files.isEmpty) return;
+        for (final File file in files) {
+          ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        }
+        ref.read(automixQueueProvider.notifier).addAll(files);
+        final List<String> paths = <String>[
+          for (final File file in ref.read(automixQueueProvider)) file.path,
+        ];
+        for (final File file in files) {
+          if (!paths.any((String path) => sameAudioPath(path, file.path))) {
+            paths.add(file.path);
+          }
+        }
+        final notifier = ref.read(automixProvider.notifier);
+        notifier.syncDynamicPlaylist(paths);
+        final int index = ref
+            .read(automixProvider)
+            .playlist
+            .indexWhere((String path) => sameAudioPath(path, files.first.path));
+        if (index >= 0) await notifier.jumpToTrack(index);
+      },
     );
   }
 }

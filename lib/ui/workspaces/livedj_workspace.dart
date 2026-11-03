@@ -3,12 +3,14 @@ import '../widgets/approx_lyric_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/audio_path.dart';
 import '../../providers/theme_provider.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/livedj_provider.dart';
 import 'livedj_sort_button.dart';
 import '../../providers/mix_formula.dart';
 import 'automix_workspace.dart';
+import '../mobile/music_picker_screen.dart';
 import 'livedj_bpm_badge.dart';
 import 'livedj_artist_card.dart';
 import 'livedj_folder_playlist.dart';
@@ -68,7 +70,9 @@ class LiveDjWorkspace extends ConsumerWidget {
             flex: 5,
             child: Material(
               color: GatoMixTheme.bgPanel,
-              child: LibraryTreePanel(provider: liveDjDirectoryProvider),
+              child: Platform.isAndroid || Platform.isIOS
+                  ? const LiveDjMobileLibrary()
+                  : LibraryTreePanel(provider: liveDjDirectoryProvider),
             ),
           ),
           const VerticalDivider(width: 1, color: Colors.white10),
@@ -97,6 +101,77 @@ class LiveDjWorkspace extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+class LiveDjMobileLibrary extends ConsumerWidget {
+  const LiveDjMobileLibrary({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
+    return MusicPickerScreen(
+      rootPath: gatomixMusicRoot(),
+      queuePaths: <String>[for (final File file in queue) file.path],
+      onEnqueue: (File file) {
+        ref.read(liveDjProvider.notifier).addTrack(file);
+      },
+      onUndo: (File file) {
+        ref.read(liveDjProvider.notifier).removeTrack(file.path);
+      },
+      onPlayNext: (File file) => _liveDjPlayNext(ref, file),
+      onAddFolder: (List<File> files) {
+        ref.read(liveDjProvider.notifier).addAllTracks(files);
+      },
+      onMixFolder: (List<File> files) => _liveDjMix(ref, files),
+    );
+  }
+}
+
+void _liveDjPlayNext(WidgetRef ref, File file) {
+  final notifier = ref.read(liveDjProvider.notifier);
+  final state = ref.read(liveDjProvider);
+  if (state.currentTrackPath != null &&
+      sameAudioPath(state.currentTrackPath!, file.path)) {
+    return;
+  }
+  if (state.mixStrategy == LiveDjMixStrategy.random) {
+    notifier.addTrack(file);
+    return;
+  }
+  final List<File> queue = List<File>.from(state.queue);
+  var insertAt = queue.length;
+  if (state.currentTrackPath != null) {
+    final int i = queue.indexWhere(
+      (File item) => sameAudioPath(item.path, state.currentTrackPath),
+    );
+    if (i >= 0) insertAt = i + 1;
+  }
+  final List<File> tail = queue
+      .sublist(insertAt)
+      .where((File item) => !sameAudioPath(item.path, file.path))
+      .toList();
+  for (final File item in tail) {
+    notifier.removeTrack(item.path);
+  }
+  notifier.removeTrack(file.path);
+  notifier.addTrack(file);
+  if (tail.isNotEmpty) notifier.addAllTracks(tail);
+}
+
+Future<void> _liveDjMix(WidgetRef ref, List<File> files) async {
+  if (files.isEmpty) return;
+  final notifier = ref.read(liveDjProvider.notifier);
+  notifier.addAllTracks(files);
+  await notifier.addSettled;
+  final List<File> queue = ref.read(liveDjProvider).queue;
+  final int index = queue.indexWhere(
+    (File item) => sameAudioPath(item.path, files.first.path),
+  );
+  if (index >= 0) {
+    await notifier.playTrackFromQueue(index);
+  } else if (ref.read(liveDjProvider).currentTrackPath == null) {
+    await notifier.togglePlayPause();
   }
 }
 

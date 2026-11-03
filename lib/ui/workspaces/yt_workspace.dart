@@ -43,6 +43,29 @@ void registerYtAutoLyric(String lrcPath) {
   writeLyricsAuto(f.parent.path, map);
 }
 
+/// Mueve [src] a [dst]. En el mismo volumen basta `rename`. Si el sistema
+/// responde `FileSystemException` (EXDEV al salir de `systemTemp` en Android),
+/// copia y borra el origen.
+void moveFile(
+  String src,
+  String dst, {
+  void Function(String src, String dst)? rename,
+}) {
+  try {
+    if (rename != null) {
+      rename(src, dst);
+    } else {
+      File(src).renameSync(dst);
+    }
+  } on FileSystemException {
+    final File out = File(dst);
+    if (out.existsSync()) out.deleteSync();
+    File(src).copySync(dst);
+    final File from = File(src);
+    if (from.existsSync()) from.deleteSync();
+  }
+}
+
 // =====================================================================
 // MÓDULO 2: BÚSQUEDA, EXTRACCIÓN Y AUTO-MASTER YT
 // =====================================================================
@@ -110,12 +133,22 @@ class _YoutubeSearchAndDownloadWorkspaceState
     }
 
     final baseDir = Directory(baseMusicPath);
-    if (!baseDir.existsSync()) {
-      baseDir.createSync(recursive: true);
+    var status = _statusText;
+    try {
+      if (!baseDir.existsSync()) {
+        baseDir.createSync(recursive: true);
+      }
+    } catch (e) {
+      if (Platform.isAndroid || Platform.isIOS) {
+        status = 'No se pudo crear la carpeta de descargas: $e';
+      } else {
+        rethrow;
+      }
     }
 
     setState(() {
       _selectedFolderPath = baseDir.path;
+      _statusText = status;
     });
   }
 
@@ -474,26 +507,43 @@ class _YoutubeSearchAndDownloadWorkspaceState
         // YouTube y en Android tardaba >10 min sin progreso.
         final best = m4a.first;
         final total = best.size.totalBytes;
+        // 3.1.0 no tiene `YoutubeApiClient.web`: el cliente WEB es `safari`.
+        // Orden de reintento tras un 403 a mitad: androidVr, ios, tv.
+        // Tope: 3 clientes. El trozo ya bajado no se vuelve a pedir.
+        const List<List<YoutubeApiClient>> resumeClients =
+            <List<YoutubeApiClient>>[
+              <YoutubeApiClient>[YoutubeApiClient.androidVr],
+              <YoutubeApiClient>[YoutubeApiClient.ios],
+              <YoutubeApiClient>[YoutubeApiClient.tv],
+            ];
         await ytChunkedDownload(
           url: best.url,
           deadline: const Duration(minutes: 3),
           totalBytes: total,
           outPath: tempRawPath,
+          chunkSize: 1024 * 1024,
+          maxRefreshes: resumeClients.length,
           refreshUrl: () async {
-            // Tras un 403 (YouTube corta las URL sin PO token pasado ~1 MB)
-            // se pide una URL nueva, rotando clientes.
-            final clients = [
-              [YoutubeApiClient.androidSdkless],
-              [YoutubeApiClient.android],
-              [YoutubeApiClient.ios],
-            ];
-            final fresh = await _yt.videos.streamsClient.getManifest(
-              videoId,
-              ytClients: clients[(_ytRefresh++) % clients.length],
-            );
-            for (final s in fresh.audioOnly) {
-              if (s.tag == best.tag) return s.url;
-            }
+            if (_ytRefresh >= resumeClients.length) return null;
+            final List<YoutubeApiClient> plan = resumeClients[_ytRefresh++];
+            try {
+              final fresh = await _yt.videos.streamsClient.getManifest(
+                videoId,
+                ytClients: plan,
+              );
+              for (final s in fresh.audioOnly) {
+                if (s.tag == best.tag &&
+                    (s.size.totalBytes == total || s.size.totalBytes <= 0)) {
+                  return s.url;
+                }
+              }
+              for (final s in fresh.audioOnly) {
+                if (s.container == StreamContainer.mp4 &&
+                    s.size.totalBytes == total) {
+                  return s.url;
+                }
+              }
+            } catch (_) {}
             return null;
           },
           onProgress: (done, t) {
@@ -542,7 +592,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
 
       if (tempRawPath != tempM4aPath) {
         if (File(tempM4aPath).existsSync()) File(tempM4aPath).deleteSync();
-        File(tempRawPath).renameSync(tempM4aPath);
+        moveFile(tempRawPath, tempM4aPath);
       }
 
       setState(() => _statusText = "Buscando letra con el nombre limpio...");
@@ -606,12 +656,21 @@ class _YoutubeSearchAndDownloadWorkspaceState
       final finalLrcPath =
           '$downloadPath${Platform.pathSeparator}$cleanName.lrc';
 
-      File(tempMp3Path).renameSync(finalMp3Path);
-      if (finalLrcContent.trim().isNotEmpty) {
-        File(finalLrcPath).writeAsStringSync(finalLrcContent);
-        registerYtAutoLyric(finalLrcPath);
-      } else {
-        if (File(finalLrcPath).existsSync()) File(finalLrcPath).deleteSync();
+      moveFile(tempMp3Path, finalMp3Path);
+      String lrcNote = '';
+      try {
+        if (finalLrcContent.trim().isNotEmpty) {
+          File(finalLrcPath).writeAsStringSync(finalLrcContent);
+          registerYtAutoLyric(finalLrcPath);
+        } else {
+          if (File(finalLrcPath).existsSync()) File(finalLrcPath).deleteSync();
+        }
+      } catch (e) {
+        if (Platform.isAndroid || Platform.isIOS) {
+          lrcNote = 'No se pudo escribir la letra (.lrc): $e';
+        } else {
+          rethrow;
+        }
       }
 
       try {
@@ -628,10 +687,19 @@ class _YoutubeSearchAndDownloadWorkspaceState
               "✅ ¡Extracción Completada! MP3 ($cleanName) guardado.",
         );
       }
+      if (lrcNote.isNotEmpty && mounted) {
+        setState(() => _statusText = lrcNote);
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text(lrcNote)),
+        );
+      }
     } catch (e) {
       debugPrint("🔴 Error en Pipeline Híbrido: $e");
+      final bool mobileYt = Platform.isAndroid || Platform.isIOS;
       setState(
-        () => _statusText = ytIsRateLimit(e)
+        () => _statusText = mobileYt
+            ? '$e'
+            : ytIsRateLimit(e)
             ? "🟠 $ytRateLimitMsg"
             : e is YtDownloadStalled
             ? "🟠 ${e.toString()}"

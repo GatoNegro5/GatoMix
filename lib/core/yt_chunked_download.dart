@@ -92,22 +92,32 @@ Future<void> ytChunkedDownload({
             .timeout(chunkTimeout);
         if (resp.statusCode == 403 || resp.statusCode == 410) {
           await resp.stream.drain<void>();
+          // 403 a mitad (típico ~1 MB): no se aborta. Se pide otra URL y
+          // este mismo rango se reanuda; los trozos ya guardados se quedan.
           if (refreshUrl == null || refreshes >= maxRefreshes) {
             throw YtDownloadStalled(
               'YouTube rechazó la descarga en móvil (HTTP ${resp.statusCode}). Reintenta en unos minutos.',
             );
           }
           final mine = current;
-          // Un solo refresco compartido entre conexiones paralelas.
-          pendingRefresh ??= (() async {
+          final Future<Uri?> refresh;
+          final Future<Uri?>? inflight = pendingRefresh;
+          if (inflight != null) {
+            refresh = inflight;
+          } else {
             refreshes++;
-            try {
-              return await refreshUrl();
-            } finally {
-              pendingRefresh = null;
-            }
-          })();
-          final u = await pendingRefresh;
+            late final Future<Uri?> created;
+            created = () async {
+              try {
+                return await refreshUrl();
+              } finally {
+                if (identical(pendingRefresh, created)) pendingRefresh = null;
+              }
+            }();
+            pendingRefresh = created;
+            refresh = created;
+          }
+          final Uri? u = await refresh;
           if (u != null && identical(mine, current)) current = u;
           throw HttpException('HTTP ${resp.statusCode}');
         }
