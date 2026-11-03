@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:gatomix/core/yt_chunked_download.dart';
 import 'package:gatomix/core/master_profile.dart';
 import 'package:gatomix/services/karaoke_engine.dart';
@@ -46,6 +48,60 @@ void registerYtAutoLyric(String lrcPath) {
 /// Mueve [src] a [dst]. En el mismo volumen basta `rename`. Si el sistema
 /// responde `FileSystemException` (EXDEV al salir de `systemTemp` en Android),
 /// copia y borra el origen.
+const MethodChannel ytNewPipeChannel = MethodChannel('gatomix/newpipe');
+const EventChannel ytNewPipeProgress = EventChannel('gatomix/newpipe/progress');
+
+const Duration ytPreviewTimeout = Duration(seconds: 15);
+
+String ytPreviewFailureText(Object error) {
+  final String raw;
+  if (error is PlatformException) {
+    final String? message = error.message;
+    raw = (message == null || message.isEmpty) ? error.code : message;
+  } else {
+    raw = error.toString().replaceAll('Exception: ', '').split('\n').first;
+  }
+  return 'No se pudo cargar la vista previa: $raw';
+}
+
+Future<String> ytNewPipeAudioUrl(String videoId) async {
+  final Object? raw = await ytNewPipeChannel.invokeMethod('getAudioUrl', {
+    'videoId': videoId,
+  });
+  if (raw is! Map) {
+    throw Exception('NewPipe no devolvió la URL de audio');
+  }
+  final Object? url = raw['url'];
+  if (url is! String || url.isEmpty) {
+    throw Exception('NewPipe no devolvió la URL de audio');
+  }
+  return url;
+}
+
+Future<void> ytNewPipeDownload({
+  required String videoId,
+  required String destPath,
+  void Function(int done, int total)? onProgress,
+}) async {
+  StreamSubscription<dynamic>? sub;
+  if (onProgress != null) {
+    sub = ytNewPipeProgress.receiveBroadcastStream().listen((Object? event) {
+      if (event is! Map) return;
+      final int done = (event['done'] as num?)?.toInt() ?? 0;
+      final int total = (event['total'] as num?)?.toInt() ?? 0;
+      if (total > 0) onProgress(done, total);
+    });
+  }
+  try {
+    await ytNewPipeChannel.invokeMethod('download', {
+      'videoId': videoId,
+      'destPath': destPath,
+    });
+  } finally {
+    await sub?.cancel();
+  }
+}
+
 void moveFile(
   String src,
   String dst, {
@@ -348,73 +404,97 @@ class _YoutubeSearchAndDownloadWorkspaceState
       } catch (_) {}
     }
 
+    final bool mobilePreview = Platform.isAndroid || Platform.isIOS;
     setState(() {
       _previewingVideoId = videoId;
       _isPreviewLoading = true;
+      if (mobilePreview) {
+        _statusText = 'Cargando vista previa…';
+      }
     });
 
     try {
       final ytdlpPath = await _resolveBinary('yt-dlp');
       final targetUrl = 'https://youtube.com/watch?v=$videoId';
 
-      // 🛠️ FIX ARQUITECTÓNICO: Extracción estricta sin advertencias de consola
-      String directStreamUrl;
-      if (Platform.isAndroid || Platform.isIOS) {
-        // Móvil: sin binarios; la URL directa sale de youtube_explode_dart.
-        final manifest = await _yt.videos.streamsClient.getManifest(
-          VideoId(videoId),
-        );
-        directStreamUrl = manifest.audioOnly
-            .withHighestBitrate()
-            .url
-            .toString();
-      } else {
-        final process = await Process.run(ytdlpPath, [
-          '--no-warnings',
-          '--print', 'url', // Mucho más estable que -g
-          '-f', 'bestaudio',
-          targetUrl,
-        ]);
-
-        if (process.exitCode != 0) {
-          throw Exception("yt-dlp: ${process.stderr.toString().trim()}");
-        }
-
-        // Filtramos la basura y nos quedamos solo con la línea HTTP
-        final outputLines = process.stdout.toString().trim().split('\n');
-        directStreamUrl = outputLines.lastWhere(
-          (line) => line.trim().startsWith('http'),
-          orElse: () => '',
-        );
-
-        if (directStreamUrl.isEmpty) {
-          throw Exception(
-            "No se extrajo una URL válida. Salida: ${process.stdout}",
+      Future<void> openPreview() async {
+        // 🛠️ FIX ARQUITECTÓNICO: Extracción estricta sin advertencias de consola
+        String directStreamUrl;
+        if (Platform.isAndroid) {
+          directStreamUrl = await ytNewPipeAudioUrl(videoId);
+        } else if (Platform.isIOS) {
+          // iOS: sin binarios; la URL directa sale de youtube_explode_dart.
+          final manifest = await _yt.videos.streamsClient.getManifest(
+            VideoId(videoId),
           );
+          directStreamUrl = manifest.audioOnly
+              .withHighestBitrate()
+              .url
+              .toString();
+        } else {
+          final process = await Process.run(ytdlpPath, [
+            '--no-warnings',
+            '--print', 'url', // Mucho más estable que -g
+            '-f', 'bestaudio',
+            targetUrl,
+          ]);
+
+          if (process.exitCode != 0) {
+            throw Exception("yt-dlp: ${process.stderr.toString().trim()}");
+          }
+
+          // Filtramos la basura y nos quedamos solo con la línea HTTP
+          final outputLines = process.stdout.toString().trim().split('\n');
+          directStreamUrl = outputLines.lastWhere(
+            (line) => line.trim().startsWith('http'),
+            orElse: () => '',
+          );
+
+          if (directStreamUrl.isEmpty) {
+            throw Exception(
+              "No se extrajo una URL válida. Salida: ${process.stdout}",
+            );
+          }
         }
+
+        // 🛠️ INYECCIÓN: Disfrazamos al motor nativo como si fuera Google Chrome
+        // Esto evita el HTTP 403 Forbidden directo de los servidores de caché de YouTube
+        await _previewPlayer.open(
+          Media(
+            directStreamUrl,
+            httpHeaders: {
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+          ),
+          play: true,
+        );
       }
 
-      // 🛠️ INYECCIÓN: Disfrazamos al motor nativo como si fuera Google Chrome
-      // Esto evita el HTTP 403 Forbidden directo de los servidores de caché de YouTube
-      await _previewPlayer.open(
-        Media(
-          directStreamUrl,
-          httpHeaders: {
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          },
-        ),
-        play: true,
-      );
+      if (mobilePreview) {
+        await openPreview().timeout(ytPreviewTimeout);
+        if (mounted) {
+          setState(
+            () => _statusText =
+                "Resultados listos. Clic en 'Ingestar' para descargar.",
+          );
+        }
+      } else {
+        await openPreview();
+      }
     } catch (e) {
       debugPrint("🔴 [Preview Error]: $e");
       if (mounted) {
+        final String shown = mobilePreview
+            ? ytPreviewFailureText(e)
+            : '🔴 Fallo de Preview: ${e.toString().replaceAll('Exception: ', '').split('\n').first}';
+        if (mobilePreview) {
+          setState(() => _statusText = shown);
+        }
         // Ahora sí imprimiremos en pantalla la verdadera razón si falla
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              '🔴 Fallo de Preview: ${e.toString().replaceAll('Exception: ', '').split('\n').first}',
-            ),
+            content: Text(shown),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -490,8 +570,26 @@ class _YoutubeSearchAndDownloadWorkspaceState
       );
 
       var sourceKbps = 0;
-      if (Platform.isAndroid || Platform.isIOS) {
-        // Móvil: no se pueden ejecutar binarios (yt-dlp → "permission
+      if (Platform.isAndroid) {
+        await ytNewPipeDownload(
+          videoId: videoId.value,
+          destPath: tempRawPath,
+          onProgress: (done, t) {
+            if (!mounted) return;
+            setState(
+              () => _statusText =
+                  "Descargando audio... ${(done * 100 / t).floor()}% "
+                  "(${(done / 1048576).toStringAsFixed(1)} de "
+                  "${(t / 1048576).toStringAsFixed(1)} MB)",
+            );
+          },
+        );
+        if (!File(tempRawPath).existsSync() ||
+            File(tempRawPath).lengthSync() == 0) {
+          throw Exception("Fallo al bajar el audio (archivo vacío).");
+        }
+      } else if (Platform.isIOS) {
+        // iOS: no se pueden ejecutar binarios (yt-dlp → "permission
         // denied"). Se baja el AAC/M4A con youtube_explode_dart.
         final manifest = await _yt.videos.streamsClient.getManifest(videoId);
         final m4a = manifest.audioOnly
@@ -1133,7 +1231,11 @@ class _YoutubeSearchAndDownloadWorkspaceState
           child: Text(
             _statusText,
             style: TextStyle(
-              color: _statusText.contains("ERROR")
+              color:
+                  _statusText.contains("ERROR") ||
+                      _statusText.startsWith(
+                        'No se pudo cargar la vista previa:',
+                      )
                   ? Colors.redAccent
                   : const Color(0xFF39FF14),
               fontFamily: 'Consolas',
@@ -1180,12 +1282,15 @@ class _YoutubeSearchAndDownloadWorkspaceState
                   children: [
                     // 🛠️ INYECCIÓN UI: Botón de Escucha Previa (Preview)
                     if (_isPreviewLoading && isThisPreviewing)
-                      const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(
-                          color: Color(0xFF39FF14),
-                          strokeWidth: 2,
+                      const Tooltip(
+                        message: 'Cargando vista previa…',
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            color: Color(0xFF39FF14),
+                            strokeWidth: 2,
+                          ),
                         ),
                       )
                     else

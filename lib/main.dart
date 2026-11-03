@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 // 🛠️ INYECCIÓN: El puente de memoria FFI (Rust <> Dart)
 import 'package:gatomix/src/rust/frb_generated.dart';
@@ -129,6 +130,7 @@ Future<void> main([List<String> args = const []]) async {
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
+      await WakelockPlus.enable();
     }
 
     // 🛠️ BINDING 2: Inicialización del Motor Nativo DSP en Rust
