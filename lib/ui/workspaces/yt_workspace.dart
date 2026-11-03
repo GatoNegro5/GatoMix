@@ -13,6 +13,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:media_kit/media_kit.dart';
 
 import '../../core/gatomix_store.dart';
+import '../../core/lyric_match.dart';
 import '../../core/lrc_timeline.dart';
 import '../../core/net/safe_download.dart';
 import '../../core/track_name_clean.dart';
@@ -21,6 +22,7 @@ import 'package:gatomix/core/pipeline_controller.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../../providers/nlp_provider.dart';
+import '../../services/lyric_retry_queue.dart';
 import '../../providers/dsp_provider.dart';
 import '../../providers/db_provider.dart';
 
@@ -1092,6 +1094,15 @@ class _YoutubeSearchAndDownloadWorkspaceState
           () => _statusText = "✅ Automix listo. (Karaoke IA omitido por peso)",
         );
       }
+      if (outcome.lyric == LyricStatus.retry && marks.lyr == 'RETRY') {
+        await ref.read(lyricRetryQueueProvider).enqueue(
+          mp3Path: currentPath,
+          trimmedMs: outcome.trimHeadMs,
+        );
+        if (mounted) {
+          setState(() => _statusText = kLyricServerBusyNotice);
+        }
+      }
     } catch (e) {
       setState(
         () => _statusText = "⚠️ Descargado, pero falló el Auto-Master: $e",
@@ -1250,17 +1261,18 @@ class _YoutubeSearchAndDownloadWorkspaceState
           child: Text(
             _statusText,
             style: TextStyle(
-              color:
-                  _statusText.contains("ERROR") ||
-                      _statusText.startsWith(
-                        'No se pudo cargar la vista previa:',
-                      )
+              color: _statusText == kLyricServerBusyNotice
+                  ? Colors.amber
+                  : _statusText.contains("ERROR") ||
+                        _statusText.startsWith(
+                          'No se pudo cargar la vista previa:',
+                        )
                   ? Colors.redAccent
                   : const Color(0xFF39FF14),
               fontFamily: 'Consolas',
               fontSize: 13,
             ),
-            maxLines: 2,
+            maxLines: 3,
             overflow: TextOverflow.ellipsis,
           ),
         );
