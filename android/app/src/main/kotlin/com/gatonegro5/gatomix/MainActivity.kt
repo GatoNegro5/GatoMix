@@ -9,6 +9,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.downloader.Downloader
@@ -66,23 +67,36 @@ private fun ensureNewPipe() {
     }
 }
 
-private fun bestAudio(videoId: String): AudioStream {
+private class PickedAudio(val stream: AudioStream, val title: String)
+
+private fun bestAudio(videoId: String): PickedAudio {
     ensureNewPipe()
     val ex = ServiceList.YouTube.getStreamExtractor(
         "https://www.youtube.com/watch?v=$videoId",
     )
     ex.fetchPage()
-    return ex.audioStreams.filter { it.isUrl }.maxByOrNull { it.averageBitrate }
-        ?: throw IllegalStateException("Sin stream de audio con URL")
+    val a = ex.audioStreams
+        .filter { it.isUrl && it.format == MediaFormat.M4A }
+        .maxByOrNull { it.averageBitrate }
+        ?: throw IllegalStateException("Sin stream M4A")
+    return PickedAudio(a, ex.name)
 }
 
-private fun audioMap(a: AudioStream): Map<String, Any> {
+private fun audioMap(a: AudioStream, title: String): Map<String, Any> {
+    val bps = a.averageBitrate
+    val kbps = when {
+        bps <= 0 -> 0
+        bps >= 1000 -> bps / 1000
+        else -> bps
+    }
     val len = a.itagItem?.contentLength ?: -1L
     return mapOf(
         "url" to a.content,
         "itag" to a.itag,
         "mime" to (a.format?.mimeType ?: ""),
         "contentLength" to len,
+        "averageBitrate" to kbps,
+        "title" to title,
     )
 }
 
@@ -137,7 +151,8 @@ class MainActivity : AudioServiceActivity() {
                 when (call.method) {
                     "getAudioUrl" -> Thread {
                         try {
-                            val payload = audioMap(bestAudio(videoId))
+                            val picked = bestAudio(videoId)
+                            val payload = audioMap(picked.stream, picked.title)
                             runOnUiThread { result.success(payload) }
                         } catch (e: Throwable) {
                             val msg = e.message ?: e.javaClass.simpleName
@@ -172,7 +187,7 @@ class MainActivity : AudioServiceActivity() {
     }
 
     private fun downloadAudio(videoId: String, destPath: String) {
-        val a = bestAudio(videoId)
+        val a = bestAudio(videoId).stream
         val url = a.content
         val outFile = File(destPath)
         outFile.parentFile?.mkdirs()

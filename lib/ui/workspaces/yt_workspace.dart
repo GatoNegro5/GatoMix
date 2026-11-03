@@ -550,8 +550,26 @@ class _YoutubeSearchAndDownloadWorkspaceState
         () => _statusText = "Resolviendo manifiesto para nombrar archivo...",
       );
       final videoId = VideoId(targetUrl);
-      final video = await _yt.videos.get(videoId);
-      final String trackStem = ytTitleToStem(video.title);
+      var npKbps = 0;
+      final String trackStem;
+      if (Platform.isAndroid) {
+        final Object? raw = await ytNewPipeChannel.invokeMethod('getAudioUrl', {
+          'videoId': videoId.value,
+        });
+        if (raw is! Map) {
+          throw Exception('NewPipe no devolvió la URL de audio');
+        }
+        final Object? title = raw['title'];
+        if (title is! String || title.trim().isEmpty) {
+          throw Exception('NewPipe no devolvió el título');
+        }
+        final Object? br = raw['averageBitrate'];
+        if (br is num) npKbps = br.round();
+        trackStem = ytTitleToStem(title);
+      } else {
+        final video = await _yt.videos.get(videoId);
+        trackStem = ytTitleToStem(video.title);
+      }
 
       final tempDir = Directory.systemTemp;
       final String sep = Platform.pathSeparator;
@@ -588,6 +606,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
             File(tempRawPath).lengthSync() == 0) {
           throw Exception("Fallo al bajar el audio (archivo vacío).");
         }
+        sourceKbps = npKbps;
       } else if (Platform.isIOS) {
         // iOS: no se pueden ejecutar binarios (yt-dlp → "permission
         // denied"). Se baja el AAC/M4A con youtube_explode_dart.
