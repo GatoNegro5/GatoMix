@@ -1,13 +1,18 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:file_selector/file_selector.dart';
 
 // 🛠️ INYECTADO: Backend FFI Nativo y Providers para Auto-Masterización
+import 'package:gatomix/core/pipeline_controller.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
+import 'core/lyric_match.dart';
 import 'providers/metadata_provider.dart';
 import 'providers/nlp_provider.dart';
+import 'services/lyric_retry_queue.dart';
 import 'providers/dsp_provider.dart';
 import 'providers/db_provider.dart';
 
@@ -111,41 +116,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
     }
   }
 
-  Future<void> _offsetLrcTimeline(String lrcPath, int trimmedMs) async {
-    final file = File(lrcPath);
-    if (!file.existsSync() || trimmedMs <= 0) return;
-
-    try {
-      final lines = await file.readAsLines();
-      final regex = RegExp(r'\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)');
-      final newLines = <String>[];
-
-      for (var line in lines) {
-        final match = regex.firstMatch(line);
-        if (match != null) {
-          final min = int.parse(match.group(1)!);
-          final sec = int.parse(match.group(2)!);
-          int ms = int.parse(match.group(3)!);
-          if (match.group(3)!.length == 2) ms *= 10;
-
-          int totalMs = (min * 60000) + (sec * 1000) + ms - trimmedMs;
-          if (totalMs < 0) totalMs = 0;
-
-          final newMin = (totalMs ~/ 60000).toString().padLeft(2, '0');
-          final newSec = ((totalMs % 60000) ~/ 1000).toString().padLeft(2, '0');
-          final newMs = ((totalMs % 1000) ~/ 10).toString().padLeft(2, '0');
-          final text = match.group(4)!;
-
-          newLines.add('[$newMin:$newSec.$newMs]$text');
-        } else {
-          newLines.add(line);
-        }
-      }
-      await file.writeAsString(newLines.join('\n'));
-      debugPrint("✅ Vector LRC compensado en -$trimmedMs ms.");
-    } catch (e) {
-      debugPrint("🔴 Error realineando LRC: $e");
-    }
+  Future<void> _offsetLrcTimeline(String lrcPath, int trimmedMs) {
+    return offsetLrcTimeline(lrcPath, trimmedMs);
   }
 
   Future<void> _handleInput(String input) async {
@@ -280,6 +252,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
   Future<void> _runSingleTrackPipeline(String initialPath) async {
     String currentPath = initialPath;
 
+    LyricFetchOutcome? lyricOutcome;
     try {
       setState(() => _statusText = "⚙️ Limpieza de metadatos...");
       currentPath = await ref
@@ -295,7 +268,13 @@ class _YoutubeSearchAndDownloadWorkspaceState
       // Omitir extracción si el usuario ya verificó el LRC en el Sandbox Pre-Ingesta
       if (!hasPreIngestedLrc) {
         setState(() => _statusText = "📝 Scraping LRCLIB (NLP)...");
-        await ref.read(nlpWorkerProvider).processSingleFile(currentPath);
+        lyricOutcome = await ref
+            .read(nlpWorkerProvider)
+            .processSingleFile(currentPath);
+        final String? notice = lyricIngestNotice(lyricOutcome);
+        if (notice != null && lyricOutcome != LyricFetchOutcome.serverDown) {
+          setState(() => _statusText = notice);
+        }
       } else {
         debugPrint(
           "🟢 [TRACKER PIPELINE] NLP Omitido. Procesando letra verificada por el usuario.",
@@ -422,7 +401,15 @@ class _YoutubeSearchAndDownloadWorkspaceState
           .read(dspWorkerProvider)
           .generateStaticBpmCache(Directory(currentPath).parent.path);
 
-      setState(() => _statusText = "✅ ¡Track inyectado y listo para Automix!");
+      if (lyricOutcome == LyricFetchOutcome.serverDown) {
+        await ref.read(lyricRetryQueueProvider).enqueue(
+          mp3Path: currentPath,
+          trimmedMs: trimmedMs,
+        );
+        setState(() => _statusText = kLyricServerBusyNotice);
+      } else {
+        setState(() => _statusText = "✅ ¡Track inyectado y listo para Automix!");
+      }
     } catch (e) {
       setState(
         () => _statusText = "⚠️ Descargado, pero falló el Auto-Master: $e",
@@ -476,16 +463,10 @@ class _YoutubeSearchAndDownloadWorkspaceState
             "Descargando stream crudo vía Android VR (Anti-Throttle)...",
       );
 
-      final process = await Process.start(ytdlpPath, [
-        '--rm-cache-dir',
-        '-f',
-        '140/bestaudio[ext=m4a]/bestaudio',
-        '--extractor-args',
-        'youtube:player_client=android_vr',
-        '-o',
-        tempRawPath,
-        targetUrl,
-      ]);
+      final process = await Process.start(
+        ytdlpPath,
+        ytDlpRedownloadArgs(output: tempRawPath, url: targetUrl),
+      );
 
       String errorTrace = "";
       process.stdout.listen((_) {});
@@ -663,8 +644,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
                 margin: const EdgeInsets.symmetric(horizontal: 15),
               ),
               Tooltip(
-                message:
-                    "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
+                message: "Ejecuta limpieza, NDK Trim, Sello de agua y descarga letras automáticamente.",
                 child: Row(
                   children: [
                     const Icon(
@@ -738,11 +718,13 @@ class _YoutubeSearchAndDownloadWorkspaceState
             style: TextStyle(
               color: _statusText.contains("ERROR")
                   ? Colors.redAccent
+                  : _statusText == kLyricServerBusyNotice
+                  ? Colors.amber
                   : const Color(0xFF39FF14),
               fontFamily: 'Consolas',
               fontSize: 13,
             ),
-            maxLines: 2,
+            maxLines: 4,
             overflow: TextOverflow.ellipsis,
           ),
         );
@@ -965,8 +947,7 @@ class _PreIngestModalState extends State<PreIngestModal> {
                   filled: true,
                   fillColor: Color(0xFF0A0A0A),
                   border: OutlineInputBorder(),
-                  hintText:
-                      "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
+                  hintText: "Pista sin letra detectada. Puedes pegar un LRC externo aquí.",
                   hintStyle: TextStyle(color: Colors.white24),
                 ),
               ),

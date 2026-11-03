@@ -1,11 +1,16 @@
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'pipeline_provider.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/brand_paths.dart';
+import '../core/gatomix_store.dart';
 import '../core/lrc_timeline.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
@@ -629,9 +634,8 @@ class NlpWorker {
         id3Album: id3.album,
         durationSec: localSec,
       );
-      final String stem = File(
-        audioPath,
-      ).uri.pathSegments.last.replaceAll(RegExp(r'\.[A-Za-z0-9]+$'), '');
+      final String stem = File(audioPath).uri.pathSegments.last
+          .replaceAll(RegExp(r'\.[A-Za-z0-9]+$'), '');
       final q = approxQuery(artist: id.artist, title: id.title, fileStem: stem);
       if (q.title.isEmpty || localSec <= 0) return false;
       final List<Map<String, dynamic>> pool = <Map<String, dynamic>>[];
@@ -682,7 +686,7 @@ class NlpWorker {
         'id': lrclibId,
         'manual': true,
       };
-      await _autoRegistry(folder).writeAsString(jsonEncode(reg));
+      writeLyricsAuto(folder, reg);
     } catch (_) {}
   }
 
@@ -736,16 +740,9 @@ class NlpWorker {
   // Solo las letras que descargó esta app se anotan aquí. Las que tú arreglaste
   // (o cualquier .lrc que no esté en la lista) nunca se tocan ni se borran.
 
-  File _autoRegistry(String folder) =>
-      File('$folder${Platform.pathSeparator}_lyrics_auto.json');
-
   Map<String, dynamic> _readAuto(String folder) {
     try {
-      final f = _autoRegistry(folder);
-      if (f.existsSync()) {
-        final d = jsonDecode(f.readAsStringSync());
-        if (d is Map<String, dynamic>) return d;
-      }
+      return readLyricsAuto(folder);
     } catch (_) {}
     return <String, dynamic>{};
   }
@@ -756,7 +753,7 @@ class NlpWorker {
       final folder = f.parent.path;
       final reg = _readAuto(folder);
       reg[f.uri.pathSegments.last] = f.lengthSync();
-      await _autoRegistry(folder).writeAsString(jsonEncode(reg));
+      writeLyricsAuto(folder, reg);
     } catch (_) {}
   }
 
@@ -768,7 +765,7 @@ class NlpWorker {
       final folder = f.parent.path;
       final reg = _readAuto(folder);
       if (reg.remove(f.uri.pathSegments.last) != null) {
-        await _autoRegistry(folder).writeAsString(jsonEncode(reg));
+        writeLyricsAuto(folder, reg);
       }
     } catch (_) {}
   }
@@ -819,20 +816,24 @@ class NlpWorker {
         }
       });
       try {
-        if (keep.isEmpty) {
-          _autoRegistry(folder).deleteSync();
-        } else {
-          _autoRegistry(folder).writeAsStringSync(jsonEncode(keep));
-        }
+        writeLyricsAuto(folder, keep);
       } catch (_) {}
     }
     return removed;
   }
 
   /// Resultado de intentar la letra de una pista.
+  /// found = letra nueva o ya válida · notFound = sin coincidencia ·
+  /// serverDown = tras 3 intentos sigue 429/5xx/timeout.
+  /// La lógica de descarga no cambia: el detalle sigue en [processSingleFileStatus].
+  Future<LyricFetchOutcome> processSingleFile(String filePath) async {
+    return lyricFetchOutcomeFor(await processSingleFileStatus(filePath));
+  }
+
   /// ok = letra nueva · kept = ya tenía una letra válida (no se toca) ·
-  /// noMatch = sin coincidencia segura · failed = error / pista inexistente.
-  Future<LyricStatus> processSingleFile(String filePath) async {
+  /// noMatch = sin coincidencia segura · failed = error / pista inexistente ·
+  /// retry = servidor caído (429/5xx/timeout tras los intentos).
+  Future<LyricStatus> processSingleFileStatus(String filePath) async {
     if (_enCarpetaOriginal(filePath)) return LyricStatus.kept;
     final file = File(filePath);
     if (!file.existsSync()) return LyricStatus.failed;
@@ -985,7 +986,7 @@ class NlpWorker {
         counts[LyricStatus.kept] = counts[LyricStatus.kept]! + 1;
         continue;
       }
-      final st = await processSingleFile(f.path);
+      final st = await processSingleFileStatus(f.path);
       counts[st] = counts[st]! + 1;
       await Future.delayed(const Duration(milliseconds: 150));
     }
@@ -995,10 +996,25 @@ class NlpWorker {
 
 enum LyricStatus { ok, kept, noMatch, failed, retry, plain, doubt }
 
+/// serverDown solo si el estado es el reintento tras 429/5xx/timeout.
+LyricFetchOutcome lyricFetchOutcomeFor(LyricStatus status) {
+  switch (status) {
+    case LyricStatus.retry:
+      return LyricFetchOutcome.serverDown;
+    case LyricStatus.noMatch:
+    case LyricStatus.failed:
+      return LyricFetchOutcome.notFound;
+    case LyricStatus.ok:
+    case LyricStatus.kept:
+    case LyricStatus.plain:
+    case LyricStatus.doubt:
+      return LyricFetchOutcome.found;
+  }
+}
+
 int? _autoBytes(dynamic size) {
   if (size is num) return size.toInt();
-  if (size is Map && size['bytes'] is num)
-    return (size['bytes'] as num).toInt();
+  if (size is Map && size['bytes'] is num) return (size['bytes'] as num).toInt();
   return null;
 }
 

@@ -477,8 +477,8 @@ void main() {
     expect(lyricHttpTransient(429), isTrue);
     expect(lyricHttpTransient(404), isFalse);
     expect(kLyricHttpTries, 3);
-    expect(lyricRetryDelayMs(0), 1500);
-    expect(lyricRetryDelayMs(1), 3000);
+    expect(lyricRetryDelayMs(0), 3000);
+    expect(lyricRetryDelayMs(1), 10000);
     expect(lyricFailureIsRetry(serverDown: true, hasText: false), isTrue);
     expect(lyricFailureIsRetry(serverDown: true, hasText: true), isFalse);
     final List<Uri> uris = lrclibManualUris(
@@ -789,6 +789,24 @@ void main() {
     expect(await undoAppliedLrc(lrc.path), isTrue);
     expect(lrc.readAsStringSync(), 'vieja');
     await dir.delete(recursive: true);
+  });
+
+  test('espera de LRCLIB y aviso al ingerir', () {
+    expect(lyricRetryDelayMs(0), 3000);
+    expect(lyricRetryDelayMs(1), 10000);
+    expect(
+      lyricIngestNotice(LyricFetchOutcome.serverDown),
+      'MP3 listo. La letra se reintentará sola cada minuto en segundo plano.',
+    );
+    expect(
+      lyricIngestNotice(LyricFetchOutcome.notFound),
+      'No se encontró letra para esta canción.',
+    );
+    expect(lyricIngestNotice(LyricFetchOutcome.found), isNull);
+    expect(
+      lyricIngestNotice(LyricFetchOutcome.serverDown) == kLyricServerBusyNotice,
+      isTrue,
+    );
   });
 }
 

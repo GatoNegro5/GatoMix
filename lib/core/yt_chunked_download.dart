@@ -67,6 +67,7 @@ Future<void> ytChunkedDownload({
   void Function(int done, int total)? onProgress,
   http.Client? client,
   Duration deadline = const Duration(minutes: 3),
+  bool resumeHeldRanges = false,
 }) async {
   final clock = Stopwatch()..start();
   final c = client ?? http.Client();
@@ -98,17 +99,42 @@ Future<void> ytChunkedDownload({
             );
           }
           final mine = current;
-          // Un solo refresco compartido entre conexiones paralelas.
-          pendingRefresh ??= (() async {
-            refreshes++;
-            try {
-              return await refreshUrl();
-            } finally {
-              pendingRefresh = null;
+          if (resumeHeldRanges) {
+            // Móvil: el 403 a mitad no aborta. Otra URL y el mismo rango.
+            final Future<Uri?> refresh;
+            final Future<Uri?>? inflight = pendingRefresh;
+            if (inflight != null) {
+              refresh = inflight;
+            } else {
+              refreshes++;
+              late final Future<Uri?> created;
+              created = () async {
+                try {
+                  return await refreshUrl();
+                } finally {
+                  if (identical(pendingRefresh, created)) {
+                    pendingRefresh = null;
+                  }
+                }
+              }();
+              pendingRefresh = created;
+              refresh = created;
             }
-          })();
-          final u = await pendingRefresh;
-          if (u != null && identical(mine, current)) current = u;
+            final Uri? u = await refresh;
+            if (u != null && identical(mine, current)) current = u;
+          } else {
+            // Un solo refresco compartido entre conexiones paralelas.
+            pendingRefresh ??= (() async {
+              refreshes++;
+              try {
+                return await refreshUrl();
+              } finally {
+                pendingRefresh = null;
+              }
+            })();
+            final u = await pendingRefresh;
+            if (u != null && identical(mine, current)) current = u;
+          }
           throw HttpException('HTTP ${resp.statusCode}');
         }
         if (resp.statusCode != 200 && resp.statusCode != 206) {

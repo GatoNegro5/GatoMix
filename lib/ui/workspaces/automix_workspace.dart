@@ -5,11 +5,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/audio_path.dart';
 import '../../core/bpm_range.dart';
 import '../../core/brand_paths.dart';
+import '../../core/lab_quarantine.dart';
 import '../../djiphone/iphone_library.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/automix_provider.dart';
+import '../mobile/music_picker_screen.dart';
 import '../widgets/approx_lyric_icon.dart';
 import '../../providers/pipeline_provider.dart';
 import '../../providers/theme_provider.dart';
@@ -48,16 +51,19 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
       }
     });
 
+    final bool compactLibrary = Platform.isAndroid || Platform.isIOS;
     final Widget threeSelectorPanels = Row(
       children: [
-        const Expanded(
-          flex: 2,
-          child: Material(
-            color: GatoMixTheme.bgPanel,
-            child: LibraryTreePanel(),
+        if (!compactLibrary) ...<Widget>[
+          const Expanded(
+            flex: 2,
+            child: Material(
+              color: GatoMixTheme.bgPanel,
+              child: LibraryTreePanel(),
+            ),
           ),
-        ),
-        const VerticalDivider(width: 1, color: Colors.white10),
+          const VerticalDivider(width: 1, color: Colors.white10),
+        ],
         const Expanded(flex: 4, child: FolderContentPanel()),
         const VerticalDivider(width: 1, color: Colors.white10),
         const Expanded(flex: 5, child: AutomixPanel()),
@@ -80,6 +86,69 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
           child: threeSelectorPanels,
         ),
       ],
+    );
+  }
+}
+
+class AutomixMobileLibrary extends ConsumerWidget {
+  final ScrollController? scrollController;
+
+  const AutomixMobileLibrary({super.key, this.scrollController});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final List<File> queue = ref.watch(automixQueueProvider);
+    return MusicPickerScreen(
+      rootPath: gatomixMusicRoot(),
+      scrollController: scrollController,
+      queuePaths: <String>[for (final File file in queue) file.path],
+      onEnqueue: (File file) {
+        ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        ref.read(automixQueueProvider.notifier).addTrack(file);
+      },
+      onUndo: (File file) {
+        ref.read(automixQueueProvider.notifier).removeTrack(file.path);
+      },
+      onPlayNext: (File file) {
+        final String? current = ref.read(automixProvider).currentTrackPath;
+        if (current != null && sameAudioPath(current, file.path)) return;
+        final List<String> paths = queueWithPlayNext(
+          <String>[for (final File item in ref.read(automixQueueProvider)) item.path],
+          current,
+          file.path,
+        );
+        ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        ref.read(automixQueueProvider.notifier).restoreQueue(paths);
+        ref.read(automixProvider.notifier).syncDynamicPlaylist(paths);
+      },
+      onAddFolder: (List<File> files) {
+        for (final File file in files) {
+          ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        }
+        ref.read(automixQueueProvider.notifier).addAll(files);
+      },
+      onMixFolder: (List<File> files) async {
+        if (files.isEmpty) return;
+        for (final File file in files) {
+          ref.read(playedTracksProvider.notifier).removeTrack(file.path);
+        }
+        ref.read(automixQueueProvider.notifier).addAll(files);
+        final List<String> paths = <String>[
+          for (final File file in ref.read(automixQueueProvider)) file.path,
+        ];
+        for (final File file in files) {
+          if (!paths.any((String path) => sameAudioPath(path, file.path))) {
+            paths.add(file.path);
+          }
+        }
+        final notifier = ref.read(automixProvider.notifier);
+        notifier.syncDynamicPlaylist(paths);
+        final int index = ref
+            .read(automixProvider)
+            .playlist
+            .indexWhere((String path) => sameAudioPath(path, files.first.path));
+        if (index >= 0) await notifier.jumpToTrack(index);
+      },
     );
   }
 }
@@ -725,7 +794,8 @@ class AutomixPanel extends ConsumerWidget {
     List<File> displayFiles = List.from(automixQueue);
     displayFiles.removeWhere(
       (file) =>
-          playedTracks.contains(file.path) && file.path != currentTrackPath,
+          playedTracks.any((p) => sameAudioPath(p, file.path)) &&
+          !sameAudioPath(file.path, currentTrackPath),
     );
 
     double getTrackBpm(String filename) {
@@ -795,7 +865,36 @@ class AutomixPanel extends ConsumerWidget {
             vertical: isMobile ? 4 : 8,
           ),
           color: GatoMixTheme.bgPanel,
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (Platform.isAndroid || Platform.isIOS)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () {
+                      showMusicPickerSheet(
+                        context,
+                        child: (ScrollController controller) =>
+                            AutomixMobileLibrary(scrollController: controller),
+                      );
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      minimumSize: const Size(0, 32),
+                    ),
+                    child: const Text(
+                      '+ Agregar canciones',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              Row(
             children: [
               Icon(
                 Icons.shuffle,
@@ -970,6 +1069,8 @@ class AutomixPanel extends ConsumerWidget {
                     ],
                   ),
                 ),
+              ),
+            ],
               ),
             ],
           ),
@@ -1962,6 +2063,8 @@ class LyricsSyncPanel extends ConsumerStatefulWidget {
 class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
   bool isArmed = false;
   bool _labBusy = false;
+  final List<String> _labQueue = <String>[];
+  String? _labInFlight;
   final TextEditingController _filaCtrl = TextEditingController();
 
   @override
@@ -2032,13 +2135,25 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
     BuildContext context,
     WidgetRef ref,
   ) async {
-    if (trackPath.isEmpty || _labBusy) return;
-
-    final file = File(trackPath);
-    if (!file.existsSync()) return;
+    if (trackPath.isEmpty) return;
+    if (_labBusy) {
+      final List<String> next = enqueueLabSend(
+        _labQueue,
+        trackPath,
+        inFlight: _labInFlight,
+      );
+      _labQueue
+        ..clear()
+        ..addAll(next);
+      return;
+    }
 
     _labBusy = true;
+    _labInFlight = trackPath;
     try {
+      final file = File(trackPath);
+      if (!file.existsSync()) return;
+
       final automixState = ref.read(automixProvider);
       final automixNotifier = ref.read(automixProvider.notifier);
       final bool wasPlaying = automixState.isPlaying;
@@ -2076,6 +2191,28 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
 
       final fileName = file.uri.pathSegments.last;
       final newPath = '${labDir.path}${Platform.pathSeparator}$fileName';
+      final List<String> companions = companionsOf(trackPath);
+      final bool labOccupied = companions.any(
+        (String p) => File(
+          '${labDir.path}${Platform.pathSeparator}${File(p).uri.pathSegments.last}',
+        ).existsSync(),
+      );
+      if (labOccupied) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                "En el LAB ya hay archivos de esta pista: no se movió nada.",
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              backgroundColor: GatoMixTheme.bgPanel,
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
 
       bool moved = false;
       int attempts = 0;
@@ -2098,15 +2235,12 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
       }
 
       registry[fileName] = trackPath;
-      final lrcFile = File(
-        trackPath.replaceAll(
-          RegExp(r'\.mp3$|\.webm$', caseSensitive: false),
-          '.lrc',
-        ),
-      );
-      if (lrcFile.existsSync()) {
-        lrcFile.renameSync(
-          '${labDir.path}${Platform.pathSeparator}${fileName.replaceAll(RegExp(r'\.mp3$|\.webm$', caseSensitive: false), '.lrc')}',
+      for (final String p in companions) {
+        if (p == trackPath || !File(p).existsSync()) continue;
+        final String name = File(p).uri.pathSegments.last;
+        moveOneNoOverwriteSync(
+          p,
+          '${labDir.path}${Platform.pathSeparator}$name',
         );
       }
       registryFile.writeAsStringSync(jsonEncode(registry));
@@ -2143,6 +2277,11 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
       debugPrint("🔴 Error de I/O consolidando el Laboratorio: $e");
     } finally {
       _labBusy = false;
+      _labInFlight = null;
+      if (mounted && context.mounted && _labQueue.isNotEmpty) {
+        final String next = _labQueue.removeAt(0);
+        unawaited(_sendCurrentTrackToLab(next, context, ref));
+      }
     }
   }
 

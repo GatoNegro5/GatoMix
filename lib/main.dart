@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 // 🛠️ INYECCIÓN: El puente de memoria FFI (Rust <> Dart)
 import 'package:gatomix/src/rust/frb_generated.dart';
@@ -29,8 +30,10 @@ import 'ui/workspaces/lan_sync_workspace.dart';
 import 'ui/workspaces/livedj_workspace.dart';
 import 'ui/workspaces/karaoke_workspace.dart';
 import 'services/audio_interruption.dart';
+import 'services/lyric_retry_queue.dart';
 import 'core/headless_args.dart';
 import 'ui/headless_master_page.dart';
+import 'ui/headless_karaoke_page.dart';
 
 // ==========================================
 // ENRUTADOR DE ESTADO (SPA - Single Page App)
@@ -70,7 +73,12 @@ class RouterNotifier extends Notifier<int> {
 
   int _inferRouteFromAudioSession() {
     try {
-      final file = File(MixStrategyFactory.getStrategy().getSessionPath());
+      final String session = MixStrategyFactory.getStrategy().getSessionPath();
+      final File legacy = File(session);
+      final File live = File(
+        '${legacy.parent.path}${Platform.pathSeparator}liveDj.json',
+      );
+      final File file = legacy.existsSync() ? legacy : live;
       if (!file.existsSync()) return 0;
       final data = jsonDecode(file.readAsStringSync());
       if (data is! Map) return 0;
@@ -123,6 +131,7 @@ Future<void> main([List<String> args = const []]) async {
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
+      await WakelockPlus.enable();
     }
 
     // 🛠️ BINDING 2: Inicialización del Motor Nativo DSP en Rust
@@ -130,6 +139,16 @@ Future<void> main([List<String> args = const []]) async {
 
     // 🛠️ BINDING 3: Inicialización del Motor de Reproducción de Audio (libmpv)
     MediaKit.ensureInitialized();
+
+    final String? karaokeFolder = parseKaraokeFolderArg(args);
+    if (karaokeFolder != null) {
+      runApp(
+        ProviderScope(
+          child: HeadlessKaraokeApp(folder: karaokeFolder),
+        ),
+      );
+      return;
+    }
 
     final String? labRescue = parseLabRescueArg(args);
     final String? masterFolder = labRescue ?? parseMasterFolderArg(args);
@@ -184,6 +203,7 @@ class GatoMixApp extends ConsumerWidget {
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: lyricRetryMessengerKey,
       theme: appTheme,
       builder: (context, child) {
         return _MobileAudioLifecycle(child: child ?? const SizedBox.shrink());
@@ -215,6 +235,7 @@ class _MobileAudioLifecycleState extends ConsumerState<_MobileAudioLifecycle>
     // Llamadas / otras apps de audio: pausa y reanuda como app profesional.
     _focusGuard = AudioInterruptionGuard(ref);
     unawaited(_focusGuard.start());
+    ref.read(lyricRetryQueueProvider).start();
   }
 
   @override

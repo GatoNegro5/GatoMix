@@ -1,6 +1,8 @@
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/audio_path.dart';
+
 /// DNA 60–80 % · Phrase 8 · Stealth (entra 5–10 %, cruza ~60 % sin voz).
 /// Prohibido: fade suelto, corte seco, cambio al final de la pista.
 enum MixFormula { dnaEnergy, phraseGrid, stealthGap }
@@ -21,16 +23,17 @@ int snapPhraseGridMixOut({
   if (barMs <= 0) return dnaMixOutMs;
   final int phraseMs = barMs * 8;
   final int minMs = (durationMs * 0.60).round();
-  final int hardCap = durationMs - 8000;
-  int maxMs = dnaMixOutMs < hardCap ? dnaMixOutMs : hardCap;
-  if (maxMs <= minMs) return dnaMixOutMs;
+  final int maxMs = dnaMixOutMs < durationMs ? dnaMixOutMs : durationMs;
+  if (maxMs <= minMs) {
+    return dnaMixOutMs < durationMs ? dnaMixOutMs : minMs;
+  }
 
   int snapped = (maxMs ~/ phraseMs) * phraseMs;
   if (snapped < minMs) {
     snapped = ((minMs + phraseMs - 1) ~/ phraseMs) * phraseMs;
   }
-  if (snapped < minMs || snapped > maxMs || snapped >= durationMs - 8000) {
-    return dnaMixOutMs;
+  if (snapped < minMs || snapped > maxMs || snapped >= durationMs) {
+    return dnaMixOutMs < durationMs ? dnaMixOutMs : minMs;
   }
   return snapped;
 }
@@ -72,8 +75,8 @@ int stealthMixOutMs({
 }) {
   if (durationMs <= 0) return 0;
   final int lo = (durationMs * 0.60).round();
-  final int hi = min((durationMs * 0.80).round(), durationMs - 8000);
-  if (hi <= lo) return lo.clamp(0, durationMs - 8000);
+  final int hi = (durationMs * 0.80).round();
+  if (hi <= lo) return lo.clamp(0, durationMs);
 
   int bestAt = -1;
   int bestGap = 0;
@@ -107,7 +110,8 @@ int stealthMixOutMs({
   }
 
   if (mixOut > hi) mixOut = hi;
-  if (mixOut >= durationMs - 8000) mixOut = hi;
+  if (mixOut >= durationMs) mixOut = hi < durationMs ? hi : lo;
+  if (hi < lo) return lo.clamp(0, durationMs);
   return mixOut.clamp(lo, hi);
 }
 
@@ -131,7 +135,9 @@ int pickStealthNextIndex({
   int best = -1;
   double bestDiff = double.infinity;
   for (int i = 0; i < remaining.length; i++) {
-    if (currentPath != null && remaining[i] == currentPath) continue;
+    if (currentPath != null && sameAudioPath(remaining[i], currentPath)) {
+      continue;
+    }
     final double b = bpmOf(remaining[i]);
     final double diff = (currentBpm >= 60 && b >= 60)
         ? (currentBpm - b).abs()

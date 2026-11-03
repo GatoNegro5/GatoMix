@@ -1,10 +1,15 @@
 import 'dart:io';
-import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 // 🛠️ INYECTADO: Backend FFI Nativo
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/bpm_range.dart';
+import '../services/track_tags.dart';
+import '../core/gatomix_store.dart';
+import '../core/master_skip.dart';
+import '../core/queue_bpm.dart';
 import 'pipeline_provider.dart';
 import 'db_provider.dart'; // 🛠️ FIX: Enlace al controlador de ISAR
 
@@ -60,10 +65,9 @@ class DspWorker {
               tagData[i + 7];
           if (frameSize > 0 && i + 10 + frameSize <= tagData.length) {
             final bpmStringBytes = tagData.sublist(i + 11, i + 10 + frameSize);
-            final rawString = String.fromCharCodes(
-              bpmStringBytes,
-            ).replaceAll(RegExp(r'[^\d.]'), '');
-            return double.tryParse(rawString) ?? 0.0;
+            return TrackTags.decodeTbpm(
+              String.fromCharCodes(bpmStringBytes.where((int b) => b != 0)),
+            );
           }
         }
       }
@@ -77,39 +81,26 @@ class DspWorker {
     final dir = Directory(directoryPath);
     if (!dir.existsSync()) return;
 
-    final cacheFile = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.json',
-    );
-    final tempCache = File(
-      '$directoryPath${Platform.pathSeparator}_dj_metadata.tmp',
-    );
-    final timeFile = File(
-      '$directoryPath${Platform.pathSeparator}_dj_timestamps.json',
-    );
-    final tempTime = File(
-      '$directoryPath${Platform.pathSeparator}_dj_timestamps.tmp',
-    );
-
     final pipe = ref.read(pipelineProvider.notifier);
 
     Map<String, double> cacheData = {};
     Map<String, int> timestamps = {};
 
-    if (cacheFile.existsSync()) {
-      try {
-        final content = await cacheFile.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        decoded.forEach((k, v) => cacheData[k] = (v as num).toDouble());
-      } catch (_) {}
-    }
+    try {
+      readDjMetadata(directoryPath).forEach((k, v) {
+        if (v is num) {
+          cacheData[k] = v.toDouble();
+        } else if (v is Map && v['bpm'] is num) {
+          cacheData[k] = (v['bpm'] as num).toDouble();
+        }
+      });
+    } catch (_) {}
 
-    if (timeFile.existsSync()) {
-      try {
-        final content = await timeFile.readAsString();
-        final decoded = jsonDecode(content) as Map<String, dynamic>;
-        decoded.forEach((k, v) => timestamps[k] = (v as num).toInt());
-      } catch (_) {}
-    }
+    try {
+      readDjTimestamps(directoryPath).forEach((k, v) {
+        if (v is num) timestamps[k] = v.toInt();
+      });
+    } catch (_) {}
 
     final files = <File>[];
     try {
@@ -173,47 +164,33 @@ class DspWorker {
         debugPrint("⚙️ [DSP Cache] Escaneando binario ID3: $filename");
         await Future.delayed(const Duration(milliseconds: 30));
 
-        final bpm = await _extractBpmFromID3(absolutePath);
-        final double? ranged = bpm > 0 ? fixBpmRange(bpm) : null;
-
-        if (ranged != null) {
-          cacheData[absolutePath] = ranged;
-          cacheData[filename] = ranged;
+        final Map<String, String> tags = readGmxTagsFromFile(absolutePath);
+        if (tags['GMX_ANALYSIS'] == kGmxAnalysis) {
+          final double tagged = await _extractBpmFromID3(absolutePath);
+          final double? ranged = tagged > 0 ? fixBpmRange(tagged) : null;
+          if (ranged != null) {
+            cacheData[absolutePath] = ranged;
+            cacheData[filename] = ranged;
+          }
         } else {
-          final match = RegExp(
-            r'(?:\b|_|-)(\d{2,3}(?:\.\d+)?)\s*bpm\b',
-            caseSensitive: false,
-          ).firstMatch(filename);
-
-          if (match != null) {
-            final double? fromName = fixBpmRange(double.parse(match.group(1)!));
-            if (fromName != null) {
-              cacheData[absolutePath] = fromName;
-              cacheData[filename] = fromName;
-            }
-          } else {
-            pipe.updateProgress(
-              currentIndex,
-              totalFiles,
-              filename,
-              "🧠 Analizando Espectro FFI...",
-            );
-
-            try {
-              final detectedBpm = await rust_dsp
-                  .autoDetectAndInjectBpm(inputPath: absolutePath)
-                  .timeout(const Duration(seconds: 45));
-
-              final double? fixedDetected = fixBpmRange(detectedBpm);
-              cacheData[absolutePath] = fixedDetected ?? 0.0;
-              if (fixedDetected != null) cacheData[filename] = fixedDetected;
-              debugPrint(
-                "✅ [FFT BPM] Matemático: $detectedBpm BPM -> $filename",
-              );
-            } catch (e) {
-              debugPrint("🔴 [FFT BPM FALLO / TIMEOUT]: $e -> $filename");
-              cacheData[absolutePath] = 0.0;
-            }
+          pipe.updateProgress(
+            currentIndex,
+            totalFiles,
+            filename,
+            "🧠 Analizando Espectro FFI...",
+          );
+          try {
+            final double oldBpm = readTbpmSync(absolutePath);
+            final detectedBpm = await rust_dsp
+                .autoDetectAndInjectBpm(inputPath: absolutePath)
+                .timeout(const Duration(seconds: 45));
+            final double? fixedDetected = fixBpmRange(detectedBpm);
+            cacheData[absolutePath] = fixedDetected ?? 0.0;
+            if (fixedDetected != null) cacheData[filename] = fixedDetected;
+            debugPrint('BPM_FIX $filename $oldBpm->$detectedBpm');
+          } catch (e) {
+            debugPrint("🔴 [FFT BPM FALLO / TIMEOUT]: $e -> $filename");
+            cacheData[absolutePath] = 0.0;
           }
         }
 
@@ -224,11 +201,14 @@ class DspWorker {
 
     // Solo guardamos si hubo cambios Y el proceso no fue abortado a la mitad
     if (hasChanges && !ref.read(pipelineProvider).isAborted) {
-      await tempCache.writeAsString(jsonEncode(cacheData));
-      await tempCache.rename(cacheFile.path);
-
-      await tempTime.writeAsString(jsonEncode(timestamps));
-      await tempTime.rename(timeFile.path);
+      writeDjMetadata(
+        directoryPath,
+        bpmIndexPreservingKeys(readDjMetadata(directoryPath), cacheData),
+      );
+      writeDjTimestamps(directoryPath, <String, dynamic>{
+        for (final MapEntry<String, int> e in timestamps.entries)
+          e.key: e.value,
+      });
       debugPrint("🟢 [DSP Cache] Caché estático actualizado atómicamente.");
     }
 

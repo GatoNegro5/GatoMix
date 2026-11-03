@@ -107,6 +107,11 @@ Future<bool> encodeToMp3({
 Future<GmxMarks> readGmxMarks({required String inputPath}) =>
     RustLib.instance.api.crateApiCoreDspReadGmxMarks(inputPath: inputPath);
 
+/// Reescribe TLEN con la duración decodificada. No toca el audio.
+/// `audio=<ms>,tlen=<ms|none>,mismatch=<0|1>,wrote=<0|1>`.
+Future<String> rewriteTlen({required String inputPath}) =>
+    RustLib.instance.api.crateApiCoreDspRewriteTlen(inputPath: inputPath);
+
 /// Escribe una marca GMX de la lista blanca. No crea marcas arbitrarias.
 Future<bool> setGmxMark({
   required String inputPath,

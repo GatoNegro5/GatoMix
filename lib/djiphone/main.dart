@@ -15,6 +15,7 @@ import 'package:gatomix/providers/livedj_provider.dart';
 import 'package:gatomix/providers/pipeline_provider.dart';
 import 'package:gatomix/providers/theme_provider.dart';
 import 'package:gatomix/services/audio_interruption.dart';
+import 'package:gatomix/services/lyric_retry_queue.dart';
 import 'package:gatomix/ui/widgets/app_version_label.dart';
 import 'package:gatomix/ui/workspaces/automix_workspace.dart';
 import 'package:gatomix/ui/workspaces/dsp_workspace.dart';
@@ -66,9 +67,14 @@ class DjIphoneRouter extends Notifier<int> {
 
   int _inferRouteFromAudioSession() {
     try {
-      final file = File(
-        '${IphoneLibrary.playlistsDir}${Platform.pathSeparator}_player_session.json',
+      final String sep = Platform.pathSeparator;
+      final File legacy = File(
+        '${IphoneLibrary.playlistsDir}${sep}_player_session.json',
       );
+      final File live = File(
+        '${IphoneLibrary.playlistsDir}${sep}liveDj.json',
+      );
+      final File file = legacy.existsSync() ? legacy : live;
       if (!file.existsSync()) return 0;
       final data = jsonDecode(file.readAsStringSync());
       if (data is! Map) return 0;
@@ -143,6 +149,7 @@ class DjIphoneApp extends ConsumerWidget {
     return MaterialApp(
       title: 'GatoMix',
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: lyricRetryMessengerKey,
       theme: appTheme,
       builder: (context, child) {
         return _DjIphoneLifecycle(child: child ?? const SizedBox.shrink());
@@ -173,6 +180,7 @@ class _DjIphoneLifecycleState extends ConsumerState<_DjIphoneLifecycle>
     // Llamadas / otras apps de audio: pausa y reanuda como app profesional.
     _focusGuard = AudioInterruptionGuard(ref);
     unawaited(_focusGuard.start());
+    ref.read(lyricRetryQueueProvider).start();
   }
 
   @override

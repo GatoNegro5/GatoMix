@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
+
 import '../core/audio/af_caps.dart';
 import '../core/hal/platform_strategy.dart';
 
@@ -54,6 +56,17 @@ class AdaptiveEq {
   /// medido solo en 30 s, por eso canciones masterizadas y no masterizadas
   /// sonaban distinto.
   static const double targetLufs = -14.0;
+
+  /// Arranques (s) de las ventanas de sonoridad integrada. Igual con
+  /// `GMX_LUFS_DONE`: la ganancia queda en 0 solo si la medida cae en
+  /// −14 ±1 LU (`soundCheckGainDb`). No se salta la medida.
+  @visibleForTesting
+  static List<int> integratedLoudnessStarts({bool lufsDone = false}) {
+    final List<int> windows = <int>[for (int s = 0; s < 1200; s += 30) s];
+    // La marca no acorta la medida: las dos ramas son la pista completa.
+    if (lufsDone) return windows;
+    return windows;
+  }
 
   /// Ganancia (dB) hacia [targetLufs] sin clipping: nunca más arriba que
   /// pico −1,5 dB (no hay limitador en todos los reproductores), tope
@@ -252,9 +265,8 @@ class AdaptiveEq {
       _mem[k] = c;
       return Future.value(c);
     }
-    return _pending[k] ??= _enqueue(
-      () => _measure(path, k),
-    ).whenComplete(() => _pending.remove(k));
+    return _pending[k] ??= _enqueue(() => _measure(path, k))
+        .whenComplete(() => _pending.remove(k));
   }
 
   static Future<AdaptiveProfile?> _enqueue(
@@ -301,11 +313,12 @@ class AdaptiveEq {
       );
       // 1.0.19 Sound Check: sonoridad integrada de la pista COMPLETA, por
       // tramos de 30 s (memoria acotada en el celular). El espectro sigue
-      // saliendo de la ventana de 30 s.
+      // saliendo de la ventana de 30 s. GMX_LUFS_DONE no anula la medida:
+      // la ganancia es 0 solo si el resultado cae en −14 ±1 LU.
       if (p != null) {
         final List<double> blocks = <double>[];
         double peak = 0;
-        for (int start = 0; start < 1200; start += 30) {
+        for (final int start in integratedLoudnessStarts()) {
           Uint8List chunk;
           try {
             chunk = await rust_dsp.decodeMonoPcm(

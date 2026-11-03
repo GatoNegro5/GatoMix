@@ -11,6 +11,185 @@ import 'package:mime/mime.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 
+/// Destino remoto de la raíz Música. El servidor ya resuelve `ROOT`.
+const String lanMusicRootToken = 'ROOT';
+const String lanMusicRootLabel = 'Música (raíz)';
+
+const Duration lanSendTimeout = Duration(seconds: 60);
+const List<Duration> lanSendBackoff = <Duration>[
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+];
+const int lanSendMaxAttempts = 4;
+
+enum LanFileResult { copied, existed, failed }
+
+class LanJobCounts {
+  int copied = 0;
+  int existed = 0;
+  int failed = 0;
+
+  void add(LanFileResult result) {
+    switch (result) {
+      case LanFileResult.copied:
+        copied++;
+      case LanFileResult.existed:
+        existed++;
+      case LanFileResult.failed:
+        failed++;
+    }
+  }
+}
+
+LanFileResult lanClassifyStatus(int status, {bool alreadyThere = false}) {
+  if (alreadyThere) return LanFileResult.existed;
+  if (status == 200) return LanFileResult.copied;
+  return LanFileResult.failed;
+}
+
+String? lanFailureNotice(int status, String name) {
+  if (status == 403) return 'Permiso de almacenamiento denegado: $name';
+  if (status == 500) return 'Falló la escritura remota: $name';
+  if (status != 200) return 'Falló el envío: $name ($status)';
+  return null;
+}
+
+String lanFinalLog({
+  required bool mobile,
+  required int copied,
+  required int existed,
+  required int failed,
+  required int skippedMixed,
+}) {
+  if (!mobile) {
+    return "✅ Job Finalizado. Éxito: $copied | Saltados/Fallos: $skippedMixed";
+  }
+  if (failed > 0) {
+    return "Job Finalizado con $failed fallidos. Copiados: $copied | Ya existían: $existed | Fallidos: $failed";
+  }
+  return "Job Finalizado. Copiados: $copied | Ya existían: $existed | Fallidos: 0";
+}
+
+bool lanFinalIsRed({required bool mobile, required int failed}) =>
+    mobile && failed > 0;
+
+int lanUploadHttpStatus({
+  required bool mobile,
+  required bool denied,
+  required bool writeFailed,
+}) {
+  if (!mobile) return 200;
+  if (denied) return 403;
+  if (writeFailed) return 500;
+  return 200;
+}
+
+bool lanUploadBlocked({required bool mobile, required bool storageGranted}) {
+  if (!mobile) return false;
+  return !storageGranted;
+}
+
+/// 100 % solo al cerrar el job. A mitad de archivo el avance es lo ya terminado.
+double lanTransferProgress({
+  required bool mobile,
+  required int completed,
+  required int total,
+  required bool jobFinished,
+  required bool cancelled,
+}) {
+  if (!mobile) {
+    if (jobFinished) return 1;
+    if (total <= 0) return 0;
+    return completed / total;
+  }
+  if (cancelled || !jobFinished) {
+    if (total <= 0) return 0;
+    return completed / total;
+  }
+  return 1;
+}
+
+List<String> orderRemoteFolders(List<String> folders, {required bool mobile}) {
+  final List<String> sorted = <String>[...folders]..sort(
+    (String a, String b) => a.toLowerCase().compareTo(b.toLowerCase()),
+  );
+  if (!mobile) return sorted;
+  final List<String> rest = sorted
+      .where((String f) => f != lanMusicRootToken && f.isNotEmpty)
+      .toList();
+  return <String>[lanMusicRootToken, ...rest];
+}
+
+String? defaultRemoteSelection(List<String> folders, {required bool mobile}) {
+  if (mobile) return lanMusicRootToken;
+  if (folders.isEmpty) return null;
+  final List<String> sorted = orderRemoteFolders(folders, mobile: false);
+  return sorted.first;
+}
+
+String lanRemoteLabel(String path) {
+  if (path == lanMusicRootToken) return lanMusicRootLabel;
+  return path.split('/').last;
+}
+
+List<String> withMusicRootFirst(List<String> visible, {required bool mobile}) {
+  if (!mobile) return visible;
+  final List<String> rest = visible
+      .where((String p) => p != lanMusicRootToken)
+      .toList();
+  return <String>[lanMusicRootToken, ...rest];
+}
+
+String? pickLanIpv4(
+  List<({String name, List<String> addresses})> interfaces, {
+  required bool preferWlan,
+}) {
+  String? first;
+  String? wlan;
+  for (final ({String name, List<String> addresses}) interface in interfaces) {
+    final String name = interface.name.toLowerCase();
+    if (name.contains('virtual') || name == 'lo') continue;
+    if (interface.addresses.isEmpty) continue;
+    final String address = interface.addresses.first;
+    first ??= address;
+    if (preferWlan && name.contains('wlan')) {
+      wlan ??= address;
+    }
+  }
+  if (preferWlan && wlan != null) return wlan;
+  return first;
+}
+
+/// Un intento y 3 reintentos. Las esperas son 1 s, 2 s y 4 s.
+/// 403 no se reintenta. 200 termina. El resto y los errores de red sí.
+Future<int> lanSendWithRetry(
+  Future<int> Function() attempt, {
+  Duration timeout = lanSendTimeout,
+  List<Duration> backoff = lanSendBackoff,
+  int maxAttempts = lanSendMaxAttempts,
+  Future<void> Function(Duration delay)? wait,
+}) async {
+  final Future<void> Function(Duration delay) pause =
+      wait ?? (Duration delay) => Future<void>.delayed(delay);
+  Object? lastError;
+  for (var attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+    if (attemptIndex > 0) {
+      await pause(backoff[attemptIndex - 1]);
+    }
+    try {
+      final int code = await attempt().timeout(timeout);
+      if (code == 200 || code == 403 || attemptIndex == maxAttempts - 1) {
+        return code;
+      }
+    } catch (e) {
+      lastError = e;
+      if (attemptIndex == maxAttempts - 1) rethrow;
+    }
+  }
+  throw lastError ?? StateError('lan send');
+}
+
 class LanSyncWorkspace extends ConsumerStatefulWidget {
   const LanSyncWorkspace({super.key});
 
@@ -54,6 +233,13 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   int _currentFileIndex = 0;
   int _successfulTransfers = 0;
   int _skippedTransfers = 0;
+  int _existedTransfers = 0;
+  int _failedTransfers = 0;
+  final List<File> _retryPush = <File>[];
+  final List<String> _retryPull = <String>[];
+  bool _lanFinalRed = false;
+
+  bool get _lanMobile => Platform.isAndroid || Platform.isIOS;
 
   // 🎤 KARAOKE STATE MANAGER
   final List<Map<String, dynamic>> _karaokeQueue = [];
@@ -102,6 +288,17 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   }
 
   Future<void> _bootSequence() async {
+    if (_lanMobile) {
+      _scanLocalMusicFolders();
+      await _bootRestServer();
+      if (_server != null) _startNetworkSweeper();
+      await _ensurePermissionsAndFirewall();
+      if (_server == null) {
+        await _bootRestServer();
+        if (_server != null) _startNetworkSweeper();
+      }
+      return;
+    }
     await _ensurePermissionsAndFirewall();
     _scanLocalMusicFolders();
     await _bootRestServer();
@@ -305,17 +502,42 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     });
   }
 
+  Future<bool> _lanStorageGranted() async {
+    if (!Platform.isAndroid) return true;
+    if (await Permission.manageExternalStorage.isGranted) return true;
+    if (await Permission.storage.isGranted) return true;
+    if (await Permission.audio.isGranted) return true;
+    return false;
+  }
+
   // 🛠️ API CORE: Endpoints de Aniquilación y Metadata Inyectados
   Future<void> _bootRestServer() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
       );
-      for (var interface in interfaces) {
-        if (!interface.name.toLowerCase().contains('virtual') &&
-            interface.name != 'lo') {
-          _localIp = interface.addresses.first.address;
-          break;
+      if (_lanMobile) {
+        final String? ip = pickLanIpv4(
+          <({String name, List<String> addresses})>[
+            for (final NetworkInterface interface in interfaces)
+              (
+                name: interface.name,
+                addresses: <String>[
+                  for (final InternetAddress address in interface.addresses)
+                    address.address,
+                ],
+              ),
+          ],
+          preferWlan: true,
+        );
+        if (ip != null) _localIp = ip;
+      } else {
+        for (var interface in interfaces) {
+          if (!interface.name.toLowerCase().contains('virtual') &&
+              interface.name != 'lo') {
+            _localIp = interface.addresses.first.address;
+            break;
+          }
         }
       }
 
@@ -442,6 +664,23 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       }
 
       if (request.method == 'POST' && path == '/api/upload') {
+        final bool lanMobile = Platform.isAndroid || Platform.isIOS;
+        if (lanUploadBlocked(
+          mobile: lanMobile,
+          storageGranted: lanMobile ? await _lanStorageGranted() : true,
+        )) {
+          request.response
+            ..statusCode = lanUploadHttpStatus(
+              mobile: true,
+              denied: true,
+              writeFailed: false,
+            )
+            ..write('permiso de almacenamiento')
+            ..close();
+          return;
+        }
+        var writeFailed = false;
+        Object? writeError;
         final targetDir = _resolvePath(query['dir'] ?? 'ROOT');
         final relFolder = query['rel'] ?? '';
 
@@ -452,7 +691,22 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         }
 
         final dir = Directory(finalDirPath);
-        if (!dir.existsSync()) dir.createSync(recursive: true);
+        try {
+          if (!dir.existsSync()) dir.createSync(recursive: true);
+        } catch (e) {
+          if (lanMobile) {
+            request.response
+              ..statusCode = lanUploadHttpStatus(
+                mobile: true,
+                denied: false,
+                writeFailed: true,
+              )
+              ..write('escritura: $e')
+              ..close();
+            return;
+          }
+          rethrow;
+        }
 
         final boundary = request.headers.contentType?.parameters['boundary'];
         if (boundary != null) {
@@ -467,35 +721,55 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                 r'filename="([^"]+)"',
               ).firstMatch(contentDisposition);
               if (match != null) {
-                final savePath =
-                    '${dir.path}${Platform.pathSeparator}${match.group(1)}';
-                if (savePath.toLowerCase().endsWith('.lrc')) {
-                  // 1.0.20+38: la letra confirmada gana; nunca vuelve a
-                  // aproximada ([gmx_approx]).
-                  final bytes = <int>[];
-                  await for (final c in part) {
-                    bytes.addAll(c);
+                try {
+                  final savePath =
+                      '${dir.path}${Platform.pathSeparator}${match.group(1)}';
+                  if (savePath.toLowerCase().endsWith('.lrc')) {
+                    // 1.0.20+38: la letra confirmada gana; nunca vuelve a
+                    // aproximada ([gmx_approx]).
+                    final bytes = <int>[];
+                    await for (final c in part) {
+                      bytes.addAll(c);
+                    }
+                    final incoming = utf8.decode(bytes, allowMalformed: true);
+                    final dest = File(savePath);
+                    final existing = dest.existsSync()
+                        ? await dest.readAsString().catchError((_) => '')
+                        : null;
+                    if (lrcSyncShouldReplace(
+                      existing: existing,
+                      incoming: incoming,
+                      overwrite: query['ow'] != '0',
+                    )) {
+                      await dest.writeAsBytes(bytes);
+                      approxLyricRevision.value++;
+                    }
+                    continue;
                   }
-                  final incoming = utf8.decode(bytes, allowMalformed: true);
-                  final dest = File(savePath);
-                  final existing = dest.existsSync()
-                      ? await dest.readAsString().catchError((_) => '')
-                      : null;
-                  if (lrcSyncShouldReplace(
-                    existing: existing,
-                    incoming: incoming,
-                    overwrite: query['ow'] != '0',
-                  )) {
-                    await dest.writeAsBytes(bytes);
-                    approxLyricRevision.value++;
+                  final sink = File(savePath).openWrite();
+                  await part.pipe(sink);
+                  await sink.close();
+                } catch (e) {
+                  if (lanMobile) {
+                    writeFailed = true;
+                    writeError = e;
+                    break;
                   }
-                  continue;
+                  rethrow;
                 }
-                final sink = File(savePath).openWrite();
-                await part.pipe(sink);
-                await sink.close();
               }
             }
+          }
+          if (writeFailed && lanMobile) {
+            request.response
+              ..statusCode = lanUploadHttpStatus(
+                mobile: true,
+                denied: false,
+                writeFailed: true,
+              )
+              ..write('escritura: $writeError')
+              ..close();
+            return;
           }
           request.response
             ..statusCode = 200
@@ -956,15 +1230,21 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         if (mounted) {
           setState(() {
             folders.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-            _remoteFolderPaths = folders;
+            _remoteFolderPaths = orderRemoteFolders(folders, mobile: false);
             _currentLog =
                 "✅ Árbol remoto obtenido: ${folders.length} carpetas.";
-            if (_selectedRemotePath == null && folders.isNotEmpty) {
-              _selectedRemotePath = folders.first;
-              _fetchRemoteFiles(targetIp, _selectedRemotePath!);
-            } else if (folders.isEmpty) {
-              _currentLog =
-                  "⚠️ HTTP 200 OK: La app remota respondió, pero su carpeta Music está VACÍA o no diste permiso en pantalla.";
+            if (_selectedRemotePath == null) {
+              final String? sel = defaultRemoteSelection(
+                folders,
+                mobile: _lanMobile,
+              );
+              if (sel != null) {
+                _selectedRemotePath = sel;
+                _fetchRemoteFiles(targetIp, sel);
+              } else {
+                _currentLog =
+                    "⚠️ HTTP 200 OK: La app remota respondió, pero su carpeta Music está VACÍA o no diste permiso en pantalla.";
+              }
             }
           });
         }
@@ -1144,7 +1424,11 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     }
   }
 
-  Future<void> _executeTransferJob(bool isDirectoryClone) async {
+  Future<void> _executeTransferJob(
+    bool isDirectoryClone, {
+    List<File>? onlyPush,
+    List<String>? onlyPull,
+  }) async {
     setState(() {
       _isTransferring = true;
       _cancelRequested = false;
@@ -1152,30 +1436,39 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       _currentFileIndex = 0;
       _successfulTransfers = 0;
       _skippedTransfers = 0;
+      _existedTransfers = 0;
+      _failedTransfers = 0;
+      _lanFinalRed = false;
+      _retryPush.clear();
+      _retryPull.clear();
       _currentLog = "Iniciando Job REST (Evaluando metadatos y colisiones)...";
     });
 
     if (_isPushMode) {
-      Set<String> pushQueue = {};
-      if (isDirectoryClone) {
-        pushQueue.addAll(
-          _getFilesRecursively(
-            Directory(_selectedLocalPath!),
-          ).map((f) => f.path),
-        );
+      late final List<File> files;
+      if (onlyPush != null) {
+        files = List<File>.from(onlyPush);
       } else {
-        for (String path in _selectedFilesToTransfer) {
-          pushQueue.add(path);
-          if (path.toLowerCase().endsWith('.mp3')) {
-            final lrcPath = '${path.substring(0, path.length - 4)}.lrc';
-            final txtPath = '${path.substring(0, path.length - 4)}.txt';
-            if (File(lrcPath).existsSync()) pushQueue.add(lrcPath);
-            if (File(txtPath).existsSync()) pushQueue.add(txtPath);
+        Set<String> pushQueue = {};
+        if (isDirectoryClone) {
+          pushQueue.addAll(
+            _getFilesRecursively(
+              Directory(_selectedLocalPath!),
+            ).map((f) => f.path),
+          );
+        } else {
+          for (String path in _selectedFilesToTransfer) {
+            pushQueue.add(path);
+            if (path.toLowerCase().endsWith('.mp3')) {
+              final lrcPath = '${path.substring(0, path.length - 4)}.lrc';
+              final txtPath = '${path.substring(0, path.length - 4)}.txt';
+              if (File(lrcPath).existsSync()) pushQueue.add(lrcPath);
+              if (File(txtPath).existsSync()) pushQueue.add(txtPath);
+            }
           }
         }
+        files = pushQueue.map((p) => File(p)).toList();
       }
-
-      final files = pushQueue.map((p) => File(p)).toList();
       setState(() => _totalFiles = files.length);
 
       final localBaseDirPath = Directory(_selectedLocalPath!).path;
@@ -1206,14 +1499,29 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         setState(() {
           _currentFileIndex = i + 1;
-          _transferProgress = (_currentFileIndex - 1) / _totalFiles;
+          if (!_lanMobile) {
+            _transferProgress = (_currentFileIndex - 1) / _totalFiles;
+          }
         });
 
         final bool isLrc = fileName.toLowerCase().endsWith('.lrc');
         if (_currentRemoteFiles.any((f) => f['name'] == fileName)) {
           if (!_overwriteExisting && !isLrc) {
-            setState(() => _currentLog = "⏩ SALTADO (Ya existe): $fileName");
-            _skippedTransfers++;
+            setState(() {
+              _currentLog = "⏩ SALTADO (Ya existe): $fileName";
+              if (_lanMobile) {
+                _existedTransfers++;
+                _transferProgress = lanTransferProgress(
+                  mobile: true,
+                  completed: i + 1,
+                  total: _totalFiles,
+                  jobFinished: false,
+                  cancelled: false,
+                );
+              } else {
+                _skippedTransfers++;
+              }
+            });
             continue;
           } else {
             setState(() => _currentLog = "🔄 REEMPLAZANDO: $fileName");
@@ -1222,24 +1530,76 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           setState(() => _currentLog = "⬆️ ENVIANDO: $fileName");
         }
 
-        try {
-          final request = http.MultipartRequest(
-            'POST',
-            Uri.parse(
-              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
-            ),
-          );
-          request.files.add(
-            await http.MultipartFile.fromPath('file', file.path),
-          );
-          final response = await request.send();
-          if (response.statusCode == 200) {
-            _successfulTransfers++;
-          } else {
+        if (_lanMobile) {
+          try {
+            final int code = await lanSendWithRetry(() async {
+              final request = http.MultipartRequest(
+                'POST',
+                Uri.parse(
+                  'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
+                ),
+              );
+              request.files.add(
+                await http.MultipartFile.fromPath('file', file.path),
+              );
+              final http.StreamedResponse response = await request.send();
+              final int status = response.statusCode;
+              await response.stream.drain<void>();
+              return status;
+            });
+            final LanFileResult result = lanClassifyStatus(code);
+            if (result == LanFileResult.copied) {
+              _successfulTransfers++;
+            } else {
+              _failedTransfers++;
+              _retryPush.add(file);
+              final String? notice = lanFailureNotice(code, fileName);
+              if (notice != null) {
+                _currentLog = notice;
+                if (code == 403 || code == 500) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.maybeOf(
+                    context,
+                  )?.showSnackBar(SnackBar(content: Text(notice)));
+                }
+              }
+            }
+          } catch (_) {
+            _failedTransfers++;
+            _retryPush.add(file);
+            _currentLog = 'Falló el envío: $fileName';
+          }
+          if (mounted) {
+            setState(() {
+              _transferProgress = lanTransferProgress(
+                mobile: true,
+                completed: i + 1,
+                total: _totalFiles,
+                jobFinished: false,
+                cancelled: false,
+              );
+            });
+          }
+        } else {
+          try {
+            final request = http.MultipartRequest(
+              'POST',
+              Uri.parse(
+                'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
+              ),
+            );
+            request.files.add(
+              await http.MultipartFile.fromPath('file', file.path),
+            );
+            final response = await request.send();
+            if (response.statusCode == 200) {
+              _successfulTransfers++;
+            } else {
+              _skippedTransfers++;
+            }
+          } catch (_) {
             _skippedTransfers++;
           }
-        } catch (_) {
-          _skippedTransfers++;
         }
 
         await Future.delayed(const Duration(milliseconds: 15));
@@ -1260,7 +1620,12 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         }
       }
     } else {
-      final files = _currentRemoteFiles;
+      final files = onlyPull != null
+          ? <dynamic>[
+              for (final String name in onlyPull)
+                <String, dynamic>{'name': name},
+            ]
+          : _currentRemoteFiles;
       setState(() => _totalFiles = files.length);
 
       final localDir = Directory(_selectedLocalPath!);
@@ -1270,7 +1635,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         setState(() {
           _currentFileIndex = i + 1;
-          _transferProgress = (_currentFileIndex - 1) / _totalFiles;
+          if (!_lanMobile) {
+            _transferProgress = (_currentFileIndex - 1) / _totalFiles;
+          }
         });
 
         final saveFile = File(
@@ -1280,8 +1647,21 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         final bool isLrc = '$fileName'.toLowerCase().endsWith('.lrc');
         if (saveFile.existsSync()) {
           if (!_overwriteExisting && !isLrc) {
-            setState(() => _currentLog = "⏩ SALTADO (Ya existe): $fileName");
-            _skippedTransfers++;
+            setState(() {
+              _currentLog = "⏩ SALTADO (Ya existe): $fileName";
+              if (_lanMobile) {
+                _existedTransfers++;
+                _transferProgress = lanTransferProgress(
+                  mobile: true,
+                  completed: i + 1,
+                  total: _totalFiles,
+                  jobFinished: false,
+                  cancelled: false,
+                );
+              } else {
+                _skippedTransfers++;
+              }
+            });
             continue;
           } else {
             setState(() => _currentLog = "🔄 REEMPLAZANDO: $fileName");
@@ -1314,18 +1694,54 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               await saveFile.writeAsBytes(bytes);
               approxLyricRevision.value++;
               _successfulTransfers++;
+            } else if (_lanMobile) {
+              _existedTransfers++;
             } else {
               _skippedTransfers++;
             }
           } else if (response.statusCode == 200) {
             await response.pipe(saveFile.openWrite());
             _successfulTransfers++;
+          } else if (_lanMobile) {
+            _failedTransfers++;
+            _retryPull.add('$fileName');
+            final String? notice = lanFailureNotice(
+              response.statusCode,
+              '$fileName',
+            );
+            if (notice != null) {
+              _currentLog = notice;
+              if (response.statusCode == 403 || response.statusCode == 500) {
+                if (!mounted) return;
+                ScaffoldMessenger.maybeOf(
+                  context,
+                )?.showSnackBar(SnackBar(content: Text(notice)));
+              }
+            }
           } else {
             _skippedTransfers++;
           }
           client.close();
         } catch (_) {
-          _skippedTransfers++;
+          if (_lanMobile) {
+            _failedTransfers++;
+            _retryPull.add('$fileName');
+            _currentLog = 'Falló el envío: $fileName';
+          } else {
+            _skippedTransfers++;
+          }
+        }
+
+        if (_lanMobile && mounted) {
+          setState(() {
+            _transferProgress = lanTransferProgress(
+              mobile: true,
+              completed: i + 1,
+              total: _totalFiles,
+              jobFinished: false,
+              cancelled: false,
+            );
+          });
         }
 
         await Future.delayed(const Duration(milliseconds: 15));
@@ -1335,15 +1751,39 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     }
 
     setState(() {
-      _transferProgress = 1.0;
+      _transferProgress = _lanMobile
+          ? lanTransferProgress(
+              mobile: true,
+              completed: _currentFileIndex,
+              total: _totalFiles,
+              jobFinished: true,
+              cancelled: _cancelRequested,
+            )
+          : 1.0;
       _isTransferring = false;
-      _currentLog =
-          "✅ Job Finalizado. Éxito: $_successfulTransfers | Saltados/Fallos: $_skippedTransfers";
+      _lanFinalRed = lanFinalIsRed(mobile: _lanMobile, failed: _failedTransfers);
+      _currentLog = lanFinalLog(
+        mobile: _lanMobile,
+        copied: _successfulTransfers,
+        existed: _existedTransfers,
+        failed: _failedTransfers,
+        skippedMixed: _skippedTransfers,
+      );
       _selectedFilesToTransfer.clear();
     });
 
     if (_selectedDeviceIp != null) {
       _fetchRemoteDirectoryTree(_selectedDeviceIp!);
+    }
+  }
+
+  void _retryFailed() {
+    final List<File> push = List<File>.from(_retryPush);
+    final List<String> pull = List<String>.from(_retryPull);
+    if (push.isNotEmpty) {
+      _executeTransferJob(false, onlyPush: push);
+    } else if (pull.isNotEmpty) {
+      _executeTransferJob(false, onlyPull: pull);
     }
   }
 
@@ -1408,7 +1848,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     if (!_isTransferring &&
         _transferProgress == 0.0 &&
         _successfulTransfers == 0 &&
-        _skippedTransfers == 0) {
+        _skippedTransfers == 0 &&
+        _existedTransfers == 0 &&
+        _failedTransfers == 0) {
       return const SizedBox.shrink();
     }
     return Positioned.fill(
@@ -1443,9 +1885,11 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                 Text(
                   _currentLog,
                   style: TextStyle(
-                    color: _isPushMode
-                        ? const Color(0xFF39FF14)
-                        : const Color(0xFF00FFFF),
+                    color: _lanFinalRed
+                        ? Colors.redAccent
+                        : (_isPushMode
+                              ? const Color(0xFF39FF14)
+                              : const Color(0xFF00FFFF)),
                     fontFamily: 'Consolas',
                     fontSize: 11,
                   ),
@@ -1467,13 +1911,40 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                     child: const Text("KILL SWITCH"),
                   )
                 else
-                  ElevatedButton(
-                    onPressed: () => setState(() {
-                      _transferProgress = 0.0;
-                      _successfulTransfers = 0;
-                      _skippedTransfers = 0;
-                    }),
-                    child: const Text("CERRAR TERMINAL"),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_lanMobile &&
+                          (_retryPush.isNotEmpty || _retryPull.isNotEmpty))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: ElevatedButton(
+                            onPressed: _retryFailed,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.redAccent,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(48, 48),
+                            ),
+                            child: const Text(
+                              'Reintentar fallidos',
+                              style: TextStyle(fontSize: 14),
+                            ),
+                          ),
+                        ),
+                      ElevatedButton(
+                        onPressed: () => setState(() {
+                          _transferProgress = 0.0;
+                          _successfulTransfers = 0;
+                          _skippedTransfers = 0;
+                          _existedTransfers = 0;
+                          _failedTransfers = 0;
+                          _lanFinalRed = false;
+                          _retryPush.clear();
+                          _retryPull.clear();
+                        }),
+                        child: const Text("CERRAR TERMINAL"),
+                      ),
+                    ],
                   ),
               ],
             ),
@@ -1845,7 +2316,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                     size: 18,
                   ),
                   title: Text(
-                    path.split('/').last,
+                    lanRemoteLabel(path),
                     style: TextStyle(
                       color: isSelected ? Colors.white : Colors.white70,
                       fontSize: 13,
@@ -2030,6 +2501,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         if (allExpanded) visibleRemotePaths.add(path);
       }
     }
+    visibleRemotePaths = withMusicRootFirst(
+      visibleRemotePaths,
+      mobile: _lanMobile,
+    );
 
     return LayoutBuilder(
       builder: (context, constraints) {

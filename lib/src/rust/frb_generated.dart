@@ -172,6 +172,8 @@ abstract class RustLibApi extends BaseApi {
     required String value,
   });
 
+  Future<String> crateApiCoreDspRewriteTlen({required String inputPath});
+
   Future<void> crateApiCoreDspStartMasterRecording({
     required String outputPath,
     required int bitrateKbps,
@@ -1062,6 +1064,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreDspSetGmxMarkConstMeta => const TaskConstMeta(
     debugName: "set_gmx_mark",
     argNames: ["inputPath", "key", "value"],
+  );
+
+  @override
+  Future<String> crateApiCoreDspRewriteTlen({required String inputPath}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(inputPath, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 30,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreDspRewriteTlenConstMeta,
+        argValues: [inputPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreDspRewriteTlenConstMeta => const TaskConstMeta(
+    debugName: "rewrite_tlen",
+    argNames: ["inputPath"],
   );
 
   @override

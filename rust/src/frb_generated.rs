@@ -1310,6 +1310,39 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
+fn wire__crate__api__core_dsp__rewrite_tlen_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "rewrite_tlen",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_input_path = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core_dsp::rewrite_tlen(api_input_path)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn pde_ffi_dispatcher_primary_impl(
     func_id: i32,
     port: flutter_rust_bridge::for_generated::MessagePort,
@@ -1382,6 +1415,7 @@ fn pde_ffi_dispatcher_primary_impl(
         27 => wire__crate__api__core_dsp__master_arm_impl(port, ptr, rust_vec_len, data_len),
         28 => wire__crate__api__core_dsp__master_cancel_impl(port, ptr, rust_vec_len, data_len),
         29 => wire__crate__api__core_dsp__master_priority_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__core_dsp__rewrite_tlen_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

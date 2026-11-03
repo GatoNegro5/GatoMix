@@ -19,4 +19,13 @@ void main() {
     expect(parseMasterFolderArg(const ['--master-folder']), isNull);
     expect(parseMasterFolderArg(const ['--master-folder=']), isNull);
   });
+  test('--karaoke-folder con espacio', () {
+    expect(
+      parseKaraokeFolderArg(const ['--karaoke-folder', r'C:\M\80s Ingles']),
+      r'C:\M\80s Ingles',
+    );
+  });
+  test('--karaoke-folder con igual', () {
+    expect(parseKaraokeFolderArg(const ['--karaoke-folder=/x/y']), '/x/y');
+  });
 }

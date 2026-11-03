@@ -3,6 +3,7 @@ import 'dart:ui' show ImageFilter, MaskFilter, BlurStyle, TileMode;
 
 import 'package:flutter/material.dart';
 
+import '../../core/phrase_grid.dart';
 import '../../providers/livedj_provider.dart';
 import '../../providers/mix_formula.dart';
 import '../../providers/theme_provider.dart';
@@ -15,21 +16,30 @@ const double kRelevoBlurMinSide = 480;
 
 /// El motor no publica el progreso del crossfade (sigue dentro de
 /// `_executeMixEngine`). La vista usa la misma duración del lazo DAWN
-/// en automático: DNA 18 s, bypass 4 s, Phrase/Stealth `phraseFadeMs`.
-/// Si no se puede derivar, 700 ms.
+/// en automático: DNA 18 s, bypass 4 s, Stealth `phraseFadeMs`,
+/// Phrase 8 el fundido de 8 o 16 compases. Si no se puede derivar, 700 ms.
 int relevoDurationMs({
   required bool derive,
   LiveDjMixMode? mode,
   MixFormula? formula,
   double bpm = 0,
   int durationMs = 0,
+  bool instrumental = false,
 }) {
   if (!derive || mode == null || formula == null) return 700;
   if (mode == LiveDjMixMode.longBypass) return 4000;
-  if (formula == MixFormula.phraseGrid || formula == MixFormula.stealthGap) {
+  if (formula == MixFormula.stealthGap) {
     final int ms = phraseFadeMs(
       incomingBpm: bpm,
       incomingDurationMs: durationMs,
+    );
+    return ms <= 0 ? 700 : ms;
+  }
+  if (formula == MixFormula.phraseGrid) {
+    final int ms = phraseGridFadeMs(
+      bpm: bpm,
+      instrumental: instrumental,
+      durationMs: durationMs,
     );
     return ms <= 0 ? 700 : ms;
   }

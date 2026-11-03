@@ -1,10 +1,13 @@
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 
 // 🛠️ INYECCIÓN: Uso estricto de la capa HAL
+import '../core/audio_path.dart';
+import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 
 class DirectoryState {
@@ -132,9 +135,13 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
       ) {
         debugPrint("⚠️ [I/O Ignorado en Scoped Storage]: $e");
       });
+      final Set<String> legacyDirs = <String>{};
 
       await for (final entity in stream) {
         if (entity is File) {
+          if (isGatomixLegacyName(entity.uri.pathSegments.last)) {
+            legacyDirs.add(entity.parent.path);
+          }
           final lowerPath = entity.path.toLowerCase();
           if (lowerPath.endsWith('.mp3') ||
               lowerPath.endsWith('.webm') ||
@@ -153,6 +160,11 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
         }
       }
 
+      for (final String legacyDir in legacyDirs) {
+        GatomixStore.migrate(legacyDir);
+      }
+      GatomixStore.migrate(path);
+
       for (final lrc in lrcFiles) {
         final baseName = lrc.path.replaceAll(
           RegExp(r'\.lrc$', caseSensitive: false),
@@ -165,10 +177,19 @@ class DirectoryNotifier extends Notifier<DirectoryState> {
         }
       }
 
-      targetFiles.sort(
+      // Una sola fila por archivo: junctions, mayúsculas y separadores
+      // distintos colapsan a la ruta real. El .lrc (icono tomate) queda
+      // junto a esa ruta. Los _K siguen en el explorador.
+      final Map<String, File> uniq = <String, File>{};
+      for (final File f in targetFiles) {
+        final String canon = canonicalAudioPath(f.path);
+        uniq.putIfAbsent(audioPathKey(canon), () => File(canon));
+      }
+      final List<File> uniqueFiles = uniq.values.toList();
+      uniqueFiles.sort(
         (a, b) => a.uri.pathSegments.last.compareTo(b.uri.pathSegments.last),
       );
-      state = state.copyWith(files: targetFiles, isProcessing: false);
+      state = state.copyWith(files: uniqueFiles, isProcessing: false);
     } catch (e) {
       debugPrint("🔴 [SCAN FATAL ERROR]: $e");
       state = state.copyWith(isProcessing: false, files: []);

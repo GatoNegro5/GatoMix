@@ -3,6 +3,10 @@
 String? parseMasterFolderArg(List<String> args) =>
     _valueArg(args, '--master-folder');
 
+/// `--karaoke-folder <ruta>`: genera los `<base>_K.mp3` faltantes (recursivo).
+String? parseKaraokeFolderArg(List<String> args) =>
+    _valueArg(args, '--karaoke-folder');
+
 /// 1.0.13: `--lab-rescue <ruta del LAB>`: masteriza el Laboratorio y devuelve
 /// a su carpeta las pistas que quedaron bien.
 String? parseLabRescueArg(List<String> args) => _valueArg(args, '--lab-rescue');

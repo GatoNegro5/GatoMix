@@ -18,6 +18,7 @@ OutputBaseFilename=GatoMix_Setup_v1.0.0
 Compression=lzma2/ultra
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=windows\runner\resources\app_icon.ico
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
