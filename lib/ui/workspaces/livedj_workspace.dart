@@ -163,7 +163,6 @@ Future<void> _liveDjMix(WidgetRef ref, List<File> files) async {
   if (files.isEmpty) return;
   final notifier = ref.read(liveDjProvider.notifier);
   notifier.addAllTracks(files);
-  await notifier.addSettled;
   final List<File> queue = ref.read(liveDjProvider).queue;
   final int index = queue.indexWhere(
     (File item) => sameAudioPath(item.path, files.first.path),

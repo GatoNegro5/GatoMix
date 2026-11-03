@@ -184,7 +184,7 @@ Future<int> lanSendWithRetry(
       }
     } catch (e) {
       lastError = e;
-      if (attemptIndex == maxAttempts - 1) throw e;
+      if (attemptIndex == maxAttempts - 1) rethrow;
     }
   }
   throw lastError ?? StateError('lan send');
@@ -1557,6 +1557,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               if (notice != null) {
                 _currentLog = notice;
                 if (code == 403 || code == 500) {
+                  if (!mounted) return;
                   ScaffoldMessenger.maybeOf(
                     context,
                   )?.showSnackBar(SnackBar(content: Text(notice)));
@@ -1711,6 +1712,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             if (notice != null) {
               _currentLog = notice;
               if (response.statusCode == 403 || response.statusCode == 500) {
+                if (!mounted) return;
                 ScaffoldMessenger.maybeOf(
                   context,
                 )?.showSnackBar(SnackBar(content: Text(notice)));

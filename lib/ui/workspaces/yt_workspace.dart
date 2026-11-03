@@ -510,7 +510,8 @@ class _YoutubeSearchAndDownloadWorkspaceState
         // 3.1.0 no tiene `YoutubeApiClient.web`: el cliente WEB es `safari`.
         // Orden de reintento tras un 403 a mitad: androidVr, ios, tv.
         // Tope: 3 clientes. El trozo ya bajado no se vuelve a pedir.
-        const List<List<YoutubeApiClient>> resumeClients =
+        // `ios` no es constante: no puede ir en un `const`.
+        final List<List<YoutubeApiClient>> resumeClients =
             <List<YoutubeApiClient>>[
               <YoutubeApiClient>[YoutubeApiClient.androidVr],
               <YoutubeApiClient>[YoutubeApiClient.ios],
@@ -523,6 +524,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
           outPath: tempRawPath,
           chunkSize: 1024 * 1024,
           maxRefreshes: resumeClients.length,
+          resumeHeldRanges: true,
           refreshUrl: () async {
             if (_ytRefresh >= resumeClients.length) return null;
             final List<YoutubeApiClient> plan = resumeClients[_ytRefresh++];

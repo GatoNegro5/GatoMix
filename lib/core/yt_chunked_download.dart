@@ -67,6 +67,7 @@ Future<void> ytChunkedDownload({
   void Function(int done, int total)? onProgress,
   http.Client? client,
   Duration deadline = const Duration(minutes: 3),
+  bool resumeHeldRanges = false,
 }) async {
   final clock = Stopwatch()..start();
   final c = client ?? http.Client();
@@ -92,33 +93,48 @@ Future<void> ytChunkedDownload({
             .timeout(chunkTimeout);
         if (resp.statusCode == 403 || resp.statusCode == 410) {
           await resp.stream.drain<void>();
-          // 403 a mitad (típico ~1 MB): no se aborta. Se pide otra URL y
-          // este mismo rango se reanuda; los trozos ya guardados se quedan.
           if (refreshUrl == null || refreshes >= maxRefreshes) {
             throw YtDownloadStalled(
               'YouTube rechazó la descarga en móvil (HTTP ${resp.statusCode}). Reintenta en unos minutos.',
             );
           }
           final mine = current;
-          final Future<Uri?> refresh;
-          final Future<Uri?>? inflight = pendingRefresh;
-          if (inflight != null) {
-            refresh = inflight;
+          if (resumeHeldRanges) {
+            // Móvil: el 403 a mitad no aborta. Otra URL y el mismo rango.
+            final Future<Uri?> refresh;
+            final Future<Uri?>? inflight = pendingRefresh;
+            if (inflight != null) {
+              refresh = inflight;
+            } else {
+              refreshes++;
+              late final Future<Uri?> created;
+              created = () async {
+                try {
+                  return await refreshUrl();
+                } finally {
+                  if (identical(pendingRefresh, created)) {
+                    pendingRefresh = null;
+                  }
+                }
+              }();
+              pendingRefresh = created;
+              refresh = created;
+            }
+            final Uri? u = await refresh;
+            if (u != null && identical(mine, current)) current = u;
           } else {
-            refreshes++;
-            late final Future<Uri?> created;
-            created = () async {
+            // Un solo refresco compartido entre conexiones paralelas.
+            pendingRefresh ??= (() async {
+              refreshes++;
               try {
                 return await refreshUrl();
               } finally {
-                if (identical(pendingRefresh, created)) pendingRefresh = null;
+                pendingRefresh = null;
               }
-            }();
-            pendingRefresh = created;
-            refresh = created;
+            })();
+            final u = await pendingRefresh;
+            if (u != null && identical(mine, current)) current = u;
           }
-          final Uri? u = await refresh;
-          if (u != null && identical(mine, current)) current = u;
           throw HttpException('HTTP ${resp.statusCode}');
         }
         if (resp.statusCode != 200 && resp.statusCode != 206) {
