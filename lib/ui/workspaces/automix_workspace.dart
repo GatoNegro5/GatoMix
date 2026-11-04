@@ -64,8 +64,12 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
           ),
           const VerticalDivider(width: 1, color: Colors.white10),
         ],
-        const Expanded(flex: 4, child: FolderContentPanel()),
-        const VerticalDivider(width: 1, color: Colors.white10),
+        // 3.0.48: en móvil no va la columna de carpeta (acostado o parado);
+        // se agrega con "+ Agregar canciones".
+        if (!compactLibrary) ...<Widget>[
+          const Expanded(flex: 4, child: FolderContentPanel()),
+          const VerticalDivider(width: 1, color: Colors.white10),
+        ],
         const Expanded(flex: 5, child: AutomixPanel()),
       ],
     );

@@ -24,14 +24,22 @@ final liveDjQueueSearchProvider = StateProvider<String>((ref) => '');
 /// Vista grande de la carpeta. Apagada: Explorador + carpeta + Cartridge.
 final liveDjPlaylistViewProvider = StateProvider<bool>((ref) => false);
 
+/// Solo pruebas: fuerza el layout móvil (null = según plataforma).
+@visibleForTesting
+bool? debugLiveDjForceMobile;
+
+bool liveDjIsMobile() =>
+    debugLiveDjForceMobile ?? (Platform.isAndroid || Platform.isIOS);
+
 class LiveDjWorkspace extends ConsumerWidget {
   const LiveDjWorkspace({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final compact = Platform.isAndroid || Platform.isIOS;
+    final compact = liveDjIsMobile();
     final bool playlist = ref.watch(liveDjPlaylistViewProvider);
-    if (playlist) {
+    // 3.0.48: en móvil no hay vista de carpeta (disco); solo la hoja.
+    if (playlist && !compact) {
       return Scaffold(
         backgroundColor: GatoMixTheme.bgDark,
         body: Stack(
@@ -88,13 +96,17 @@ class LiveDjWorkspace extends ConsumerWidget {
                 const Divider(height: 1, color: Colors.white10),
                 Expanded(
                   flex: compact ? 6 : 5,
-                  child: const Row(
-                    children: [
-                      Expanded(flex: 4, child: LiveDjFolderPanel()),
-                      VerticalDivider(width: 1, color: Colors.white10),
-                      Expanded(flex: 5, child: LiveDjCartridgePanel()),
-                    ],
-                  ),
+                  child: compact
+                      // 3.0.48: en móvil (acostado o parado) no va la columna
+                      // de carpeta; se agrega con "+ Agregar canciones".
+                      ? const LiveDjCartridgePanel()
+                      : const Row(
+                          children: [
+                            Expanded(flex: 4, child: LiveDjFolderPanel()),
+                            VerticalDivider(width: 1, color: Colors.white10),
+                            Expanded(flex: 5, child: LiveDjCartridgePanel()),
+                          ],
+                        ),
                 ),
               ],
             ),
@@ -398,7 +410,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
 
     final isShuffle = state.mixStrategy == LiveDjMixStrategy.random;
     final compact =
-        widget.compactOverride ?? (Platform.isAndroid || Platform.isIOS);
+        widget.compactOverride ?? liveDjIsMobile();
     final bool playlistOn = ref.watch(liveDjPlaylistViewProvider);
     final bool menuOpen = compact ? ref.watch(mobileNavOpenProvider) : false;
     final gap = compact ? 4.0 : 10.0;
@@ -586,6 +598,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
             ],
             if (!compact) ...[
               const SizedBox(width: 6),
+              if (!compact)
               Tooltip(
                 message: playlistOn
                     ? 'Volver a Explorador y Cartridge'
@@ -1073,6 +1086,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   onTap: () => ref.read(mobileNavOpenProvider.notifier).state =
                       !menuOpen,
                 ),
+                if (!compact)
                 Tooltip(
                   message: playlistOn
                       ? 'Volver a GatoMix'
@@ -1140,6 +1154,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                               },
                             ),
                           ),
+                          if (!compact)
                           Tooltip(
                             message: playlistOn
                                 ? 'Volver a Explorador y Cartridge'
@@ -1365,7 +1380,7 @@ class LiveDjCartridgePanel extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (Platform.isAndroid || Platform.isIOS)
+              if (liveDjIsMobile())
                 Align(
                   alignment: Alignment.centerLeft,
                   child: TextButton(
