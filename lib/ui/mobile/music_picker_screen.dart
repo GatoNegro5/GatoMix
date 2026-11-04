@@ -218,7 +218,7 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     messenger.showSnackBar(
       SnackBar(
         persist: false,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(milliseconds: 1500),
         content: const Text(
           'Agregada a la cola',
           style: TextStyle(fontSize: 14),
@@ -422,6 +422,9 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                 );
               }, childCount: songs.length),
             ),
+          // Espacio para que el aviso "Agregada a la cola" no tape la última
+          // canción.
+          const SliverToBoxAdapter(child: SizedBox(height: 72)),
         ],
       ),
     );
