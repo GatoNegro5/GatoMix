@@ -77,6 +77,11 @@ void main() {
 
         await tester.tap(find.text('Canciones'));
         await tester.pump();
+        // 3.0.48: en la raíz la lista es recursiva y se calcula async.
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 500)),
+        );
+        await tester.pump();
         expect(tester.takeException(), isNull);
         expect(find.textContaining('_K'), findsNothing);
         expect(find.text('🎤'), findsOneWidget);

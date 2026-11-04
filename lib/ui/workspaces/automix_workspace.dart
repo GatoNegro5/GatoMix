@@ -1602,7 +1602,14 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                           ),
                           const SizedBox(width: 6),
                           Expanded(
-                            child: SizedBox(height: 100, child: lyricsBox),
+                            child: SizedBox(
+                              // Móvil acostado: letra más baja, cola más alta.
+                              height: MediaQuery.of(context).orientation ==
+                                      Orientation.landscape
+                                  ? 64
+                                  : 100,
+                              child: lyricsBox,
+                            ),
                           ),
                         ],
                       )

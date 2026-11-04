@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/material.dart';
 
@@ -92,6 +93,27 @@ List<File> musicPickerSongsUnder(Directory dir, {int depth = 0}) {
   return out;
 }
 
+/// Filtra canciones (lista recursiva) por texto en la ruta relativa a [base].
+List<File> musicPickerFilterSongs(List<File> all, String base, String query) {
+  final String q = query.trim().toLowerCase();
+  if (q.isEmpty) return List<File>.of(all);
+  return all.where((File f) {
+    String rel = f.path;
+    if (rel.startsWith(base)) rel = rel.substring(base.length);
+    return rel.toLowerCase().contains(q);
+  }).toList();
+}
+
+/// Lista recursiva fuera del hilo de UI.
+Future<List<File>> musicPickerSongsUnderAsync(String dirPath) async {
+  final List<String> paths = await Isolate.run(
+    () => musicPickerSongsUnder(
+      Directory(dirPath),
+    ).map((File f) => f.path).toList(),
+  );
+  return paths.map((String p) => File(p)).toList();
+}
+
 File? musicPickerCover(File audio) {
   final String stem = audio.path.replaceFirst(RegExp(r'\.[^.]+$'), '');
   for (final String ext in <String>['.jpg', '.jpeg', '.png', '.webp']) {
@@ -154,6 +176,23 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
   late String _current;
   final TextEditingController _search = TextEditingController();
   int _tab = 0;
+  final Map<String, List<File>> _deep = <String, List<File>>{};
+  final Set<String> _deepLoading = <String>{};
+
+  List<File>? _deepSongs(String path) {
+    final List<File>? cached = _deep[path];
+    if (cached != null) return cached;
+    if (_deepLoading.add(path)) {
+      musicPickerSongsUnderAsync(path).then((List<File> list) {
+        if (!mounted) return;
+        setState(() {
+          _deep[path] = list;
+          _deepLoading.remove(path);
+        });
+      });
+    }
+    return null;
+  }
 
   @override
   void initState() {
@@ -174,8 +213,12 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
 
   void _enqueue(File file) {
     widget.onEnqueue(file);
-    ScaffoldMessenger.of(context).showSnackBar(
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
       SnackBar(
+        persist: false,
+        duration: const Duration(seconds: 2),
         content: const Text(
           'Agregada a la cola',
           style: TextStyle(fontSize: 14),
@@ -235,7 +278,19 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
       } catch (_) {}
     }
 
-    final bool showFolders = _tab == 0;
+    final bool showFolders = _tab == 0 && query.isEmpty;
+    bool deepPending = false;
+    if (readable && (query.isNotEmpty || (_atRoot && _tab == 1))) {
+      final List<File>? deep = _deepSongs(_current);
+      if (deep == null) {
+        deepPending = true;
+        songs.clear();
+      } else {
+        songs
+          ..clear()
+          ..addAll(musicPickerFilterSongs(deep, _current, query));
+      }
+    }
     final String here = _atRoot
         ? 'Música'
         : _current.split(Platform.pathSeparator).last;
@@ -265,7 +320,9 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                   isDense: true,
                   contentPadding: EdgeInsets.symmetric(vertical: 12),
                 ),
-                onChanged: (_) => setState(() {}),
+                onChanged: (String v) => setState(() {
+                  if (v.trim().isNotEmpty) _tab = 1;
+                }),
               ),
             ),
           ),
@@ -305,6 +362,13 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                   'No se pudo leer la carpeta de música',
                   style: _metaStyle,
                 ),
+              ),
+            )
+          else if (deepPending)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator(color: _muted)),
               ),
             )
           else if (showFolders)
