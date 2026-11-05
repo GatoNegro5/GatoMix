@@ -1100,7 +1100,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (_) {
     } finally {
       _sessionHydrated = true;
-      _schedulePhraseNeighbors();
+      // Diferir hasta después de que build() asigne state (instalación nueva / sin sesión).
+      Future.microtask(_schedulePhraseNeighbors);
     }
   }
 
