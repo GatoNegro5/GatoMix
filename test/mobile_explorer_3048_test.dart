@@ -64,6 +64,9 @@ void main() {
         await tester.pump();
         await tester.tap(find.text('Canciones'));
         await tester.pump();
+        // La lista recursiva corre en Isolate.run (v3.0.48): esperar en tiempo real.
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 500)));
+        await tester.pump();
         await tester.tap(find.text('Cancion'));
         await tester.pump();
         expect(queued.length, 1);
