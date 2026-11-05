@@ -9,7 +9,7 @@ Fuente única. Cursor inyecta este archivo + `.cursor/rules/contexto.mdc` (alway
 | Plataformas | Windows · Android · macOS · iPhone (`lib/djiphone/`) |
 | Carpeta | `C:\GatoMix`, UNA sola rama. Respaldos en carpeta aparte |
 | Integración | Gabriel fusiona a `qa/v20` y crea los tags. El agente nunca |
-| Ahora | **@3.0.31+50** · commit `c46705b` · PR #11 |
+| Ahora | GitHub: **v3.0.47+66** (`b522a40`, tag `v3.0.47`) · Local box sin push: **3.0.48+67** (`5dddcbc`) · rama `cursor/v3029-bpm-duracion-radio` · PR #11 |
 
 Rutas IndexedStack: 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio · 4 LAN Sync · 5 Live DJ · 6 Karaoke. Voz y FiestaDJ eliminadas: no reintroducir.
 
@@ -55,7 +55,17 @@ Rutas IndexedStack: 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio
 - Robert Palmer, *Bad Case Of Loving You*: TBPM 144, medido **146,7**. Kiss: 146,7 vs 144,7. 2 BPM de error rompen el empate → BPM exacto en 3.0.31.
 - Auditoría 80s Inglés (196): ≤0,1 BPM 66 · 0,1–0,5 67 · 0,5–1 32 · 1–2 18 · >2 7. Peor: Sandra *Maria Magdalena* 119 → 104,09. Octava: *Words Fell Down* 173,12 → 86,56.
 
+## Lecciones 2026-11-04
+- Nunca publicar (tag) una versión sin probarla en Android real o emulador con instalación limpia, acostado. 3.0.47 se publicó sin probar y el explorador salió roto.
+- Emulador en box: `chmod 666 /dev/kvm`; `~/Android/emulator/emulator -avd gm34 -no-window -gpu swiftshader_indirect -no-audio -no-snapshot -memory 2048 -cores 4`. Para x64 se necesita la lib Rust x86_64 (cambio temporal en cargokit `resolvePlatforms` y `abiFilters`, luego revertir).
+- Tags desde la laptop: repo temporal, `git fetch` de la rama y `git push <url> FETCH_HEAD:refs/tags/vX` (la box no tiene credenciales).
+- Gabriel no puede pagar Sonnet: solo Grok Medium o arreglos hechos en la box.
+
 ## Pendiente
+- **3.0.48 (solo local en box `/workspace/GatoMix`, commits 054686b, 8468d77, 65fe2ae, 5dddcbc):** explorador móvil único "+ Agregar canciones" (sin columna vieja ni disco verde en Live DJ/Automix), aviso de cola 1,5 s no persistente, pestaña Canciones y búsqueda recursivas desde la raíz, más cola en Automix acostado. Probado en emulador x64 (gm34). Falta: push + tag v3.0.48 (box sin credenciales; empujar vía laptop con bundle `/workspace/gm3048.bundle`) y prueba en el celular real. Detalle abierto: el aviso tapa la última fila 1,5 s. Gabriel dijo que el explorador móvil sigue "feísimo": rediseñarlo con él antes de tocar más.
+- Android fuerza landscape (`lib/main.dart:130-133`); no existe modo vertical.
+- Pregunta abierta: ¿MP3 320 kbps en móvil?
+- Bajón de volumen en la primera mezcla de Live DJ.
 - Tras masterizar 80s Inglés con 3.0.31: re-auditar BPM, meta ±0,05.
 - Revisar umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min no se miden completos.
 - `nlp_provider.dart:152` `totalMs-4000`. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
@@ -83,3 +93,6 @@ Riesgo: 1920px / Mac 13" / móvil / audible
   Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, memoria de Radio por filtro, pausa de mezcla, cola estable (lo añadido durante el armado del Shuffle se anexa).
   Se elimina: NADA
   Riesgo: UI solo el texto del BPM (entero, más corto; sin overflow); las 4 plataformas comparten el código (Windows, Android, macOS, iPhone); no cambia audio.
+- 3.0.46+65: Android usa NewPipe para la vista previa y para Ingestar de YT (probado en el celular: suena y baja el MP3). Windows sigue con yt-dlp. Wakelock activo mientras la app está abierta.
+- 3.0.47+66 (`b522a40`, publicado): botón Radio "PRENDE MODO RADIO" / "APAGA MODO RADIO"; explorador móvil con hoja "+ Agregar canciones"; cola persistente de reintento de letras (`lib/services/lyric_retry_queue.dart`, `lyric_retry_queue.json`, cada 1 min, aviso "Letra agregada"); la causa fue LRCLIB 503 ServerOverloaded. FALLA en el celular: quedaban la columna vieja y el disco verde.
+- 3.0.48+67 (local, sin push): ver Pendiente.
