@@ -112,32 +112,54 @@ class _LabWorkspaceState extends ConsumerState<LabWorkspace> {
   }
 
   void _initLabEnvironment() {
-    final labDir = Directory(labFolder(_musicBase()));
-    if (!labDir.existsSync()) {
-      labDir.createSync(recursive: true);
-    }
+    try {
+      final labDir = Directory(labFolder(_musicBase()));
+      if (!labDir.existsSync()) {
+        labDir.createSync(recursive: true);
+      }
 
-    _labPath = labDir.path;
-    _loadRegistry();
+      _labPath = labDir.path;
+      _loadRegistry();
+    } on FileSystemException catch (e) {
+      // Sin permiso de almacenamiento (Android) o Music inaccesible: no tumbar la app.
+      debugPrint('Lab: sin acceso a almacenamiento: $e');
+      _labPath = '';
+      _registry = {};
+      if (mounted) {
+        setState(() => _isLoading = false);
+      } else {
+        _isLoading = false;
+      }
+    }
   }
 
   void _loadRegistry() {
+    if (_labPath.isEmpty) {
+      _registry = {};
+      setState(() => _isLoading = false);
+      return;
+    }
     final registryFile = File(
       '$_labPath${Platform.pathSeparator}quarantine_registry.json',
     );
-    if (registryFile.existsSync()) {
-      try {
-        _registry = jsonDecode(registryFile.readAsStringSync());
-      } catch (_) {
+    try {
+      if (registryFile.existsSync()) {
+        try {
+          _registry = jsonDecode(registryFile.readAsStringSync());
+        } catch (_) {
+          _registry = {};
+        }
+      } else {
         _registry = {};
       }
-    } else {
+
+      _registry = labq.rescanLabRegistry(_labPath, _registry);
+
+      registryFile.writeAsStringSync(jsonEncode(_registry));
+    } on FileSystemException catch (e) {
+      debugPrint('Lab: no se pudo leer/escribir el registro: $e');
       _registry = {};
     }
-
-    _registry = labq.rescanLabRegistry(_labPath, _registry);
-
-    registryFile.writeAsStringSync(jsonEncode(_registry));
 
     setState(() => _isLoading = false);
   }
