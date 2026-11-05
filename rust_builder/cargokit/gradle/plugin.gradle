@@ -174,6 +174,8 @@ class CargoKitPlugin implements Plugin<Project> {
     }
 
     private List<String> resolvePlatforms(Project hostProject) {
+        // GatoMix publica solo arm64. GATOMIX_EMU=1 agrega x64 para el emulador gm34.
+        if (System.getenv("GATOMIX_EMU") == "1") return ["android-arm64", "android-x64"]
         return ["android-arm64"]
     }
 

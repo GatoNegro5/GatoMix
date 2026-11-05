@@ -6,8 +6,41 @@ on:
       - 'v*' # El pipeline solo se disparará cuando envíes un tag (ej. v1.0.0)
 
 jobs:
+  # Red anti-regresión: si alguna prueba falla, no se compila ni se publica.
+  test:
+    name: Tests (flutter test + cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: "gatomix-rust-test"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Flutter tests
+        run: flutter test
+
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test
+
   build:
     name: Build Artifacts
+    needs: test
     strategy:
       matrix:
         include:

@@ -28,6 +28,9 @@ android {
         versionName = flutter.versionName
         ndk {
             abiFilters += listOf("arm64-v8a")
+            // Solo para pruebas en emulador x86_64 (gm34): GATOMIX_EMU=1.
+            // El release de CI no la define y sigue saliendo solo arm64.
+            if (System.getenv("GATOMIX_EMU") == "1") abiFilters += listOf("x86_64")
         }
     }
 

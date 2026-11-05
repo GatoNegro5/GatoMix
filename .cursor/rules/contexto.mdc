@@ -1,16 +1,20 @@
 ---
-description: Fuente única DJ Studio. Obedecer CONTEXTO.md. Cero diff de UI sin LOG+OK. Cero borrado colateral siempre, sin que Gabriel lo repita.
+description: Fuente única GatoMix. Obedecer CONTEXTO.md. Cero diff de UI sin LOG CAMBIO + OK. Cero borrado colateral. Solo Gabriel crea tags.
 alwaysApply: true
 ---
 
-# Fuente única
+# Fuente única — GatoMix
 
-Obedecer `c:\Python\gatomix_player\CONTEXTO.md` (archivo único de ley). No hay `REGLAS.md` ni otros `.mdc`.
+Obedecer `CONTEXTO.md` en la raíz de este repo (archivo único de ley). No hay `REGLAS.md` ni otros `.mdc`.
 
-Gabriel **no** pega esto en cada mensaje ni en un chat nuevo. Si no lo escribe, igual rige. Silencio ≠ permiso de borrar. “Arregla” / “revisa” / “urgente” **no derogan**.
+Gabriel no pega esto en cada mensaje. Si no lo escribe, igual rige. Silencio ≠ permiso de borrar. "Arregla" / "revisa" / "urgente" no derogan.
 
-Pedido de UI: turno 1 = solo el LOG de CONTEXTO §0. Cero `StrReplace` / `Write` / `Delete` hasta que Gabriel escriba OK / autorizado / aplica. OK = aplicar el LOG y desplegar en el mismo turno. Cerrar con @N. No pedir otro OK.
+Pedido de UI: turno 1 = solo el LOG CAMBIO (plantilla de la sección "LOG CAMBIO" de CONTEXTO.md). Cero `StrReplace` / `Write` / `Delete` hasta que Gabriel escriba OK / autorizado / aplica.
 
-Arreglar ≠ borrar. Ni una línea colateral (UI o motor). “No topar X” no autoriza quitar Y. Si se perdió, reponer primero. Live DJ: conservar los 3 tipos de mezcla (DNA / Phrase 8 / Stealth) y el cue-in 10 s.
+Arreglar ≠ borrar. Ni una línea colateral (UI o motor). Sustituir un widget = borrar el viejo. Si algo se perdió, reponer primero. Live DJ: conservar DNA / Phrase 8 / Stealth y el cue-in 10 s.
 
-Si el gesto no está claro: **PARA**. Veto técnico. Preguntar. Prohibido inventar un flujo “mejor” que el que Gabriel nombró.
+Nunca crear, mover ni subir tags: solo Gabriel. Nunca force-push, nunca ramas nuevas, no push sin su orden.
+
+Antes de decir "listo": correr las pruebas de la sección "Errores que ya regresaron" que toquen lo cambiado y probar en Android (instalación limpia).
+
+Si el gesto no está claro: PARA y pregunta. Prohibido inventar un flujo "mejor" que el que Gabriel nombró.

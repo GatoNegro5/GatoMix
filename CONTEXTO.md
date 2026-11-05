@@ -1,27 +1,35 @@
 # CONTEXTO — GatoMix
 
-Fuente única. Cursor inyecta este archivo + `.cursor/rules/contexto.mdc` (alwaysApply) en cada turno. Gabriel no repite nada. Silencio ≠ permiso; "arregla/urgente" no derogan leyes.
+Fuente única. Cursor inyecta este archivo + `.cursor/rules/contexto.mdc` (alwaysApply). Gabriel no repite nada. Silencio ≠ permiso; "arregla/urgente" no derogan leyes.
+Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo comprobar.
 
 | Campo | Valor |
 |---|---|
-| Repo | GatoNegro5/GatoMix |
-| Stack | Flutter/Dart + Riverpod · media_kit/libmpv · Rust (symphonia, LAME, ort/tract) vía FFI |
+| Repo | GatoNegro5/GatoMix · Flutter/Dart + Riverpod · media_kit/libmpv · Rust (symphonia, LAME, ort/tract) vía FFI |
 | Plataformas | Windows · Android · macOS · iPhone (`lib/djiphone/`) |
-| Carpeta | `C:\GatoMix`, UNA sola rama. Respaldos en carpeta aparte |
-| Integración | Gabriel fusiona a `qa/v20` y crea los tags. El agente nunca |
-| Ahora | GitHub: **v3.0.47+66** (`b522a40`, tag `v3.0.47`) · Local box sin push: **3.0.48+67** (`5dddcbc`) · rama `cursor/v3029-bpm-duracion-radio` · PR #11 |
+| Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
+| Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
+| Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
+| Local box (sin push) | **3.0.48+67** · HEAD `12bea37` (solo CONTEXTO) sobre `5dddcbc`. Bundle `/workspace/gm3048.bundle` = `b522a40..5dddcbc`, **no incluye 12bea37** |
+| Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
+| main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
+| Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
+| Tags 3.0.4x | v3.0.41, v3.0.43, v3.0.44, v3.0.47. **Faltan v3.0.42, v3.0.45, v3.0.46** |
+| PR | (no verificable: gh sin sesión) |
 
-Rutas IndexedStack: 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio · 4 LAN Sync · 5 Live DJ · 6 Karaoke. Voz y FiestaDJ eliminadas: no reintroducir.
+Rutas IndexedStack (no verificado en detalle): 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio · 4 LAN Sync · 5 Live DJ · 6 Karaoke. Voz y FiestaDJ eliminadas: no reintroducir.
+Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart:128-136`).
 
 ## Leyes de Gabriel
 1. Calidad premium: causa raíz, medición exacta. Sin parches, topes ni heurísticas.
 2. Medir exacto: nada redondeado, nunca confiar en etiquetas viejas (TBPM, TLEN).
 3. Nunca borrar música: los originales se mueven a `C:\Users\ASUS\GatoMix_Respaldo\audio_pegado`. No se borran mp3, `.lrc` ni `_K`.
 4. Nunca desinstalar la app ni borrar sus datos.
-5. Versiones de una en una (3.0.N → 3.0.N+1), pubspec = tag.
+5. Versiones de una en una (3.0.N → 3.0.N+1), pubspec = tag. (Hoy incumplida: 3.0.45 y 3.0.46 no tienen tag.)
 6. Todo cambio audible necesita OK de Gabriel. Diagnosticar con él primero.
 7. Cero regresiones y cero borrado colateral: el diff toca solo lo nombrado; si algo se perdió, reponer primero. `Se elimina: NADA` por defecto.
 8. Nunca force-push. Nunca ramas adicionales. No push sin orden de Gabriel.
+8b. **Tags: SOLO Gabriel crea tags.** Ningún agente ni bot crea, mueve ni sube tags (v3.0.44 y v3.0.47 los creó un bot: no repetir).
 9. Todo cambio cubre las 4 plataformas; si una queda fuera, decirlo explícito.
 10. UI: primero LOG CAMBIO, diff solo tras OK. Sustituir un widget = borrarlo. Cero overflow; nunca quitar hijos para que quepa.
 11. SOLO 2 decks. Nunca un 3.er `Player` para medir (canción fantasma en Android). Medir con Rust/symphonia.
@@ -47,6 +55,7 @@ Rutas IndexedStack: 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio
 ## Consumo de agentes (ley)
 - Solo Grok 4.7 **Medium**, 256K, Fast apagado. High/500K solo con OK de Gabriel. Nunca Claude ni otro modelo.
 - Ningún agente arranca sin OK. Un agente por cambio; máximo 5 soluciones por chat, luego chat nuevo.
+- **Antes de pedirle a Gabriel que baje una versión: instalación limpia en Android (emulador o celular) y recorrido completo.**
 - Mientras itera, probar solo lo tocado; suite completa (Flutter + Rust) una vez al final. La prueba real es con Gabriel.
 - No releer archivos, Grep/Read con offset, respuestas cortas, un diff. Archivar el agente al terminar.
 - Al resolver algo: actualizar este CONTEXTO.md (LOG CAMBIO con OK de Gabriel).
@@ -55,20 +64,36 @@ Rutas IndexedStack: 0 Automix · 1 Masterizar · 2 Descargas YT · 3 Laboratorio
 - Robert Palmer, *Bad Case Of Loving You*: TBPM 144, medido **146,7**. Kiss: 146,7 vs 144,7. 2 BPM de error rompen el empate → BPM exacto en 3.0.31.
 - Auditoría 80s Inglés (196): ≤0,1 BPM 66 · 0,1–0,5 67 · 0,5–1 32 · 1–2 18 · >2 7. Peor: Sandra *Maria Magdalena* 119 → 104,09. Octava: *Words Fell Down* 173,12 → 86,56.
 
-## Lecciones 2026-11-04
-- Nunca publicar (tag) una versión sin probarla en Android real o emulador con instalación limpia, acostado. 3.0.47 se publicó sin probar y el explorador salió roto.
-- Emulador en box: `chmod 666 /dev/kvm`; `~/Android/emulator/emulator -avd gm34 -no-window -gpu swiftshader_indirect -no-audio -no-snapshot -memory 2048 -cores 4`. Para x64 se necesita la lib Rust x86_64 (cambio temporal en cargokit `resolvePlatforms` y `abiFilters`, luego revertir).
-- Tags desde la laptop: repo temporal, `git fetch` de la rama y `git push <url> FETCH_HEAD:refs/tags/vX` (la box no tiene credenciales).
-- Gabriel no puede pagar Sonnet: solo Grok Medium o arreglos hechos en la box.
+## Errores que ya regresaron
+| Error | Versiones | Archivo / función | Causa | Prueba automática | Prueba manual en celular |
+|---|---|---|---|---|---|
+| Radio repite canción / no avanza | 3.0.25, 3.0.33, 3.0.34, 3.0.35, 3.0.43, 3.0.44 | `lib/core/gatomix_radio.dart` (`syncRadioPlan`, `radioPlanNext`, `advanceRadioPlan`), `lib/core/livedj_next.dart`, `lib/providers/livedj_provider.dart` | Estado repartido en 3 archivos; tareas en 2.º plano con carreras (3.0.44: pending = la que acaba de sonar) | `radio_loop_3025`, `radio_off_3025`, `radio_ahead_3033`, `gatomix_radio_test`, `livedj_arm_race_3043`, `livedj_radio_pending_3044` | Radio ON en Live DJ, 10 mezclas seguidas: ninguna repetida ni "una sí, una no"; apagar radio no toca el deck |
+| YouTube 403 / descarga Android | 1.0.15, 3.0.38, 3.0.45, 3.0.46 | `lib/ui/workspaces/yt_workspace.dart`, `lib/core/yt_chunked_download.dart`, NewPipe en `android/.../MainActivity.kt` | Cambios de YouTube; se probaba en PC y no en Android | `yt_403_resume_3045`, `yt_chunked_download`, `yt_preview_timeout_3046`. **NewPipe (3a2843b): SIN PRUEBA — falta** | Vista previa suena; Ingestar "Camilo - Manos de Tijera" baja MP3 completo |
+| Explorador móvil / poner canciones | 3.0.45, 3.0.47, 3.0.48 | `lib/ui/mobile/music_picker_screen.dart`, `livedj_workspace.dart`, `automix_workspace.dart` | Widget viejo no se borró (ley 10); 3.0.47 publicada sin probar en celular | `music_picker_3045`, `mobile_explorer_3048`, `music_picker_recursive_3048`. Hoja 3.0.47 y botón radio: **SIN PRUEBA — falta** | Automix y Live DJ: "+ Agregar canciones" → buscar, encolar 4, suenan; no queda columna vieja ni disco verde |
+| Letras (LRCLIB, alineación, .lrc) | ~15 commits 1.0.x → 3.0.47 | `lib/core/lyric_match.dart`, `lib/services/lyric_retry_queue.dart`, `lib/providers/nlp_provider.dart` | Heurísticas acumuladas; LRCLIB 503 confundido con bug | `lyric_*_test` (match, approx, variants, timing_check, shift_on_trim, retry_queue…) | Ingestar sin red de letras: MP3 queda, aparece aviso y luego "Letra agregada" |
+| Cuelgues / CPU en UI | 3.0.23, 3.0.24, 3.0.35 | `livedj_provider.dart` (`_insertLiveRandom`, `_applyLiveShuffleBank`), `gatomix_store.dart` (`saveTrackMusicBatch`) | Trabajo pesado reintroducido en el hilo de UI | `radio_cpu_3022`, `tick_work_3024`, `batch_save_3035` | Cargar carpeta grande y Shuffle: la pantalla no se congela, el celular no calienta |
+
+## Fixes sin prueba de regresión
+- 3.0.41 (`0f87fe1`, limitador/BPM en Rust): sin test Dart; tests Rust internos (no verificable).
+- 3.0.46 NewPipe solo M4A + wakelock (`3a2843b`).
+- 3.0.47 hoja del explorador y botón PRENDE/APAGA MODO RADIO (`734caff`); YT encola letra (`b522a40`).
+- 3.0.48 letra Automix 80 dp (`5dddcbc`).
+- Ninguna versión tiene prueba de extremo a extremo en Android.
 
 ## Pendiente
-- **3.0.48 (solo local en box `/workspace/GatoMix`, commits 054686b, 8468d77, 65fe2ae, 5dddcbc):** explorador móvil único "+ Agregar canciones" (sin columna vieja ni disco verde en Live DJ/Automix), aviso de cola 1,5 s no persistente, pestaña Canciones y búsqueda recursivas desde la raíz, más cola en Automix acostado. Probado en emulador x64 (gm34). Falta: push + tag v3.0.48 (box sin credenciales; empujar vía laptop con bundle `/workspace/gm3048.bundle`) y prueba en el celular real. Detalle abierto: el aviso tapa la última fila 1,5 s. Gabriel dijo que el explorador móvil sigue "feísimo": rediseñarlo con él antes de tocar más.
-- Android fuerza landscape (`lib/main.dart:130-133`); no existe modo vertical.
-- Pregunta abierta: ¿MP3 320 kbps en móvil?
-- Bajón de volumen en la primera mezcla de Live DJ.
-- Tras masterizar 80s Inglés con 3.0.31: re-auditar BPM, meta ±0,05.
-- Revisar umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min no se miden completos.
-- `nlp_provider.dart:152` `totalMs-4000`. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
+1. **Explorador móvil: Gabriel quiere rediseñarlo con él antes de más cambios.** No tocarlo sin su OK.
+2. Decidir con Gabriel si la app sigue siempre acostada (`lib/main.dart:130-133`); hoy no hay vertical.
+3. 3.0.48: probar en celular real; push y tag solo por orden de Gabriel (el tag lo crea él). Detalle: el aviso de cola tapa la última fila 1,5 s.
+4. Confirmar en celular: YT/NewPipe 3.0.46, radio 3.0.44, letra en 2.º plano 3.0.47 (no verificable si ya se hizo).
+5. Fusionar la rama a `qa/v20`/`main` y limpiar las 7 ramas viejas (decide Gabriel).
+6. Bajón de volumen en la primera mezcla de Live DJ (no verificable). ¿MP3 320 kbps en móvil? (no verificable).
+7. Re-auditar BPM de 80s Inglés tras 3.0.31 (meta ±0,05); umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min.
+8. `lib/providers/nlp_provider.dart:152` `mixOut = totalMs - 4000`. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
+9. Lote de karaoke `_K` en la laptop: estado desconocido.
+
+## Notas de entorno (box)
+- Emulador: `chmod 666 /dev/kvm`; `~/Android/emulator/emulator -avd gm34 -no-window -gpu swiftshader_indirect -no-audio -no-snapshot -memory 2048 -cores 4`. Para x64 hace falta la lib Rust x86_64 (cambio temporal en `rust_builder/cargokit/gradle/plugin.gradle` `resolvePlatforms` y `abiFilters`, luego revertir).
+- Gabriel no puede pagar Sonnet: solo Grok Medium o arreglos hechos en la box.
 
 ## LOG CAMBIO
 ```
@@ -93,6 +118,30 @@ Riesgo: 1920px / Mac 13" / móvil / audible
   Se conserva: DNA / Phrase 8 / Stealth, cue-in 10 s, fade 18 s, memoria de Radio por filtro, pausa de mezcla, cola estable (lo añadido durante el armado del Shuffle se anexa).
   Se elimina: NADA
   Riesgo: UI solo el texto del BPM (entero, más corto; sin overflow); las 4 plataformas comparten el código (Windows, Android, macOS, iPhone); no cambia audio.
-- 3.0.46+65: Android usa NewPipe para la vista previa y para Ingestar de YT (probado en el celular: suena y baja el MP3). Windows sigue con yt-dlp. Wakelock activo mientras la app está abierta.
-- 3.0.47+66 (`b522a40`, publicado): botón Radio "PRENDE MODO RADIO" / "APAGA MODO RADIO"; explorador móvil con hoja "+ Agregar canciones"; cola persistente de reintento de letras (`lib/services/lyric_retry_queue.dart`, `lyric_retry_queue.json`, cada 1 min, aviso "Letra agregada"); la causa fue LRCLIB 503 ServerOverloaded. FALLA en el celular: quedaban la columna vieja y el disco verde.
-- 3.0.48+67 (local, sin push): ver Pendiente.
+- 3.0.36+55 (`3105b64`): los archivos de una pista (mp3, .lrc, _K) viajan juntos al LAB.
+  Se conserva: cuarentena LAB, .lrc.bak. Se elimina: NADA
+- 3.0.37+56 (`aa628e3`, `284da20`): GatomixLog reemplaza el log oculto (Windows); prueba de versión lee pubspec.
+  Se conserva: logs existentes. Se elimina: log oculto viejo (sustituido)
+- 3.0.38+57 (`ddb1487`): descarga YT, re-descarga desde LAB, aviso BPM 0, errores de rescate visibles, acompañantes LAB.
+  Se conserva: flujo YT y LAB. Se elimina: NADA
+- 3.0.39 (`f0a76b6`): BPM estimado por carpeta; rescate LAB prefiere m4a.
+  Se conserva: BPM exacto 3031. Se elimina: NADA
+- 3.0.40 (`533ab68`): detector BPM robusto, sin promedio por carpeta (revierte el de 3.0.39); Masterizar 1 decode / 1 encode.
+  Se conserva: BPM por recta, masterizado no destructivo. Se elimina: promedio por carpeta de 3.0.39
+- 3.0.41 (`0f87fe1`, tag v3.0.41): limitador O(1), un solo encode, bitrate VBR, BPM Adele/Despacito (Rust).
+  Se conserva: −14 LUFS ±0,3. Se elimina: NADA
+- 3.0.42 (`bef2235`, sin tag): `--karaoke-folder` headless.
+  Se conserva: Karaoke UI. Se elimina: NADA
+- 3.0.43 (`5d12cc6`, tag v3.0.43): Live DJ no mezcla una pista consigo misma (`livedj_next.dart`, `livedj_provider.dart`).
+  Se conserva: DNA / Phrase 8 / Stealth, cola estable. Se elimina: NADA
+- 3.0.44+63 (`e6fe616`, tag v3.0.44): radio repetía "una sí, una no": el pending solo se usa si no es la que suena ni la anterior.
+  Se conserva: plan y memoria de Radio. Se elimina: NADA
+- 3.0.45 (`2707591`, `4dbc163`, sin tag): LAN destino Música (raíz), picker solo móvil, `moveFile`, resume YT tras 403; fix de compilación del const de clientes YT.
+  Se conserva: LAN Sync, yt-dlp en Windows. Se elimina: NADA
+- 3.0.46+65 (`aa7966f`, `3a2843b`, sin tag): Android usa NewPipe para vista previa e Ingestar (solo M4A); Windows sigue con yt-dlp; wakelock 1.3.3. "Probado en celular": no verificable.
+  Se conserva: yt-dlp Windows. Se elimina: NADA
+- 3.0.47+66 (`734caff`, `b522a40`, tag v3.0.47 creado por bot — no repetir): botón "PRENDE / APAGA MODO RADIO" (`livedj_workspace.dart:447`, `livedj_folder_playlist.dart:630`); explorador móvil en hoja "+ Agregar canciones"; cola de reintento de letras (`lib/services/lyric_retry_queue.dart`, cada 1 min, aviso "Letra agregada"; causa LRCLIB 503). **Falló en celular:** quedaban la columna vieja y el disco verde (viola ley 10).
+  Se conserva: cola, Cartridge, radio. Se elimina: NADA (debió eliminar el explorador viejo)
+- 3.0.48+67 (`054686b`, `8468d77`, `65fe2ae`, `5dddcbc`, local, sin push ni tag): en móvil se quitan la columna vieja y el disco verde, solo "+ Agregar canciones"; aviso de cola 1,5 s no persistente; Canciones y búsqueda recursivas desde la raíz; letra Automix horizontal 80 dp. Probado solo en emulador `gm34`, horizontal.
+  Se conserva: escritorio sin cambios, cola, Cartridge. Se elimina: columna vieja de carpeta y disco verde en móvil (pedido de Gabriel)
+- Infra (sin cambio de versión, local, sin push ni tag): CI `release.yml` con job `test` (`flutter test` + `cargo test` en rust/) que bloquea build y release si falla. `integration_test/simple_test.dart` (plantilla) → `smoke_app_test.dart` (arranca motores reales, Automix, "+ Agregar canciones", Live DJ "MODO RADIO"). `GATOMIX_EMU=1` agrega x86_64 (app y Cargokit) solo para el emulador `gm34`; el release sigue arm64. Estado al commit: `flutter test` 401 OK / **2 fallan preexistentes** (`mobile_explorer_3048_test`: "hoja 360x800 / 800x400: tocar canción la encola", no encuentra "Cancion") → **CI quedará en rojo hasta arreglarlos**; `cargo test` 42 OK, 6 ignorados. Humo en gm34 **FALLA por 2 bugs reales de la app**: (1) `LiveDjNotifier._initPersistence` sin sesión guardada (instalación nueva) llama `_schedulePhraseNeighbors` dentro de `build` → "uninitialized provider" (`livedj_provider.dart` ≈1103/312); (2) sin permiso de almacenamiento, `LabWorkspace._loadRegistry` (`lab_workspace.dart:140`) hace `writeAsStringSync` sin try en `initState` → PathAccessException. Correr: `GATOMIX_EMU=1 flutter test integration_test -d emulator-5554` (antes: `adb shell appops set com.gatonegro5.gatomix MANAGE_EXTERNAL_STORAGE allow` con la app instalada).
