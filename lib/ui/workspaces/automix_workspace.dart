@@ -1606,7 +1606,7 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                               // Móvil acostado: letra más baja, cola más alta.
                               height: MediaQuery.of(context).orientation ==
                                       Orientation.landscape
-                                  ? 64
+                                  ? 80
                                   : 100,
                               child: lyricsBox,
                             ),
