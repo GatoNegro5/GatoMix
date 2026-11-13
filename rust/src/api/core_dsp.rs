@@ -6394,6 +6394,88 @@ fn karaoke_backend(model_path: &str) -> Result<KInfer, String> {
     }))
 }
 
+/// 3.1.16: nucleo del karaoke por ventanas, con la inferencia como parametro.
+/// `next` entrega PCM estereo a K_RATE por trozos (None = fin); `emit` recibe
+/// el instrumental entrelazado. Mismos bloques y recortes que el bucle de
+/// bloque completo (3.1.08-3.1.15): la salida es muestra por muestra igual.
+fn kar_stream(
+    next: &mut dyn FnMut() -> Result<Option<Vec<(f32, f32)>>, String>,
+    infer: &mut dyn FnMut(&[f32]) -> Result<Vec<f32>, String>,
+    emit: &mut dyn FnMut(&[f32]) -> Result<(), String>,
+    total_hint: usize,
+) -> Result<usize, String> {
+    let trim = K_FFT / 2;
+    let chunk = K_HOP * (K_DIM_T - 1);
+    let gen = chunk - 2 * trim;
+    let stft = KStft::new();
+    let plane = K_DIM_F * K_DIM_T;
+    let mut data = vec![0f32; 4 * plane];
+    // Cada canal arranca con `trim` ceros, como el relleno del bloque completo.
+    let mut buf: [Vec<f32>; 2] = [
+        Vec::with_capacity(chunk + (1 << 16)),
+        Vec::with_capacity(chunk + (1 << 16)),
+    ];
+    buf[0].resize(trim, 0.0);
+    buf[1].resize(trim, 0.0);
+    let mut inter: Vec<f32> = Vec::with_capacity(2 * gen);
+    let mut n_in = 0usize;
+    let mut n_out = 0usize;
+    let mut eof = false;
+    loop {
+        if !eof {
+            match next()? {
+                Some(p) => {
+                    n_in += p.len();
+                    for (l, r) in p {
+                        buf[0].push(l);
+                        buf[1].push(r);
+                    }
+                }
+                None => {
+                    eof = true;
+                    if n_in < K_RATE as usize {
+                        return Err("Pista demasiado corta".to_string());
+                    }
+                }
+            }
+        }
+        while buf[0].len() >= chunk || (eof && n_out < n_in) {
+            if KAR_CANCEL.load(Ordering::Relaxed) {
+                return Err("Cancelado".to_string());
+            }
+            if buf[0].len() < chunk {
+                // Cola: ceros despues del final, igual que el relleno de antes.
+                buf[0].resize(chunk, 0.0);
+                buf[1].resize(chunk, 0.0);
+            }
+            for ch in 0..2 {
+                let (a, b) = data[(ch * 2) * plane..(ch * 2 + 2) * plane].split_at_mut(plane);
+                stft.forward(&buf[ch][..chunk], a, b);
+            }
+            let o = infer(&data)?;
+            let w0 = stft.inverse(&o[0..plane], &o[plane..2 * plane], chunk);
+            let w1 = stft.inverse(&o[2 * plane..3 * plane], &o[3 * plane..4 * plane], chunk);
+            let take = gen.min(n_in - n_out);
+            inter.clear();
+            for j in 0..take {
+                inter.push(w0[trim + j] * K_COMPENSATE);
+                inter.push(w1[trim + j] * K_COMPENSATE);
+            }
+            emit(&inter)?;
+            n_out += take;
+            buf[0].drain(..gen);
+            buf[1].drain(..gen);
+            if total_hint > 0 {
+                KAR_PROGRESS.store(((n_out * 1000 / total_hint).min(999)) as u32, Ordering::Relaxed);
+            }
+        }
+        if eof {
+            break;
+        }
+    }
+    Ok(n_out)
+}
+
 /// Separa la voz y escribe la pista instrumental como MP3 320 kbps.
 /// `model_path` = UVR-MDX-NET-Inst_HQ_3.onnx. Sin Python ni FFmpeg.
 pub fn karaoke_separate(
@@ -6408,84 +6490,74 @@ pub fn karaoke_separate(
     KAR_CANCEL.store(false, Ordering::Relaxed);
     KAR_PROGRESS.store(0, Ordering::Relaxed);
 
-    // 3.1.08: 1801 s solo para detectar >30 min (+1 s de RAM); el _K sigue limitado y no
-    // se escribe ningun _K truncado (Pendiente 15: karaoke por ventanas).
-    let dec = decode_channels(&input_path, 0, 1801, 2)?;
-    if dec.ch.first().map_or(0, |c| c.len()) > 1800 * dec.rate as usize {
-        return Err(">30 min (pendiente streaming)".to_string());
-    }
-    let mut chans: Vec<Vec<f32>> = if dec.ch.len() == 1 {
-        vec![dec.ch[0].clone(), dec.ch[0].clone()]
+    // 3.1.16 (Pendiente 15): por ventanas. Decodifica por paquetes, remuestrea
+    // con un Resampler continuo y escribe al .part bloque a bloque. Sin tope de
+    // duracion; en RAM queda un bloque (5,92 s) por canal mas los tensores.
+    let (mut format, track_id, params) = open_format(&input_path)?;
+    let rate = params.sample_rate.ok_or("Sin frecuencia de muestreo")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .map_err(|e| e.to_string())?;
+    let total_hint = params
+        .n_frames
+        .map(|f| (f as u128 * K_RATE as u128 / rate.max(1) as u128) as usize)
+        .unwrap_or(0);
+    let mut rs = if rate != K_RATE {
+        Some(Resampler::new(rate, K_RATE))
     } else {
-        dec.ch
+        None
     };
-    if dec.rate != K_RATE {
-        for c in chans.iter_mut() {
-            let fr: Vec<(f32, f32)> = c.iter().map(|v| (*v, *v)).collect();
-            let mut rs = Resampler::new(dec.rate, K_RATE);
-            let mut o = Vec::with_capacity(fr.len() * K_RATE as usize / dec.rate as usize + 8);
-            rs.process(&fr, &mut o);
-            *c = o.into_iter().map(|p| p.0).collect();
-        }
-    }
-    let n = chans[0].len();
-    if n < K_RATE as usize {
-        return Err("Pista demasiado corta".to_string());
-    }
 
     let mut infer = karaoke_backend(&model_path)?;
 
-    let trim = K_FFT / 2;
-    let chunk = K_HOP * (K_DIM_T - 1);
-    let gen = chunk - 2 * trim;
-    let n_chunks = (n + gen - 1) / gen;
-    let total_len = trim * 2 + n_chunks * gen;
-    let mut padded: Vec<Vec<f32>> = Vec::with_capacity(2);
-    for c in chans.iter().take(2) {
-        let mut p = vec![0f32; total_len];
-        p[trim..trim + n].copy_from_slice(c);
-        padded.push(p);
-    }
-    drop(chans);
-
-    let stft = KStft::new();
-    let plane = K_DIM_F * K_DIM_T;
-    let mut result: Vec<Vec<f32>> = vec![Vec::with_capacity(n_chunks * gen); 2];
-    let mut data = vec![0f32; 4 * plane];
-
-    for ci in 0..n_chunks {
-        if KAR_CANCEL.load(Ordering::Relaxed) {
-            return Err("Cancelado".to_string());
-        }
-        let start = ci * gen;
-        for ch in 0..2 {
-            let seg = &padded[ch][start..start + chunk];
-            let (a, b) = data[(ch * 2) * plane..(ch * 2 + 2) * plane].split_at_mut(plane);
-            stft.forward(seg, a, b);
-        }
-        let o = infer(&data)?;
-        for ch in 0..2 {
-            let re = &o[(ch * 2) * plane..(ch * 2 + 1) * plane];
-            let im = &o[(ch * 2 + 1) * plane..(ch * 2 + 2) * plane];
-            let w = stft.inverse(re, im, chunk);
-            result[ch].extend(w[trim..trim + gen].iter().map(|v| v * K_COMPENSATE));
-        }
-        KAR_PROGRESS.store((((ci + 1) * 1000) / n_chunks) as u32, Ordering::Relaxed);
-    }
-
     let tmp = format!("{output_path}.part");
     let mut sink = Mp3Sink::new(&tmp, K_RATE, true, 320)?;
-    let mut inter: Vec<f32> = Vec::with_capacity(1 << 20);
-    let mut i = 0usize;
-    while i < n {
-        let end = (i + (1 << 19)).min(n);
-        inter.clear();
-        for j in i..end {
-            inter.push(result[0][j]);
-            inter.push(result[1][j]);
+    let mut next = || -> Result<Option<Vec<(f32, f32)>>, String> {
+        loop {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(_) => return Ok(None),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            match decoder.decode(&packet) {
+                Ok(decoded) => {
+                    let spec = *decoded.spec();
+                    let n_ch = spec.channels.count().max(1);
+                    let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+                    buf.copy_interleaved_ref(decoded);
+                    // Mono se duplica en L y R, igual que antes.
+                    let pairs: Vec<(f32, f32)> = buf
+                        .samples()
+                        .chunks(n_ch)
+                        .map(|f| (f[0], if n_ch > 1 { f[1] } else { f[0] }))
+                        .collect();
+                    if pairs.is_empty() {
+                        continue;
+                    }
+                    return Ok(Some(match rs.as_mut() {
+                        Some(r) => {
+                            let mut o = Vec::with_capacity(
+                                pairs.len() * K_RATE as usize / rate as usize + 8,
+                            );
+                            r.process(&pairs, &mut o);
+                            o
+                        }
+                        None => pairs,
+                    }));
+                }
+                Err(SymError::DecodeError(_)) => continue,
+                Err(_) => return Ok(None),
+            }
         }
-        sink.push(&inter, 2)?;
-        i = end;
+    };
+    let mut emit = |inter: &[f32]| sink.push(inter, 2);
+    let res = kar_stream(&mut next, &mut *infer, &mut emit, total_hint);
+    if let Err(e) = res {
+        drop(sink);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     sink.finish()?;
     let _ = std::fs::remove_file(&output_path);
@@ -7940,6 +8012,171 @@ mod master_guard_tests {
         );
         assert!(!std::path::Path::new(&format!("{path_s}.gmxside")).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod kar_stream_3116_tests {
+    use super::*;
+
+    fn identidad(d: &[f32]) -> Result<Vec<f32>, String> {
+        Ok(d.to_vec())
+    }
+
+    fn seno(n: usize, hz: f64, amp: f32, rate: u32) -> Vec<f32> {
+        (0..n)
+            .map(|i| ((std::f64::consts::TAU * hz * i as f64 / rate as f64).sin() as f32) * amp)
+            .collect()
+    }
+
+    /// Referencia: el bucle de bloque completo de 3.1.08-3.1.15 (PCM entero en RAM).
+    fn bloque_completo(l: &[f32], r: &[f32]) -> Vec<f32> {
+        let n = l.len();
+        let trim = K_FFT / 2;
+        let chunk = K_HOP * (K_DIM_T - 1);
+        let gen = chunk - 2 * trim;
+        let n_chunks = (n + gen - 1) / gen;
+        let total_len = trim * 2 + n_chunks * gen;
+        let mut padded = vec![vec![0f32; total_len]; 2];
+        padded[0][trim..trim + n].copy_from_slice(l);
+        padded[1][trim..trim + n].copy_from_slice(r);
+        let stft = KStft::new();
+        let plane = K_DIM_F * K_DIM_T;
+        let mut result: Vec<Vec<f32>> = vec![Vec::new(); 2];
+        let mut data = vec![0f32; 4 * plane];
+        for ci in 0..n_chunks {
+            let start = ci * gen;
+            for ch in 0..2 {
+                let seg = &padded[ch][start..start + chunk];
+                let (a, b) = data[(ch * 2) * plane..(ch * 2 + 2) * plane].split_at_mut(plane);
+                stft.forward(seg, a, b);
+            }
+            let o = identidad(&data).unwrap();
+            for ch in 0..2 {
+                let re = &o[(ch * 2) * plane..(ch * 2 + 1) * plane];
+                let im = &o[(ch * 2 + 1) * plane..(ch * 2 + 2) * plane];
+                let w = stft.inverse(re, im, chunk);
+                result[ch].extend(w[trim..trim + gen].iter().map(|v| v * K_COMPENSATE));
+            }
+        }
+        let mut inter = Vec::with_capacity(2 * n);
+        for j in 0..n {
+            inter.push(result[0][j]);
+            inter.push(result[1][j]);
+        }
+        inter
+    }
+
+    /// 12 s sinteticos = 3 bloques y 2 costuras; sin ONNX, sin LAME, sin disco.
+    #[test]
+    fn kar_stream_3116_paridad_y_costuras() {
+        let t0 = std::time::Instant::now();
+        let n = K_RATE as usize * 12;
+        let gen = K_HOP * (K_DIM_T - 1) - K_FFT;
+        assert_eq!((n + gen - 1) / gen, 3, "12 s deben dar 3 bloques");
+        // Rampa de 100 ms al entrar y salir: un seno que arranca de golpe en la
+        // muestra 0 da 1,6e-3 en el borde por el corte a 3072 bins (igual en
+        // el bloque completo); con rampa el borde queda como el resto.
+        let rampa = |mut v: Vec<f32>| {
+            let f = K_RATE as usize / 10;
+            let m = v.len();
+            for i in 0..f {
+                let g = i as f32 / f as f32;
+                v[i] *= g;
+                v[m - 1 - i] *= g;
+            }
+            v
+        };
+        let l = rampa(seno(n, 440.0, 0.5, K_RATE));
+        let r = rampa(seno(n, 330.0, 0.4, K_RATE));
+        let referencia = bloque_completo(&l, &r);
+
+        // Paquetes de 1152 (MP3) con uno de 1000 cada 7 para mover los cortes.
+        let mut pos = 0usize;
+        let mut k = 0usize;
+        let mut next = || -> Result<Option<Vec<(f32, f32)>>, String> {
+            if pos >= n {
+                return Ok(None);
+            }
+            let step = if k % 7 == 3 { 1000 } else { 1152 };
+            k += 1;
+            let end = (pos + step).min(n);
+            let p: Vec<(f32, f32)> = (pos..end).map(|i| (l[i], r[i])).collect();
+            pos = end;
+            Ok(Some(p))
+        };
+        let mut out: Vec<f32> = Vec::new();
+        let mut emit = |x: &[f32]| -> Result<(), String> {
+            out.extend_from_slice(x);
+            Ok(())
+        };
+        let mut inf = |d: &[f32]| identidad(d);
+        let got = kar_stream(&mut next, &mut inf, &mut emit, n).unwrap();
+        assert_eq!(got, n);
+        assert_eq!(out.len(), 2 * n);
+        assert!(out == referencia, "streaming distinto al bloque completo");
+
+        let mut peor = 0f32;
+        let mut peor_costura = 0f32;
+        for i in 0..n {
+            let d = (out[2 * i] / K_COMPENSATE - l[i])
+                .abs()
+                .max((out[2 * i + 1] / K_COMPENSATE - r[i]).abs());
+            peor = peor.max(d);
+            if (i as i64 - gen as i64).abs() < 64 || (i as i64 - 2 * gen as i64).abs() < 64 {
+                peor_costura = peor_costura.max(d);
+            }
+        }
+        println!(
+            "KAR3116 n={n} bloques=3 peor={peor:.2e} costuras={peor_costura:.2e} en {:?}",
+            t0.elapsed()
+        );
+        assert!(peor < 1e-3, "salto de {peor}");
+        assert!(peor_costura < 1e-3, "clic en costura de {peor_costura}");
+    }
+
+    #[test]
+    fn kar_stream_3116_corta_y_resampler_continuo() {
+        // Menos de 1 s: mismo error que antes y sin emitir nada.
+        let mut una = true;
+        let mut next = || -> Result<Option<Vec<(f32, f32)>>, String> {
+            if una {
+                una = false;
+                Ok(Some(vec![(0.0, 0.0); 1000]))
+            } else {
+                Ok(None)
+            }
+        };
+        let mut emitidas = 0usize;
+        let mut emit = |x: &[f32]| -> Result<(), String> {
+            emitidas += x.len();
+            Ok(())
+        };
+        let mut inf = |d: &[f32]| identidad(d);
+        let e = kar_stream(&mut next, &mut inf, &mut emit, 0).unwrap_err();
+        assert_eq!(e, "Pista demasiado corta");
+        assert_eq!(emitidas, 0);
+
+        // 48 kHz -> 44,1 kHz por paquetes de 1152 = una sola pasada.
+        let x: Vec<(f32, f32)> = seno(96000, 440.0, 0.5, 48000)
+            .into_iter()
+            .map(|v| (v, -v))
+            .collect();
+        let mut uno = Resampler::new(48000, K_RATE);
+        let mut a = Vec::new();
+        uno.process(&x, &mut a);
+        let mut cont = Resampler::new(48000, K_RATE);
+        let mut b = Vec::new();
+        for p in x.chunks(1152) {
+            cont.process(p, &mut b);
+        }
+        assert!((a.len() as i64 - b.len() as i64).abs() <= 1, "{} vs {}", a.len(), b.len());
+        let m = a.len().min(b.len());
+        let peor = (0..m)
+            .map(|i| (a[i].0 - b[i].0).abs().max((a[i].1 - b[i].1).abs()))
+            .fold(0f32, f32::max);
+        println!("KAR3116 resampler {} muestras, peor {peor:.2e}", m);
+        assert!(peor < 1e-4);
     }
 }
 

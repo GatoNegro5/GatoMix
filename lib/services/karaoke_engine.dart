@@ -41,7 +41,8 @@ class KaraokeEngine {
     return true;
   }
 
-  /// 3.1.08: tope de RAM del karaoke en Rust (`karaoke_separate`): 30:00.
+  /// 3.1.08-3.1.15: tope de RAM del karaoke en Rust: 30:00. Desde 3.1.16
+  /// `karaoke_separate` va por ventanas sin tope; queda para los _K viejos.
   static const int capMs = 1800000;
 
   /// 1800 s a 320 kbps CBR (salida fija de `Mp3Sink`) = 72.000.000 B.
@@ -59,11 +60,18 @@ class KaraokeEngine {
     if (srcMs != null && kMs != null && kMs + padToleranceMs >= srcMs) {
       return KaraokeWork.done;
     }
-    if (srcMs != null && srcMs >= capMs) return KaraokeWork.tooLong;
     return KaraokeWork.queue;
   }
 
-  static Future<KaraokeWork> _decide(String src) async {
+  /// 3.1.16: espera maxima de una separacion: 3 veces la duracion (factor sin
+  /// medir, se ajusta con un log real), minimo 10 min; sin duracion, 60 min.
+  static Duration karaokeTimeout(int? srcMs) {
+    if (srcMs == null || srcMs <= 0) return const Duration(minutes: 60);
+    final int ms = srcMs * 3;
+    return Duration(milliseconds: ms < 600000 ? 600000 : ms);
+  }
+
+  static Future<(KaraokeWork, int?)> _decide(String src) async {
     int? srcMs;
     int? kMs;
     try {
@@ -76,7 +84,7 @@ class KaraokeEngine {
     } catch (e) {
       debugPrint('[KARAOKE] duracion no medida: $e');
     }
-    return karaokeNeedsWork(srcMs: srcMs, kMs: kMs);
+    return (karaokeNeedsWork(srcMs: srcMs, kMs: kMs), srcMs);
   }
 
   static Future<String> ensureModel({void Function(double)? onProgress}) async {
@@ -175,13 +183,8 @@ class KaraokeEngine {
         final label = files.length > 1
             ? '(${i + 1}/${files.length}) $name'
             : name;
-        final KaraokeWork work = await _decide(src);
+        final (KaraokeWork work, int? srcMs) = await _decide(src);
         if (work == KaraokeWork.done) continue;
-        if (work == KaraokeWork.tooLong) {
-          debugPrint('🔴 [KARAOKE] $name: >30 min (pendiente streaming)');
-          onStatus?.call('Omitida (>30 min, pendiente streaming): $label');
-          continue;
-        }
         onStatus?.call('Analizando: $label');
         final timer = Timer.periodic(const Duration(seconds: 1), (_) async {
           try {
@@ -190,11 +193,20 @@ class KaraokeEngine {
           } catch (_) {}
         });
         try {
-          await rust_dsp.karaokeSeparate(
+          final Future<bool> sep = rust_dsp.karaokeSeparate(
             inputPath: src,
             modelPath: model,
             outputPath: karaokePathFor(src),
           );
+          try {
+            await sep.timeout(karaokeTimeout(srcMs));
+          } on TimeoutException {
+            // 3.1.16: el timeout de Dart no frena a Rust: se cancela y se espera
+            // a que cierre el bloque en curso (borra su .part) antes de seguir.
+            await rust_dsp.karaokeCancel();
+            await sep.then((_) => true, onError: (_) => false);
+            rethrow;
+          }
           done++;
           onStatus?.call('¡Instrumental Listo!: $label');
         } catch (e) {
@@ -215,5 +227,5 @@ class KaraokeEngine {
 }
 
 /// 3.1.08: decision por pista antes de separar.
-/// queue = separar, done = _K completo, tooLong = >30 min (pendiente streaming).
-enum KaraokeWork { queue, done, tooLong }
+/// queue = separar, done = _K completo. 3.1.16: sin tooLong (streaming).
+enum KaraokeWork { queue, done }
