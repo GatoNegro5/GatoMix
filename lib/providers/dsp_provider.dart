@@ -104,8 +104,10 @@ class DspWorker {
     } catch (_) {}
 
     final files = <File>[];
+    var listErrors = false;
     try {
       await for (final entity in dir.list(recursive: true).handleError((e) {
+        listErrors = true;
         debugPrint("⚠️ [DSP Cache I/O Ignorado]: $e");
       })) {
         if (entity is File) {
@@ -117,6 +119,7 @@ class DspWorker {
       }
     } catch (e) {
       debugPrint("🔴 [DSP Cache Scan Fatal]: $e");
+      listErrors = true;
     }
 
     bool hasChanges = false;
@@ -175,6 +178,7 @@ class DspWorker {
         debugPrint("⚙️ [DSP Cache] Escaneando binario ID3: $filename");
         await Future.delayed(const Duration(milliseconds: 30));
 
+        int stamp = modified;
         final Map<String, String> tags = readGmxTagsFromFile(absolutePath);
         if (tags['GMX_ANALYSIS'] == kGmxAnalysis) {
           final double tagged = await _extractBpmFromID3(absolutePath);
@@ -199,27 +203,54 @@ class DspWorker {
             cacheData[absolutePath] = fixedDetected ?? 0.0;
             if (fixedDetected != null) cacheData[filename] = fixedDetected;
             debugPrint('BPM_FIX $filename $oldBpm->$detectedBpm');
+            // 3.1.11: mtime posterior a la escritura de Rust; con el de antes
+            // el arranque siguiente volvia a escanear la pista.
+            try {
+              stamp = file.lastModifiedSync().millisecondsSinceEpoch;
+            } catch (_) {}
           } catch (e) {
             debugPrint("🔴 [FFT BPM FALLO / TIMEOUT]: $e -> $filename");
             cacheData[absolutePath] = 0.0;
           }
         }
 
-        timestamps[absolutePath] = modified;
+        timestamps[absolutePath] = stamp;
         hasChanges = true;
       }
     }
 
     // Solo guardamos si hubo cambios Y el proceso no fue abortado a la mitad
-    if (hasChanges && !ref.read(pipelineProvider).isAborted) {
-      writeDjMetadata(
-        directoryPath,
-        bpmIndexPreservingKeys(readDjMetadata(directoryPath), cacheData),
-      );
-      writeDjTimestamps(directoryPath, <String, dynamic>{
-        for (final MapEntry<String, int> e in timestamps.entries)
-          e.key: e.value,
-      });
+    // 3.1.11: poda de claves de mp3 de esta carpeta que ya no existen
+    // (renombres externos). Solo con el listado completo.
+    final bool aborted = ref.read(pipelineProvider).isAborted;
+    Map<String, dynamic> index = const <String, dynamic>{};
+    Map<String, dynamic> stamps = <String, dynamic>{
+      for (final MapEntry<String, int> e in timestamps.entries) e.key: e.value,
+    };
+    var pruned = false;
+    if (!aborted) {
+      index = bpmIndexPreservingKeys(readDjMetadata(directoryPath), cacheData);
+      if (!listErrors && files.isNotEmpty) {
+        final List<String> present = [for (final File f in files) f.path];
+        final Map<String, dynamic> index2 = pruneMissingBpmKeys(
+          index,
+          directoryPath: directoryPath,
+          presentPaths: present,
+        );
+        final Map<String, dynamic> stamps2 = pruneMissingBpmKeys(
+          stamps,
+          directoryPath: directoryPath,
+          presentPaths: present,
+        );
+        pruned =
+            index2.length != index.length || stamps2.length != stamps.length;
+        index = index2;
+        stamps = stamps2;
+      }
+    }
+    if ((hasChanges || pruned) && !aborted) {
+      writeDjMetadata(directoryPath, index);
+      writeDjTimestamps(directoryPath, stamps);
       debugPrint("🟢 [DSP Cache] Caché estático actualizado atómicamente.");
     }
 

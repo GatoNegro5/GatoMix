@@ -761,3 +761,37 @@ class GatomixLog {
     hideOnWindows(f.path);
   }
 }
+
+/// 3.1.11: quita del indice de BPM (o de djTimestamps) las claves de mp3 de
+/// [directoryPath] que ya no existen, p. ej. nombres viejos que un script
+/// externo renombro a "(N BPM)". Se quedan las claves de los archivos
+/// actuales ([presentPaths]), las de fuera de la carpeta y las que no son mp3.
+Map<String, dynamic> pruneMissingBpmKeys(
+  Map<String, dynamic> map, {
+  required String directoryPath,
+  required Iterable<String> presentPaths,
+}) {
+  final Set<String> keys = <String>{};
+  final Set<String> names = <String>{};
+  for (final String p in presentPaths) {
+    keys.add(audioPathKey(p));
+    final String slash = p.replaceAll('\\', '/');
+    names.add(slash.substring(slash.lastIndexOf('/') + 1).toLowerCase());
+  }
+  var dirKey = audioPathKey(directoryPath);
+  if (!dirKey.endsWith('/')) dirKey = '$dirKey/';
+  bool orphan(String key) {
+    if (!key.toLowerCase().endsWith('.mp3')) return false;
+    if (!key.contains('/') && !key.contains('\\')) {
+      return !names.contains(key.toLowerCase());
+    }
+    final String k = audioPathKey(key);
+    if (!k.startsWith(dirKey)) return false;
+    return !keys.contains(k);
+  }
+
+  return <String, dynamic>{
+    for (final MapEntry<String, dynamic> e in map.entries)
+      if (!orphan(e.key)) e.key: e.value,
+  };
+}

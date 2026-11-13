@@ -3141,6 +3141,37 @@ fn grid_from_pcm(
     measure_tempo_grid(&mono, rate)
 }
 
+/// 3.1.11: rejilla por paquetes (acumulador 3.1.09, cascada FULL -> 900 s ->
+/// 60 s) sobre el PCM ya decodificado, solo el tramo que se conserva
+/// [head..frames-tail]: el ms 0 de la rejilla es el ms 0 del master recortado.
+fn stream_grid_from_pcm(
+    pcm: &[f32],
+    channels: usize,
+    rate: u32,
+    head: u64,
+    tail: u64,
+) -> Option<(crate::bpm_exact::TempoGrid, &'static str)> {
+    let nch = channels.max(1);
+    if rate == 0 || pcm.len() < nch {
+        return None;
+    }
+    let frames = pcm.len() / nch;
+    let end = frames.saturating_sub(tail as usize);
+    let start = (head as usize).min(end);
+    if end <= start {
+        return None;
+    }
+    let keep = nch.min(2);
+    let mut acc = StreamAnalysis::new(rate, keep, false);
+    for i in start..end {
+        let base = i * nch;
+        acc.push(&pcm[base..base + keep]);
+    }
+    let a = acc.finish();
+    let scope = a.grid_scope;
+    a.grid.map(|g| (g, scope))
+}
+
 fn rewrite_from_tags(tag: &Tag, bpm: f64) -> MasterRewrite {
     MasterRewrite {
         trim_head_ms: 0,
@@ -4919,11 +4950,23 @@ pub fn master_rewrite(
     // Con audio sano se mide siempre, aunque ya hubiera TBPM.
     let t_bpm = std::time::Instant::now();
     let mut grid_scope = if intro_bpm { "INTRO" } else { "FULL" };
+    let mut bpm_audio_ms = 0u64;
     let grid = if blocked {
         None
     } else if let Some(m) = &measured {
         let _ = (samples_for_bpm, rate_for_bpm, &bpm_path);
-        grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm)
+        let kept = m.samples.saturating_sub(bpm_head).saturating_sub(bpm_tail);
+        if intro_bpm && m.rate > 0 && kept > m.rate as u64 * MAX_ANALYZE_SECS as u64 {
+            // 3.1.11: megamix > 900 s. Rejilla FULL/cascada por paquetes sobre
+            // el tramo ya recortado en RAM (sin reabrir el MP3, ms 0 = master).
+            bpm_audio_ms = kept * 1000 / m.rate as u64;
+            stream_grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail).map(|(g, s)| {
+                grid_scope = s;
+                g
+            })
+        } else {
+            grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm)
+        }
     } else if intro_bpm {
         measure_path_grid(&bpm_path, true)
     } else {
@@ -4943,7 +4986,7 @@ pub fn master_rewrite(
     let mut grid = grid;
     let bpm = grid
         .as_mut()
-        .map(|g| reconcile_tbpm(old_bpm, g, 0))
+        .map(|g| reconcile_tbpm(old_bpm, g, bpm_audio_ms))
         .unwrap_or(0.0);
 
     if do_trim && !blocked {
@@ -6859,6 +6902,34 @@ mod master_guard_tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 3.1.11: la rejilla por paquetes del tramo recortado arranca en el ms 0
+    /// del master (mismo ancla que el lote sobre el audio ya cortado).
+    #[test]
+    fn grid_3111_paquetes_sobre_el_tramo_recortado() {
+        let head = 99_225usize; // 2,25 s de silencio a 44,1 kHz
+        let body = clicks(120.0, 20.0);
+        let mut pcm = vec![0f32; head];
+        pcm.extend_from_slice(&body);
+        let (g, scope) = stream_grid_from_pcm(&pcm, 1, 44100, head as u64, 0).unwrap();
+        let lote = grid_from_pcm(&body, 1, 44100, 0, 0, false).unwrap();
+        assert_eq!(scope, "FULL");
+        assert!((g.bpm - 120.0).abs() < 0.5, "bpm {}", g.bpm);
+        assert!(
+            (g.anchor_ms - lote.anchor_ms).abs() < 10.0,
+            "ancla {} vs lote {}",
+            g.anchor_ms,
+            lote.anchor_ms
+        );
+        let (sin_corte, _) = stream_grid_from_pcm(&pcm, 1, 44100, 0, 0).unwrap();
+        let d = (sin_corte.anchor_ms - (g.anchor_ms + 2250.0)).rem_euclid(g.period_ms);
+        assert!(
+            d.min(g.period_ms - d) < 10.0,
+            "fase sin corte {} vs recortado {} + 2250",
+            sin_corte.anchor_ms,
+            g.anchor_ms
+        );
     }
 
     #[test]
