@@ -4978,7 +4978,12 @@ pub fn karaoke_separate(
     KAR_CANCEL.store(false, Ordering::Relaxed);
     KAR_PROGRESS.store(0, Ordering::Relaxed);
 
-    let dec = decode_channels(&input_path, 0, 1800, 2)?;
+    // 3.1.08: 1801 s solo para detectar >30 min (+1 s de RAM); el _K sigue limitado y no
+    // se escribe ningun _K truncado (Pendiente 15: karaoke por ventanas).
+    let dec = decode_channels(&input_path, 0, 1801, 2)?;
+    if dec.ch.first().map_or(0, |c| c.len()) > 1800 * dec.rate as usize {
+        return Err(">30 min (pendiente streaming)".to_string());
+    }
     let mut chans: Vec<Vec<f32>> = if dec.ch.len() == 1 {
         vec![dec.ch[0].clone(), dec.ch[0].clone()]
     } else {

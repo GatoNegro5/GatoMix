@@ -41,6 +41,44 @@ class KaraokeEngine {
     return true;
   }
 
+  /// 3.1.08: tope de RAM del karaoke en Rust (`karaoke_separate`): 30:00.
+  static const int capMs = 1800000;
+
+  /// 1800 s a 320 kbps CBR (salida fija de `Mp3Sink`) = 72.000.000 B.
+  /// Un _K mas chico no pudo cortarse en el tope: no se mide su duracion.
+  static const int capBytes = 1800 * 320000 ~/ 8;
+
+  /// Tolerancia por el delay/padding de LAME entre fuente y _K.
+  static const int padToleranceMs = 1000;
+
+  static bool needsDurationCheck(int karaokeBytes) => karaokeBytes >= capBytes;
+
+  /// Decision pura. `kMs` null = sin _K que revisar. `srcMs` null = no se pudo
+  /// medir (se encola y la guardia de Rust decide).
+  static KaraokeWork karaokeNeedsWork({int? srcMs, int? kMs}) {
+    if (srcMs != null && kMs != null && kMs + padToleranceMs >= srcMs) {
+      return KaraokeWork.done;
+    }
+    if (srcMs != null && srcMs >= capMs) return KaraokeWork.tooLong;
+    return KaraokeWork.queue;
+  }
+
+  static Future<KaraokeWork> _decide(String src) async {
+    int? srcMs;
+    int? kMs;
+    try {
+      srcMs = (await rust_dsp.exactDurationMs(inputPath: src)).toInt();
+      final String k = karaokePathFor(src);
+      if (usableInstrumental(k, src) &&
+          needsDurationCheck(File(k).lengthSync())) {
+        kMs = (await rust_dsp.exactDurationMs(inputPath: k)).toInt();
+      }
+    } catch (e) {
+      debugPrint('[KARAOKE] duracion no medida: $e');
+    }
+    return karaokeNeedsWork(srcMs: srcMs, kMs: kMs);
+  }
+
   static Future<String> ensureModel({void Function(double)? onProgress}) async {
     final base = await getApplicationSupportDirectory();
     final dir = Directory('${base.path}${Platform.pathSeparator}models');
@@ -94,7 +132,11 @@ class KaraokeEngine {
           low.endsWith('${suffix.toLowerCase()}.mp3')) {
         continue;
       }
-      if (usableInstrumental(karaokePathFor(p), p)) continue;
+      final String k = karaokePathFor(p);
+      // 3.1.08: un _K que llega al tope de 30:00 se revisa por duracion en run().
+      if (usableInstrumental(k, p) && !needsDurationCheck(File(k).lengthSync())) {
+        continue;
+      }
       out.add(p);
     }
     out.sort();
@@ -133,6 +175,13 @@ class KaraokeEngine {
         final label = files.length > 1
             ? '(${i + 1}/${files.length}) $name'
             : name;
+        final KaraokeWork work = await _decide(src);
+        if (work == KaraokeWork.done) continue;
+        if (work == KaraokeWork.tooLong) {
+          debugPrint('🔴 [KARAOKE] $name: >30 min (pendiente streaming)');
+          onStatus?.call('Omitida (>30 min, pendiente streaming): $label');
+          continue;
+        }
         onStatus?.call('Analizando: $label');
         final timer = Timer.periodic(const Duration(seconds: 1), (_) async {
           try {
@@ -164,3 +213,7 @@ class KaraokeEngine {
     return done;
   }
 }
+
+/// 3.1.08: decision por pista antes de separar.
+/// queue = separar, done = _K completo, tooLong = >30 min (pendiente streaming).
+enum KaraokeWork { queue, done, tooLong }
