@@ -22,6 +22,7 @@ import 'core/hal/platform_strategy.dart';
 
 // 🛠️ FIX: Rutas actualizadas a la nueva Clean Architecture
 import 'ui/widgets/app_version_label.dart';
+import 'ui/widgets/ticker_stack.dart';
 import 'ui/workspaces/automix_workspace.dart';
 import 'ui/workspaces/dsp_workspace.dart';
 import 'ui/workspaces/yt_workspace.dart';
@@ -404,7 +405,7 @@ class _MainWorkspaceState extends ConsumerState<MainWorkspace> {
           colors: [GatoMixTheme.bgPanel, GatoMixTheme.bgDark],
         ),
       ),
-      child: IndexedStack(
+      child: TickerStack(
         index: currentRoute,
         children: const [
           AutomixWorkspace(),

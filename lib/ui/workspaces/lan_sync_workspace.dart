@@ -291,7 +291,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     _radarController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
-    )..repeat();
+    ); // 3.1.18: gira solo durante un barrido (_radarSpin).
 
     _bootSequence();
   }
@@ -1143,12 +1143,27 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     }
   }
 
+  // 3.1.18: el radar solo gira mientras hay un barrido activo (pasivo o
+  // manual); entre barridos queda quieto y no pide cuadros.
+  int _radarBusy = 0;
+
+  void _radarSpin(bool on) {
+    _radarBusy = on ? _radarBusy + 1 : (_radarBusy > 0 ? _radarBusy - 1 : 0);
+    if (!mounted) return;
+    if (_radarBusy > 0) {
+      if (!_radarController.isAnimating) _radarController.repeat();
+    } else {
+      _radarController.stop();
+    }
+  }
+
   Future<void> _startNetworkSweeper() async {
     final subnetParts = _localIp.split('.');
     if (subnetParts.length != 4) return;
     final subnet = '${subnetParts[0]}.${subnetParts[1]}.${subnetParts[2]}';
 
     while (mounted && _isSweeping) {
+      _radarSpin(true);
         // 3.1.05: primero el ultimo equipo que respondio (400 ms).
         final String? lastPeer = _lanLastPeerIp;
         if (lastPeer != null && lastPeer != _localIp) {
@@ -1171,6 +1186,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         await Future.wait(batch);
       }
+      _radarSpin(false);
       await Future.delayed(const Duration(seconds: 5));
     }
   }
@@ -1182,6 +1198,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       _currentLog = "📡 Disparando escaneo de radar (Batches de 50 nodos)...";
     });
 
+    _radarSpin(true);
     final subnetParts = _localIp.split('.');
     if (subnetParts.length == 4) {
       final subnet = '${subnetParts[0]}.${subnetParts[1]}.${subnetParts[2]}';
@@ -1207,6 +1224,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       }
     }
 
+    _radarSpin(false);
     if (mounted) {
       setState(() {
         _isManualSweeping = false;

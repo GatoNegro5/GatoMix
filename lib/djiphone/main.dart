@@ -17,6 +17,7 @@ import 'package:gatomix/providers/theme_provider.dart';
 import 'package:gatomix/services/audio_interruption.dart';
 import 'package:gatomix/services/lyric_retry_queue.dart';
 import 'package:gatomix/ui/widgets/app_version_label.dart';
+import 'package:gatomix/ui/widgets/ticker_stack.dart';
 import 'package:gatomix/ui/workspaces/automix_workspace.dart';
 import 'package:gatomix/ui/workspaces/dsp_workspace.dart';
 import 'package:gatomix/ui/workspaces/lab_workspace.dart';
@@ -420,7 +421,7 @@ class _DjIphoneStage extends ConsumerWidget {
           colors: [GatoMixTheme.bgPanel, GatoMixTheme.bgDark],
         ),
       ),
-      child: IndexedStack(
+      child: TickerStack(
         index: currentRoute,
         children: const [
           AutomixWorkspace(),
