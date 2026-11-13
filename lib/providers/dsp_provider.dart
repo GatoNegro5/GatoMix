@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/bpm_range.dart';
+import '../core/analysis_window.dart';
 import '../services/track_tags.dart';
 import '../core/gatomix_store.dart';
 import '../core/master_skip.dart';
@@ -151,10 +152,14 @@ class DspWorker {
 
       if (!timestamps.containsKey(absolutePath) ||
           timestamps[absolutePath] != modified) {
-        final double fileSizeMb = file.lengthSync() / (1024 * 1024);
-        if (fileSizeMb > 26.0) {
+        // 3.1.04: ventana por duracion exacta (Rust), no por tamano.
+        int durMs = 0;
+        try {
+          durMs = (await rust_dsp.exactDurationMs(inputPath: absolutePath)).toInt();
+        } catch (_) {}
+        if (!fitsAnalysisWindow(durMs)) {
           debugPrint(
-            "🟢 [DSP Cache] Megamix detectado (${fileSizeMb.toStringAsFixed(2)}MB). Bypass de BPM aplicado a: $filename",
+            "[DSP Cache] Megamix >=15 min (${durMs ~/ 1000} s): sin BPM medido: $filename",
           );
           timestamps[absolutePath] = modified;
           hasChanges = true;
@@ -403,21 +408,23 @@ class DspWorker {
           if (hasWatermark) continue;
         }
 
-        // 🛠️ BYPASS ABSOLUTO: Si pesa más de 26MB, saltamos al instante.
-        // Cero FFI, Cero Cuarentena.
-        final double fileSizeMb = file.lengthSync() / (1024 * 1024);
-        if (fileSizeMb > 26.0) {
+        // 3.1.04: ventana por duracion exacta (Rust), no por tamano.
+        int durMs = 0;
+        try {
+          durMs = (await rust_dsp.exactDurationMs(inputPath: file.path)).toInt();
+        } catch (_) {}
+        if (!fitsAnalysisWindow(durMs)) {
           debugPrint(
-            "⏭️ [BYPASS] Pista ignorada por tamaño (${fileSizeMb.toStringAsFixed(2)}MB): $filename",
+            "[DSP] Megamix >=15 min sin medir (pendiente streaming): $filename",
           );
-          pipe.updateProgress(i + 1, total, filename, "⏭️ Omitido: > 26MB");
+          pipe.updateProgress(i + 1, total, filename, "Omitido: >= 15 min");
           continue;
         }
 
         final int thermalDelay = sysCores <= 4 ? 1500 : 50;
         await Future.delayed(Duration(milliseconds: thermalDelay));
 
-        // Pistas estándar (< 26MB)
+        // Pistas dentro de la ventana de analisis (< 15 min)
         final success = await rustTask(file.path, isMegamix: false).timeout(
           const Duration(seconds: 90),
           onTimeout: () {
@@ -445,8 +452,13 @@ class DspWorker {
     try {
       final file = File(filePath);
       if (!file.existsSync()) return false;
-      // Megamix (> 26 MB): no se mide, igual que antes.
-      if (file.lengthSync() / (1024 * 1024) > 26.0) return true;
+      // 3.1.04: megamix (>= 15 min o duracion desconocida): no se mide ni se marca.
+      final int durMs =
+          (await rust_dsp.exactDurationMs(inputPath: filePath)).toInt();
+      if (!fitsAnalysisWindow(durMs)) {
+        debugPrint("[DSP] Megamix >=15 min sin medir (pendiente streaming): $filePath");
+        return false;
+      }
       return await rust_dsp
           .processFullPipeline(inputPath: filePath, isMegamix: false)
           .timeout(const Duration(seconds: 120));

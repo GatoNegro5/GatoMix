@@ -10,7 +10,7 @@ Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo compro
 | Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
 | Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
 | Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
-| Local laptop (sin push) | **3.1.03** (pubspec `3.1.3+30103`) · HEAD de `v3029` · sin push ni tag |
+| Local laptop (sin push) | **3.1.04** (pubspec `3.1.4+30104`) · HEAD de `v3029` · sin push ni tag |
 | Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
 | main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
 | Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
@@ -87,9 +87,12 @@ Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart
 4. Confirmar en celular: YT/NewPipe 3.0.46, radio 3.0.44, letra en 2.º plano 3.0.47 (no verificable si ya se hizo).
 5. Fusionar la rama a `qa/v20`/`main` y limpiar las 7 ramas viejas (decide Gabriel).
 6. Bajón de volumen en la primera mezcla de Live DJ (no verificable). ¿MP3 320 kbps en móvil? (no verificable).
-7. Re-auditar BPM de 80s Inglés tras 3.0.31 (meta ±0,05); umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min.
+7. Re-auditar BPM de 80s Inglés tras 3.0.31 (meta ±0,05); umbrales 0,05 (onset) y 60 ms (residuo); megamixes >=15 min: streaming de envolvente en Rust (Opcion B) y quitar la marca de masterizado falsa de los megamixes ya marcados.
 8. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
 9. Lote de karaoke `_K` en la laptop: estado desconocido.
+10. 3.1.05: LAN Sync: copiar archivos sin _K y con _K/_k (case-insensitive en las 4 plataformas) y acelerar descubrimiento/transferencia en el mismo Wi-Fi.
+11. Auditar datos: 6 _K de megamixes truncados a 30:00 (1 800 045 ms) en el generador de karaoke (Cumbancheros, Tierra Canela, Hora Loca, Salsa Brava, Juan Gabriel, Rumbero).
+12. Inspeccionar 2 archivos anomalos: Oscar D Leon - Lloraras (141,88 MB / 5:43) y David Zahan - Nunca Te Quedas (777 kbps).
 
 ## Notas de entorno (box)
 - Emulador: `chmod 666 /dev/kvm`; `~/Android/emulator/emulator -avd gm34 -no-window -gpu swiftshader_indirect -no-audio -no-snapshot -memory 2048 -cores 4`. Para x64 hace falta la lib Rust x86_64 (cambio temporal en `rust_builder/cargokit/gradle/plugin.gradle` `resolvePlatforms` y `abiFilters`, luego revertir).
@@ -153,4 +156,5 @@ Plataformas (Win | Mac | Android | iPhone): .
 - 3.1.02 (pubspec `3.1.2+30102`, `85ab67e`): cues automáticos de la letra con la duración exacta en ms (sin redondeo a segundos); reglas en `lib/core/vocal_bounds.dart` (+ test con datos reales). Letra con última línea >= duración real (otra versión) no escribe cues en Isar. Rama <3 s: `exactMs - 4000` (antes `totalRound - 4000`).
   Se conserva: ramas >15 s y normal, salida con cues manuales, `isManualCue: false`, `_getLocalDurationSec` para matching de letra, exact_mix/Automix/Live DJ. Se elimina: NADA
 - 3.1.03 (pubspec `3.1.3+30103`, `520a512`): Automix ignora la última línea de la letra si llega o pasa la duración exacta (`lyricPastAudio` en `vocal_bounds.dart`) y decide el ADN; antes el mixOut quedaba tras el final (Bacilos 286880 vs 254783) y sin plan no había crossfade.
+- 3.1.04 (pubspec `3.1.4+30104`, base `8c00387`): el DSP decide por duracion exacta de Rust (`fitsAnalysisWindow` < 900 s, `lib/core/analysis_window.dart`) y no por tamano (> 26 MB) en `dsp_provider.dart` (cache, lote y `analyzeTrack`); los megamixes >= 15 min devuelven `false` y ya no reciben marca de agua falsa. Paso 0: 7 pistas > 26 MB y < 15 min ahora se miden; 18 megamixes quedan para streaming.
   Se conserva: `lastLyricMs + 1500` en letras sanas, rama ADN, SET IN/OUT, plan del outro (clamp 1040), disparos 1790/1852. Se elimina: NADA
