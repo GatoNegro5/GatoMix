@@ -14,7 +14,9 @@ import '../core/queue_bpm.dart';
 import 'pipeline_provider.dart';
 import 'db_provider.dart'; // 🛠️ FIX: Enlace al controlador de ISAR
 
-bool _enCarpetaOriginal(String path) {
+/// Respaldos de Masterizar: no se analizan ni se listan (3.1.19: tambien en
+/// el escaneo de BPM, cuyas claves podaba `pruneMissingBpmKeys` sin efecto).
+bool enCarpetaOriginal(String path) {
   final String p = path.replaceAll('\\', '/').toLowerCase();
   return p.contains('/.gatomix_original/') || p.endsWith('/.gatomix_original');
 }
@@ -112,6 +114,7 @@ class DspWorker {
       })) {
         if (entity is File) {
           final lowerPath = entity.path.toLowerCase();
+          if (enCarpetaOriginal(entity.path)) continue;
           if (lowerPath.endsWith('.mp3')) {
             files.add(entity);
           }
@@ -196,9 +199,13 @@ class DspWorker {
           );
           try {
             final double oldBpm = readTbpmSync(absolutePath);
-            final detectedBpm = await rust_dsp
-                .autoDetectAndInjectBpm(inputPath: absolutePath)
-                .timeout(analysisTimeout(durMs, const Duration(seconds: 45)));
+            // 3.1.19: candado termico global (un solo trabajo pesado a la vez).
+            final detectedBpm = await HeavyWorkGate.run(
+              'dsp-bpm',
+              () => rust_dsp
+                  .autoDetectAndInjectBpm(inputPath: absolutePath)
+                  .timeout(analysisTimeout(durMs, const Duration(seconds: 45))),
+            );
             final double? fixedDetected = fixBpmRange(detectedBpm);
             cacheData[absolutePath] = fixedDetected ?? 0.0;
             if (fixedDetected != null) cacheData[filename] = fixedDetected;
@@ -266,43 +273,6 @@ class DspWorker {
     }
   }
 
-  Future<void> processEBU(
-    String directoryPath, {
-    bool Function()? isCancelled,
-  }) async {
-    await _runRustBatch(directoryPath, "Master LUFS", (
-      path, {
-      bool isMegamix = false,
-    }) async {
-      // 🛠️ ENRUTAMIENTO INTELIGENTE: Si es un Megamix, forzamos el pipeline
-      // optimizado (1 sola pasada de volumen, usando todos los hilos).
-      if (isMegamix) {
-        return await rust_dsp.processFullPipeline(
-          inputPath: path,
-          isMegamix: true,
-        );
-      }
-      // Pistas de tamaño normal usan el cálculo LUFS estricto de doble pasada.
-      return await rust_dsp.normalizeLufs(inputPath: path);
-    }, isCancelled: isCancelled);
-  }
-
-  Future<void> processTrim(
-    String directoryPath, {
-    bool Function()? isCancelled,
-  }) async {
-    await _runRustBatch(directoryPath, "DSP Trim", (
-      path, {
-      bool isMegamix = false,
-    }) async {
-      // 🛠️ BYPASS ATÓMICO: Un Mix no tiene silencios por definición.
-      // Retornamos True al instante y ahorramos 100% de CPU y RAM.
-      if (isMegamix) return true;
-
-      return await rust_dsp.processAutoTrim(inputPath: path);
-    }, isCancelled: isCancelled);
-  }
-
   Future<void> sealPipeline(
     String directoryPath, {
     bool Function()? isCancelled,
@@ -346,7 +316,7 @@ class DspWorker {
       })) {
         if (entity is File) {
           final lowerPath = entity.path.toLowerCase();
-          if (_enCarpetaOriginal(entity.path)) continue;
+          if (enCarpetaOriginal(entity.path)) continue;
           // 🛠️ REGLA ESTRICTA: Filtrar únicamente MP3
           if (lowerPath.endsWith('.mp3')) {
             files.add(entity);
@@ -403,7 +373,7 @@ class DspWorker {
       })) {
         if (entity is File) {
           final lowerPath = entity.path.toLowerCase();
-          if (_enCarpetaOriginal(entity.path)) continue;
+          if (enCarpetaOriginal(entity.path)) continue;
           if (lowerPath.endsWith('.mp3')) {
             files.add(entity);
           }
@@ -460,12 +430,16 @@ class DspWorker {
         await Future.delayed(Duration(milliseconds: thermalDelay));
 
         // 3.1.09: toda pista medible; 90 s por cada 15 min de audio.
-        final success = await rustTask(file.path, isMegamix: false).timeout(
-          analysisTimeout(durMs, const Duration(seconds: 90)),
-          onTimeout: () {
-            pipe.updateProgress(i + 1, total, filename, "⚠️ Saltado: Timeout");
-            return false;
-          },
+        // 3.1.19: candado termico global (el timeout corre ya con el turno).
+        final success = await HeavyWorkGate.run(
+          moduleName,
+          () => rustTask(file.path, isMegamix: false).timeout(
+            analysisTimeout(durMs, const Duration(seconds: 90)),
+            onTimeout: () {
+              pipe.updateProgress(i + 1, total, filename, "⚠️ Saltado: Timeout");
+              return false;
+            },
+          ),
         );
 
         if (!success) {

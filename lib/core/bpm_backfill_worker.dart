@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../providers/pipeline_provider.dart' show HeavyWorkGate;
+
 import 'analysis_window.dart';
 import 'audio_path.dart';
 import 'bpm_range.dart';
@@ -126,7 +128,13 @@ class BpmBackfillWorker {
         _done.add(key);
         double bpm = 0;
         try {
-          bpm = TrackTags.musicalBpm(await measure(path));
+          // 3.1.19: candado termico global (un solo trabajo pesado a la vez).
+          bpm = TrackTags.musicalBpm(
+            await HeavyWorkGate.run(
+              'bpm-backfill',
+              () async => gen == _gen ? await measure(path) : 0.0,
+            ),
+          );
         } catch (_) {
           bpm = 0;
         }

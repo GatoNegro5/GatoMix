@@ -43,6 +43,47 @@ class HardwareGovernor extends StateNotifier<GovernorState> {
   }
 }
 
+/// 3.1.19: candado termico global para trabajos pesados offline (DSP, backfill
+/// de BPM, karaoke). Jamas corren 2 a la vez: cada trabajo espera su turno en
+/// orden de llegada (FIFO). Se toma por pista, nunca anidado (se trabaria).
+/// `AdaptiveEq` queda fuera a proposito: la sonoridad de la pista siguiente no
+/// puede esperar detras de un karaoke. Limite: solo cubre este proceso (los
+/// modos headless corren en otro proceso).
+class HeavyWorkGate {
+  HeavyWorkGate._();
+
+  static Future<void> _tail = Future<void>.value();
+  static String? _holder;
+  static int _waiting = 0;
+
+  /// Etiqueta del trabajo que tiene el candado (null = libre).
+  static String? get holder => _holder;
+
+  /// Trabajos esperando turno.
+  static int get waiting => _waiting;
+
+  /// Corre [job] cuando no hay otro trabajo pesado en curso. Un error de
+  /// [job] se propaga y el candado se libera igual.
+  static Future<T> run<T>(String label, Future<T> Function() job) async {
+    final Future<void> prev = _tail;
+    final Completer<void> done = Completer<void>();
+    _tail = done.future;
+    _waiting++;
+    try {
+      await prev;
+    } finally {
+      _waiting--;
+    }
+    _holder = label;
+    try {
+      return await job();
+    } finally {
+      _holder = null;
+      done.complete();
+    }
+  }
+}
+
 // 1. Nuevo Servicio de Infraestructura (Separación de Concerns)
 class MediaProcessKiller {
   /// Ejecuta un SIGKILL a nivel OS. Úsese con precaución ya que afecta a procesos globales.

@@ -7,6 +7,8 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
+import '../providers/pipeline_provider.dart' show HeavyWorkGate;
+
 /// Karaoke IA 100 % en proceso (Rust + ONNX, modelo MDX-Net/UVR).
 /// Sin Python, sin Demucs, sin FFmpeg. Genera `<nombre>_K.mp3` junto a la
 /// pista original. El modelo (~64 MB) se descarga la primera vez.
@@ -193,20 +195,27 @@ class KaraokeEngine {
           } catch (_) {}
         });
         try {
-          final Future<bool> sep = rust_dsp.karaokeSeparate(
-            inputPath: src,
-            modelPath: model,
-            outputPath: karaokePathFor(src),
-          );
-          try {
-            await sep.timeout(karaokeTimeout(srcMs));
-          } on TimeoutException {
-            // 3.1.16: el timeout de Dart no frena a Rust: se cancela y se espera
-            // a que cierre el bloque en curso (borra su .part) antes de seguir.
-            await rust_dsp.karaokeCancel();
-            await sep.then((_) => true, onError: (_) => false);
-            rethrow;
-          }
+          // 3.1.19: candado termico global; si cancelan mientras espera turno,
+          // no arranca la separacion.
+          final bool ran = await HeavyWorkGate.run('karaoke', () async {
+            if (stopQueue) return false;
+            final Future<bool> sep = rust_dsp.karaokeSeparate(
+              inputPath: src,
+              modelPath: model,
+              outputPath: karaokePathFor(src),
+            );
+            try {
+              await sep.timeout(karaokeTimeout(srcMs));
+            } on TimeoutException {
+              // 3.1.16: el timeout de Dart no frena a Rust: se cancela y se espera
+              // a que cierre el bloque en curso (borra su .part) antes de seguir.
+              await rust_dsp.karaokeCancel();
+              await sep.then((_) => true, onError: (_) => false);
+              rethrow;
+            }
+            return true;
+          });
+          if (!ran) break;
           done++;
           onStatus?.call('¡Instrumental Listo!: $label');
         } catch (e) {
