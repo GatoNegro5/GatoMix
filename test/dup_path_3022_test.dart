@@ -14,15 +14,20 @@ void main() {
   test('version visible = la de pubspec', () {
     final String pub = File('pubspec.yaml').readAsStringSync();
     final RegExpMatch? m = RegExp(
-      r'^version:\s*(\d+\.\d+\.\d+)\+(\d+)',
+      r'^version:\s*(\d+)\.(\d+)\.(\d+)\+(\d+)',
       multiLine: true,
     ).firstMatch(pub);
     expect(m, isNotNull);
-    final String name = m!.group(1)!;
-    final String build = m.group(2)!;
+    final int mayor = int.parse(m!.group(1)!);
+    final int menor = int.parse(m.group(2)!);
+    final int yy = int.parse(m.group(3)!);
+    final String build = m.group(4)!;
+    final String name = '$mayor.$menor.$yy';
     final String visible = 'v${AppVersionLabel.format(name, build)}';
-    expect(visible.startsWith('v$name'), isTrue);
-    expect(visible, contains('build $build'));
+    final String shown = '$mayor.$menor.${yy.toString().padLeft(2, '0')}';
+    expect(visible.startsWith('v$shown '), isTrue);
+    expect(visible, isNot(contains('build')));
+    expect(int.parse(build), mayor * 10000 + menor * 100 + yy);
   });
 
   test('clave absoluta: separadores, mayúsculas y NFC', () {

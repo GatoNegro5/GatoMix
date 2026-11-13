@@ -10,7 +10,7 @@ Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo compro
 | Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
 | Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
 | Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
-| Local box (sin push) | **3.0.48+67** · HEAD `12bea37` (solo CONTEXTO) sobre `5dddcbc`. Bundle `/workspace/gm3048.bundle` = `b522a40..5dddcbc`, **no incluye 12bea37** |
+| Local laptop (sin push) | **3.1.01** (pubspec `3.1.1+30101`) · rama `v3029` sobre `3df1aec` · sin commit ni tag |
 | Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
 | main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
 | Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
@@ -25,7 +25,7 @@ Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart
 2. Medir exacto: nada redondeado, nunca confiar en etiquetas viejas (TBPM, TLEN).
 3. Nunca borrar música: los originales se mueven a `C:\Users\ASUS\GatoMix_Respaldo\audio_pegado`. No se borran mp3, `.lrc` ni `_K`.
 4. Nunca desinstalar la app ni borrar sus datos.
-5. Versiones de una en una (3.0.N → 3.0.N+1), pubspec = tag. (Hoy incumplida: 3.0.45 y 3.0.46 no tienen tag.)
+5. Versiones de una en una: 3.X.01 a 3.X.99 y luego 3.(X+1).01. Vista, tags y docs = 3.X.YY sin +N; pubspec = 3.X.Y+build con build = 3·10000 + X·100 + YY (3.1.01 = `3.1.1+30101`; siempre sube, sin VERSION_DOWNGRADE). Tag = v3.X.YY.
 6. Todo cambio audible necesita OK de Gabriel. Diagnosticar con él primero.
 7. Cero regresiones y cero borrado colateral: el diff toca solo lo nombrado; si algo se perdió, reponer primero. `Se elimina: NADA` por defecto.
 8. Nunca force-push. Nunca ramas adicionales. No push sin orden de Gabriel.
@@ -145,3 +145,7 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 - 3.0.48+67 (`054686b`, `8468d77`, `65fe2ae`, `5dddcbc`, local, sin push ni tag): en móvil se quitan la columna vieja y el disco verde, solo "+ Agregar canciones"; aviso de cola 1,5 s no persistente; Canciones y búsqueda recursivas desde la raíz; letra Automix horizontal 80 dp. Probado solo en emulador `gm34`, horizontal.
   Se conserva: escritorio sin cambios, cola, Cartridge. Se elimina: columna vieja de carpeta y disco verde en móvil (pedido de Gabriel)
 - Infra (sin cambio de versión, local, sin push ni tag): CI `release.yml` con job `test` (`flutter test` + `cargo test` en rust/) que bloquea build y release si falla. `integration_test/simple_test.dart` (plantilla) → `smoke_app_test.dart` (arranca motores reales, Automix, "+ Agregar canciones", Live DJ "MODO RADIO"). `GATOMIX_EMU=1` agrega x86_64 (app y Cargokit) solo para el emulador `gm34`; el release sigue arm64. Estado al commit: `flutter test` 401 OK / **2 fallan preexistentes** (`mobile_explorer_3048_test`: "hoja 360x800 / 800x400: tocar canción la encola", no encuentra "Cancion") → **CI quedará en rojo hasta arreglarlos**; `cargo test` 42 OK, 6 ignorados. Humo en gm34 **FALLA por 2 bugs reales de la app**: (1) `LiveDjNotifier._initPersistence` sin sesión guardada (instalación nueva) llama `_schedulePhraseNeighbors` dentro de `build` → "uninitialized provider" (`livedj_provider.dart` ≈1103/312); (2) sin permiso de almacenamiento, `LabWorkspace._loadRegistry` (`lab_workspace.dart:140`) hace `writeAsStringSync` sin try en `initState` → PathAccessException. Correr: `GATOMIX_EMU=1 flutter test integration_test -d emulator-5554` (antes: `adb shell appops set com.gatonegro5.gatomix MANAGE_EXTERNAL_STORAGE allow` con la app instalada).
+- 3.0.48 fixes (`73a4ca3`, `87080f4`, `3df1aec`, sin tag): la prueba 3048 espera la búsqueda async; Live DJ difiere `_schedulePhraseNeighbors` hasta después de `build()`; Lab no tumba la app sin permiso de almacenamiento. No verificado en celular.
+  Se elimina: NADA
+- 3.1.01 (pubspec `3.1.1+30101`, commit pendiente): nuevo versionado 3.X.YY sin +N (Ley 5); `AppVersionLabel.format()` muestra `3.1.01 (sha)`.
+  Se conserva: firma de `format()`, estilo 11 px white38, entradas 3.0.xx+N. Se elimina: NADA (solo el texto "build N" visible)

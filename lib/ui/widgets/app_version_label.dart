@@ -14,17 +14,18 @@ class AppVersionLabel extends StatelessWidget {
     defaultValue: 'dev',
   );
 
-  /// `1.0.1 (build 15 · abc1234)`. Sin número de build, solo el commit.
+  /// `3.1.01 (abc1234)`: YY con 2 dígitos, sin `+N` ni build (Ley 5).
   static String format(
     String version,
     String buildNumber, [
     String sha = gitSha,
   ]) {
     final shortSha = sha.length > 7 ? sha.substring(0, 7) : sha;
-    final build = buildNumber.trim();
-    return build.isEmpty
-        ? '$version ($shortSha)'
-        : '$version (build $build · $shortSha)';
+    final parts = version.trim().split('.');
+    final shown = parts.length == 3 && int.tryParse(parts[2]) != null
+        ? '${parts[0]}.${parts[1]}.${parts[2].padLeft(2, '0')}'
+        : version.trim();
+    return '$shown ($shortSha)';
   }
 
   @override

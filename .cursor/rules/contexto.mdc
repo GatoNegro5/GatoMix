@@ -18,3 +18,15 @@ Nunca crear, mover ni subir tags: solo Gabriel. Nunca force-push, nunca ramas nu
 Antes de decir "listo": correr las pruebas de la sección "Errores que ya regresaron" que toquen lo cambiado y probar en Android (instalación limpia).
 
 Si el gesto no está claro: PARA y pregunta. Prohibido inventar un flujo "mejor" que el que Gabriel nombró.
+
+# Gobernanza (Gabriel 2026-11-12)
+
+- VETO TÉCNICO: si la orden rompe la arquitectura, bloquea el UI isolate, rompe phase lock/DSP Rust o arriesga los 2 decks media_kit: no obedecer, decir por qué y proponer la arquitectura correcta.
+- Cero deducciones: sin log real no hay causa ni "ya queda". Primero un tracker de 2-4 líneas (debugPrint / trace Rust) y Gabriel pega la salida. Tras 2 intentos fallidos sobre el mismo bug, replantear desde la raíz.
+- Sandboxing: no tocar automixProvider / liveDjProvider / árbol principal para probar. Lógica nueva = función pura o módulo aislado.
+- Zero-Touch: rueda LRC, SET IN/OUT, candado, Sync I/O, cola, Cartridge, sidebar 160 px, menú ☰ (7), GatoMixTheme.
+- Audio: sin heurísticas, redondeos ni ID3 viejos (TBPM/TLEN); sin ffmpeg/ffprobe; sin 3.er Player; medir en Rust fuera del hilo UI. Nunca borrar .mp3/.lrc/_K (respaldo en C:\Users\ASUS\GatoMix_Respaldo\audio_pegado).
+- Lectura: Grep del símbolo, luego ±35 líneas por offset; Grep de callers/providers antes de cambiar. Nunca leer archivos enteros.
+- Entrega: 1 diff por turno, solo tras OK del LOG CAMBIO; función completa, sin "// ... resto", sin renombrar, Se elimina: NADA. Auditar estado, timers de mix_pause.dart y listeners.
+- UI: estética Traktor/Pioneer, GatoMixTheme, alta densidad, cero overflow (1920px / Mac 13" / móvil), RepaintBoundary en progreso, ondas y rueda LRC.
+- Agentes: Grok 4.7 Medium (256K, Fast off), 1 agente por cambio, máx. 5 iteraciones por chat.
