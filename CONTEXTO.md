@@ -10,7 +10,7 @@ Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo compro
 | Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
 | Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
 | Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
-| Local laptop (sin push) | **3.1.05** (pubspec `3.1.5+30105`) · HEAD de `v3029` · sin push ni tag |
+| Local laptop (sin push) | **3.1.06** (pubspec `3.1.6+30106`) · HEAD de `v3029` · sin push ni tag |
 | Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
 | main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
 | Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
@@ -93,7 +93,8 @@ Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart
 10. Cerrado en 3.1.05: LAN Sync: copiar archivos sin _K y con _K/_k (case-insensitive en las 4 plataformas) y acelerar descubrimiento/transferencia en el mismo Wi-Fi.
 11. Auditar datos: 6 _K de megamixes truncados a 30:00 (1 800 045 ms) en el generador de karaoke (Cumbancheros, Tierra Canela, Hora Loca, Salsa Brava, Juan Gabriel, Rumbero).
 12. Inspeccionar 2 archivos anomalos: Oscar D Leon - Lloraras (141,88 MB / 5:43) y David Zahan - Nunca Te Quedas (777 kbps).
-13. Revisar errores preexistentes de `dart analyze` en `lib/providers/pipeline_controller.dart` (imports inexistentes core_metadata/core_dsp/core_nlp/core_bpm) y `lib/src/rust/api/simple.dart` (crateApiSimpleGreet), sin cambios desde `3105b64`.
+13. Cerrado en 3.1.06 (archivos huerfanos eliminados): errores preexistentes de `dart analyze` en `lib/providers/pipeline_controller.dart` (imports inexistentes core_metadata/core_dsp/core_nlp/core_bpm) y `lib/src/rust/api/simple.dart` (crateApiSimpleGreet), sin cambios desde `3105b64`.
+14. 3.1.07: reintento transparente en el bucle de envio de LAN Sync escritorio usando `lanSendWithRetry` por debajo, sin tocar ningun widget ni texto de la UI.
 
 ## Notas de entorno (box)
 - Emulador: `chmod 666 /dev/kvm`; `~/Android/emulator/emulator -avd gm34 -no-window -gpu swiftshader_indirect -no-audio -no-snapshot -memory 2048 -cores 4`. Para x64 hace falta la lib Rust x86_64 (cambio temporal en `rust_builder/cargokit/gradle/plugin.gradle` `resolvePlatforms` y `abiFilters`, luego revertir).
@@ -158,5 +159,6 @@ Plataformas (Win | Mac | Android | iPhone): .
   Se conserva: ramas >15 s y normal, salida con cues manuales, `isManualCue: false`, `_getLocalDurationSec` para matching de letra, exact_mix/Automix/Live DJ. Se elimina: NADA
 - 3.1.03 (pubspec `3.1.3+30103`, `520a512`): Automix ignora la última línea de la letra si llega o pasa la duración exacta (`lyricPastAudio` en `vocal_bounds.dart`) y decide el ADN; antes el mixOut quedaba tras el final (Bacilos 286880 vs 254783) y sin plan no había crossfade.
 - 3.1.04 (pubspec `3.1.4+30104`, `e169c1e`, base `8c00387`): el DSP decide por duracion exacta de Rust (`fitsAnalysisWindow` < 900 s, `lib/core/analysis_window.dart`) y no por tamano (> 26 MB) en `dsp_provider.dart` (cache, lote y `analyzeTrack`); los megamixes >= 15 min devuelven `false` y ya no reciben marca de agua falsa. Paso 0: 7 pistas > 26 MB y < 15 min ahora se miden; 18 megamixes quedan para streaming.
-- 3.1.05 (pubspec `3.1.5+30105`): LAN Sync (`lan_sync_workspace.dart`, autorizado Zero-Touch Sync I/O) con reglas puras en `lib/core/lan_sync_plan.dart`: hermanos `.lrc`/`.txt`/`_K`/`_k` sin distinguir mayusculas, "ya existe" = mismo nombre y mismo tamano (los parciales se reenvian), receptor y descarga escriben en `.part` y renombran (un `.part` viejo se sobrescribe; nunca se lista), destino reutiliza el nombre con otras mayusculas, escritorio elige IP como el movil (prefiere Wi-Fi, ignora 169.254), ultimo equipo probado primero (400 ms), un solo cliente HTTP por tanda (Keep-Alive) y log de MB/s.
+- 3.1.05 (pubspec `3.1.5+30105`, `a7e5cf5`): LAN Sync (`lan_sync_workspace.dart`, autorizado Zero-Touch Sync I/O) con reglas puras en `lib/core/lan_sync_plan.dart`: hermanos `.lrc`/`.txt`/`_K`/`_k` sin distinguir mayusculas, "ya existe" = mismo nombre y mismo tamano (los parciales se reenvian), receptor y descarga escriben en `.part` y renombran (un `.part` viejo se sobrescribe; nunca se lista), destino reutiliza el nombre con otras mayusculas, escritorio elige IP como el movil (prefiere Wi-Fi, ignora 169.254), ultimo equipo probado primero (400 ms), un solo cliente HTTP por tanda (Keep-Alive) y log de MB/s.
+- 3.1.06 (pubspec `3.1.6+30106`): se eliminan 2 archivos huerfanos que nunca compilaron y nadie importaba: `lib/providers/pipeline_controller.dart` (copia muerta; importaba core_metadata/core_dsp/core_nlp/core_bpm inexistentes; `3105b64` la edito por error, la cuarentena con companionsOf vive en `lib/core/lab_quarantine.dart`) y `lib/src/rust/api/simple.dart` (plantilla `greet` de flutter_rust_bridge sin `simple.rs`). El controlador vivo es `lib/core/pipeline_controller.dart`.
   Se conserva: `lastLyricMs + 1500` en letras sanas, rama ADN, SET IN/OUT, plan del outro (clamp 1040), disparos 1790/1852. Se elimina: NADA
