@@ -114,6 +114,185 @@ Future<List<File>> musicPickerSongsUnderAsync(String dirPath) async {
   return paths.map((String p) => File(p)).toList();
 }
 
+String _pickerName(String path) => path.split(Platform.pathSeparator).last;
+
+bool _pickerHidden(String path) {
+  final String name = _pickerName(path);
+  return name.startsWith('.') || name.startsWith(r'$');
+}
+
+int _pickerCompare(String a, String b) =>
+    a.toLowerCase().compareTo(b.toLowerCase());
+
+/// 3.1.24: carpeta leida fuera del hilo de UI (subcarpetas, canciones
+/// directas, portada y .lrc de cada cancion).
+class MusicPickerListing {
+  final bool readable;
+  final List<String> folders;
+  final List<String> songs;
+  final Map<String, String?> covers;
+  final Set<String> lrc;
+
+  const MusicPickerListing({
+    required this.readable,
+    required this.folders,
+    required this.songs,
+    required this.covers,
+    required this.lrc,
+  });
+}
+
+/// 3.1.24: canciones recursivas de una carpeta y de cada subcarpeta.
+class MusicPickerDeepScan {
+  final List<String> all;
+  final Map<String, List<String>> byFolder;
+  final Map<String, String?> covers;
+  final Set<String> lrc;
+
+  const MusicPickerDeepScan({
+    required this.all,
+    required this.byFolder,
+    required this.covers,
+    required this.lrc,
+  });
+}
+
+/// Portada y .lrc a partir del listado ya leido: 0 llamadas extra a disco.
+/// Windows y macOS no distinguen mayusculas, igual que el `existsSync` de
+/// antes.
+void _pickerSidecars(
+  List<FileSystemEntity> entities,
+  Map<String, String?> covers,
+  Set<String> lrc,
+) {
+  final bool fold = Platform.isWindows || Platform.isMacOS;
+  final Map<String, String> files = <String, String>{};
+  for (final FileSystemEntity entity in entities) {
+    if (entity is File) {
+      files[fold ? entity.path.toLowerCase() : entity.path] = entity.path;
+    }
+  }
+  String? find(String path) => files[fold ? path.toLowerCase() : path];
+  for (final FileSystemEntity entity in entities) {
+    if (entity is! File || !musicPickerShowsFile(entity.path)) continue;
+    final String stem = entity.path.replaceFirst(RegExp(r'\.[^.]+$'), '');
+    String? cover;
+    for (final String ext in <String>['.jpg', '.jpeg', '.png', '.webp']) {
+      cover = find('$stem$ext');
+      if (cover != null) break;
+    }
+    covers[entity.path] = cover;
+    if (find('$stem.lrc') != null) lrc.add(entity.path);
+  }
+}
+
+MusicPickerListing musicPickerReadFolder(String dirPath) {
+  final Directory dir = Directory(dirPath);
+  if (!dir.existsSync()) {
+    return const MusicPickerListing(
+      readable: false,
+      folders: <String>[],
+      songs: <String>[],
+      covers: <String, String?>{},
+      lrc: <String>{},
+    );
+  }
+  List<FileSystemEntity> entities;
+  try {
+    entities = dir.listSync(followLinks: false);
+  } catch (_) {
+    entities = <FileSystemEntity>[];
+  }
+  entities.sort(
+    (FileSystemEntity a, FileSystemEntity b) => _pickerCompare(a.path, b.path),
+  );
+  final List<String> folders = <String>[];
+  final List<String> songs = <String>[];
+  for (final FileSystemEntity entity in entities) {
+    if (_pickerHidden(entity.path)) continue;
+    if (entity is Directory) {
+      folders.add(entity.path);
+    } else if (entity is File && musicPickerShowsFile(entity.path)) {
+      songs.add(entity.path);
+    }
+  }
+  final Map<String, String?> covers = <String, String?>{};
+  final Set<String> lrc = <String>{};
+  _pickerSidecars(entities, covers, lrc);
+  return MusicPickerListing(
+    readable: true,
+    folders: folders,
+    songs: songs,
+    covers: covers,
+    lrc: lrc,
+  );
+}
+
+void _pickerWalk(
+  Directory dir,
+  int depth,
+  List<String> out,
+  Map<String, String?> covers,
+  Set<String> lrc,
+) {
+  if (depth > 8) return;
+  List<FileSystemEntity> entities;
+  try {
+    entities = dir.listSync(followLinks: false);
+  } catch (_) {
+    return;
+  }
+  _pickerSidecars(entities, covers, lrc);
+  for (final FileSystemEntity entity in entities) {
+    if (entity is Directory) {
+      if (_pickerHidden(entity.path)) continue;
+      _pickerWalk(entity, depth + 1, out, covers, lrc);
+    } else if (entity is File && musicPickerShowsFile(entity.path)) {
+      out.add(entity.path);
+    }
+  }
+}
+
+/// Mismo recorrido que [musicPickerSongsUnder] (8 niveles por subcarpeta).
+MusicPickerDeepScan musicPickerDeepScan(String dirPath) {
+  final Map<String, String?> covers = <String, String?>{};
+  final Set<String> lrc = <String>{};
+  final Map<String, List<String>> byFolder = <String, List<String>>{};
+  final List<String> all = <String>[];
+  List<FileSystemEntity> entities;
+  try {
+    entities = Directory(dirPath).listSync(followLinks: false);
+  } catch (_) {
+    entities = <FileSystemEntity>[];
+  }
+  _pickerSidecars(entities, covers, lrc);
+  for (final FileSystemEntity entity in entities) {
+    if (entity is Directory) {
+      if (_pickerHidden(entity.path)) continue;
+      final List<String> songs = <String>[];
+      _pickerWalk(entity, 0, songs, covers, lrc);
+      songs.sort(_pickerCompare);
+      byFolder[entity.path] = songs;
+      all.addAll(songs);
+    } else if (entity is File && musicPickerShowsFile(entity.path)) {
+      all.add(entity.path);
+    }
+  }
+  all.sort(_pickerCompare);
+  return MusicPickerDeepScan(
+    all: all,
+    byFolder: byFolder,
+    covers: covers,
+    lrc: lrc,
+  );
+}
+
+Future<MusicPickerListing> musicPickerReadFolderAsync(String dirPath) =>
+    Isolate.run(() => musicPickerReadFolder(dirPath));
+
+Future<MusicPickerDeepScan> musicPickerDeepScanAsync(String dirPath) =>
+    Isolate.run(() => musicPickerDeepScan(dirPath));
+
 File? musicPickerCover(File audio) {
   final String stem = audio.path.replaceFirst(RegExp(r'\.[^.]+$'), '');
   for (final String ext in <String>['.jpg', '.jpeg', '.png', '.webp']) {
@@ -172,36 +351,41 @@ class MusicPickerScreen extends StatefulWidget {
   State<MusicPickerScreen> createState() => _MusicPickerScreenState();
 }
 
+class _PickerFolder {
+  final bool readable;
+  final List<String> folders;
+  final List<File> songs;
+
+  const _PickerFolder(this.readable, this.folders, this.songs);
+}
+
 class _MusicPickerScreenState extends State<MusicPickerScreen> {
   late String _current;
   final TextEditingController _search = TextEditingController();
   int _tab = 0;
-  final Map<String, List<File>> _deep = <String, List<File>>{};
-  final Set<String> _deepLoading = <String>{};
 
-  List<File>? _deepSongs(String path) {
-    final List<File>? cached = _deep[path];
-    if (cached != null) return cached;
-    if (_deepLoading.add(path)) {
-      musicPickerSongsUnderAsync(path).then((List<File> list) {
-        if (!mounted) return;
-        setState(() {
-          _deep[path] = list;
-          _deepLoading.remove(path);
-        });
-      });
-    }
-    return null;
-  }
+  // 3.1.24: todo lo que lee disco corre en Isolate y build() solo lee estos
+  // mapas en memoria. _loadEpoch descarta respuestas de una carpeta que ya se
+  // dejo (o del widget cerrado).
+  int _loadEpoch = 0;
+  final Map<String, _PickerFolder> _folders = <String, _PickerFolder>{};
+  final Map<String, List<File>> _deep = <String, List<File>>{};
+  final Set<String> _scanned = <String>{};
+  final Map<String, int> _counts = <String, int>{};
+  final Map<String, File?> _covers = <String, File?>{};
+  final Set<String> _lrc = <String>{};
+  final Set<String> _mixing = <String>{};
 
   @override
   void initState() {
     super.initState();
     _current = widget.rootPath;
+    _load();
   }
 
   @override
   void dispose() {
+    _loadEpoch++;
     _search.dispose();
     super.dispose();
   }
@@ -209,6 +393,62 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
   bool get _atRoot {
     final String root = widget.rootPath;
     return _current == root || !_current.startsWith(root);
+  }
+
+  void _absorb(Map<String, String?> covers, Set<String> lrc) {
+    covers.forEach((String song, String? cover) {
+      _covers[song] = cover == null ? null : File(cover);
+    });
+    _lrc.addAll(lrc);
+  }
+
+  void _load() {
+    final int epoch = ++_loadEpoch;
+    final String path = _current;
+    if (!_folders.containsKey(path)) {
+      musicPickerReadFolderAsync(path).then(
+        (MusicPickerListing data) {
+          if (!mounted || epoch != _loadEpoch) return;
+          setState(() {
+            _folders[path] = _PickerFolder(data.readable, data.folders, <File>[
+              for (final String song in data.songs) File(song),
+            ]);
+            _absorb(data.covers, data.lrc);
+          });
+        },
+        onError: (Object _) {
+          if (!mounted || epoch != _loadEpoch) return;
+          setState(() {
+            _folders[path] = const _PickerFolder(false, <String>[], <File>[]);
+          });
+        },
+      );
+    }
+    if (!_scanned.contains(path)) {
+      musicPickerDeepScanAsync(path).then(
+        (MusicPickerDeepScan scan) {
+          if (!mounted || epoch != _loadEpoch) return;
+          setState(() {
+            _scanned.add(path);
+            _deep[path] = <File>[for (final String song in scan.all) File(song)];
+            scan.byFolder.forEach((String folder, List<String> songs) {
+              _deep[folder] = <File>[
+                for (final String song in songs) File(song),
+              ];
+              _counts[folder] = songs.length;
+            });
+            _absorb(scan.covers, scan.lrc);
+          });
+        },
+        onError: (Object _) {
+          if (!mounted || epoch != _loadEpoch) return;
+          setState(() {
+            _scanned.add(path);
+            _deep[path] = <File>[];
+          });
+        },
+      );
+    }
   }
 
   void _enqueue(File file) {
@@ -231,6 +471,21 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     );
   }
 
+  /// Usa la lista ya leida; si aun no llego, la lee en Isolate. Un segundo
+  /// toque mientras resuelve se ignora (sin doble toque).
+  Future<void> _mix(String path) async {
+    if (_mixing.contains(path)) return;
+    setState(() => _mixing.add(path));
+    try {
+      final List<File> files =
+          _deep[path] ?? await musicPickerSongsUnderAsync(path);
+      if (!mounted) return;
+      await widget.onMixFolder(List<File>.of(files));
+    } finally {
+      if (mounted) setState(() => _mixing.remove(path));
+    }
+  }
+
   void _up() {
     final String root = widget.rootPath;
     String parent = Directory(_current).parent.path;
@@ -239,61 +494,51 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
       _current = parent;
       _tab = 0;
     });
+    _load();
   }
 
-  void _openFolder(Directory folder) {
+  void _openFolder(String path) {
     setState(() {
-      _current = folder.path;
+      _current = path;
       _tab = 1;
       _search.clear();
     });
+    _load();
   }
 
   @override
   Widget build(BuildContext context) {
     final String query = _search.text.trim().toLowerCase();
-    final List<Directory> folders = <Directory>[];
+    final _PickerFolder? folder = _folders[_current];
+    final bool readable = folder?.readable ?? true;
+    final List<String> folders = <String>[];
     final List<File> songs = <File>[];
-    final Directory dir = Directory(_current);
-    final bool readable = dir.existsSync();
-    if (readable) {
-      try {
-        final List<FileSystemEntity> entities = dir.listSync(followLinks: false)
-          ..sort(
-            (FileSystemEntity a, FileSystemEntity b) =>
-                a.path.toLowerCase().compareTo(b.path.toLowerCase()),
-          );
-        for (final FileSystemEntity entity in entities) {
-          final String name = entity.path.split(Platform.pathSeparator).last;
-          if (name.startsWith('.') || name.startsWith(r'$')) continue;
-          if (query.isNotEmpty && !name.toLowerCase().contains(query)) {
-            continue;
-          }
-          if (entity is Directory) {
-            folders.add(entity);
-          } else if (entity is File && musicPickerShowsFile(entity.path)) {
-            songs.add(entity);
-          }
+    if (folder != null) {
+      for (final String path in folder.folders) {
+        if (query.isEmpty || _pickerName(path).toLowerCase().contains(query)) {
+          folders.add(path);
         }
-      } catch (_) {}
+      }
+      for (final File song in folder.songs) {
+        if (query.isEmpty ||
+            _pickerName(song.path).toLowerCase().contains(query)) {
+          songs.add(song);
+        }
+      }
     }
 
     final bool showFolders = _tab == 0 && query.isEmpty;
-    bool deepPending = false;
+    bool pending = folder == null;
     if (readable && (query.isNotEmpty || (_atRoot && _tab == 1))) {
-      final List<File>? deep = _deepSongs(_current);
+      final List<File>? deep = _deep[_current];
+      songs.clear();
       if (deep == null) {
-        deepPending = true;
-        songs.clear();
+        pending = true;
       } else {
-        songs
-          ..clear()
-          ..addAll(musicPickerFilterSongs(deep, _current, query));
+        songs.addAll(musicPickerFilterSongs(deep, _current, query));
       }
     }
-    final String here = _atRoot
-        ? 'Música'
-        : _current.split(Platform.pathSeparator).last;
+    final String here = _atRoot ? 'Música' : _pickerName(_current);
 
     return Scaffold(
       backgroundColor: _bg,
@@ -364,7 +609,7 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                 ),
               ),
             )
-          else if (deepPending)
+          else if (pending)
             const SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.all(24),
@@ -377,34 +622,33 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                 BuildContext context,
                 int index,
               ) {
-                final Directory folder = folders[index];
-                final int n = musicPickerSongsUnder(folder).length;
-                final String name = folder.path
-                    .split(Platform.pathSeparator)
-                    .last;
+                final String path = folders[index];
+                final int? n = _counts[path];
+                final bool mixing = _mixing.contains(path);
                 return ListTile(
                   leading: const Icon(Icons.folder, color: _text, size: 28),
                   title: Text(
-                    name,
+                    _pickerName(path),
                     style: _titleStyle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  subtitle: Text('$n canciones', style: _metaStyle),
+                  subtitle: Text(
+                    n == null ? '...' : '$n canciones',
+                    style: _metaStyle,
+                  ),
                   trailing: TextButton(
                     style: TextButton.styleFrom(
-                      foregroundColor: _text,
-                      visualDensity: VisualDensity.compact,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      // Gris mientras resuelve; el boton sigue tomando el
+                      // toque para que no abra la carpeta por debajo.
+                      foregroundColor: mixing ? _muted : _text,
                       padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(0, 32),
+                      minimumSize: const Size(48, 48),
                     ),
-                    onPressed: () {
-                      widget.onMixFolder(musicPickerSongsUnder(folder));
-                    },
+                    onPressed: () => _mix(path),
                     child: const Text('Mezclar todo', maxLines: 1),
                   ),
-                  onTap: () => _openFolder(folder),
+                  onTap: () => _openFolder(path),
                 );
               }, childCount: folders.length),
             )
@@ -417,6 +661,8 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                 final File song = songs[index];
                 return _SongRow(
                   file: song,
+                  cover: _covers[song.path],
+                  lrc: _lrc.contains(song.path),
                   onTap: () => _enqueue(song),
                   onPlayNext: () => widget.onPlayNext(song),
                 );
@@ -435,7 +681,7 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     return TextButton(
       style: TextButton.styleFrom(
         foregroundColor: selected ? _text : _muted,
-        minimumSize: const Size(48, 44),
+        minimumSize: const Size(48, 48),
         textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
       ),
       onPressed: () => setState(() => _tab = index),
@@ -444,13 +690,18 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
   }
 }
 
+/// 3.1.24: portada y .lrc llegan ya resueltos (sin disco en build).
 class _SongRow extends StatelessWidget {
   final File file;
+  final File? cover;
+  final bool lrc;
   final VoidCallback onTap;
   final VoidCallback onPlayNext;
 
   const _SongRow({
     required this.file,
+    required this.cover,
+    required this.lrc,
     required this.onTap,
     required this.onPlayNext,
   });
@@ -470,8 +721,7 @@ class _SongRow extends StatelessWidget {
       if (bpmText.isNotEmpty) bpmText,
       if (key.isNotEmpty) key,
     ].join('  ·  ');
-    final File? cover = musicPickerCover(file);
-    final bool lrc = musicPickerHasLrc(file.path);
+    final File? image = cover;
 
     return Material(
       color: _bg,
@@ -488,7 +738,7 @@ class _SongRow extends StatelessWidget {
                 child: SizedBox(
                   width: 40,
                   height: 40,
-                  child: cover == null
+                  child: image == null
                       ? const ColoredBox(
                           color: _card,
                           child: Icon(
@@ -497,7 +747,7 @@ class _SongRow extends StatelessWidget {
                             size: 22,
                           ),
                         )
-                      : Image.file(cover, fit: BoxFit.cover),
+                      : Image.file(image, fit: BoxFit.cover),
                 ),
               ),
               const SizedBox(width: 12),

@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gatomix/ui/mobile/music_picker_screen.dart';
 
+// 3.1.24: la carpeta se lee en Isolate; espera a que no quede nada cargando.
+Future<void> _settle(WidgetTester tester) async {
+  for (int i = 0; i < 60; i++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    if (find.byType(CircularProgressIndicator).evaluate().isEmpty &&
+        find.text('...').evaluate().isEmpty) {
+      return;
+    }
+  }
+}
+
 void main() {
   final List<Size> sizes = <Size>[const Size(360, 800), const Size(800, 400)];
 
@@ -48,7 +62,7 @@ void main() {
             ),
           ),
         );
-        await tester.pump();
+        await _settle(tester);
         expect(tester.takeException(), isNull);
         expect(find.text('Buscar'), findsOneWidget);
         expect(find.text('Carpetas'), findsOneWidget);
@@ -66,13 +80,13 @@ void main() {
         expect(tester.takeException(), isNull);
 
         await tester.tap(find.text(folderName));
-        await tester.pump();
+        await _settle(tester);
         expect(find.byIcon(Icons.arrow_back), findsOneWidget);
         expect(find.text('Interna'), findsOneWidget);
         expect(tester.takeException(), isNull);
 
         await tester.tap(find.byIcon(Icons.arrow_back));
-        await tester.pump();
+        await _settle(tester);
         expect(find.text('Carpetas'), findsOneWidget);
 
         await tester.tap(find.text('Canciones'));
