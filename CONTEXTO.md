@@ -102,6 +102,7 @@ Se conserva: lista literal
 Se mueve/compacta: …
 Se elimina: NADA | lo que Gabriel nombró
 Riesgo: 1920px / Mac 13" / móvil / audible
+Plataformas (Win | Mac | Android | iPhone): .
 ```
 - 3.0.30+49 (`003aafb`): phase lock ≤1 %/<5 ms; pausa congela ambos decks y fade.
 - 3.0.31+50 (`c46705b`): BPM por recta + GMX_GRID/GMX_ANALYSIS=3031; DNA 60–80 % con fade dentro de la canción.
@@ -151,5 +152,5 @@ Riesgo: 1920px / Mac 13" / móvil / audible
   Se conserva: firma de `format()`, estilo 11 px white38, entradas 3.0.xx+N. Se elimina: NADA (solo el texto "build N" visible)
 - 3.1.02 (pubspec `3.1.2+30102`, `85ab67e`): cues automáticos de la letra con la duración exacta en ms (sin redondeo a segundos); reglas en `lib/core/vocal_bounds.dart` (+ test con datos reales). Letra con última línea >= duración real (otra versión) no escribe cues en Isar. Rama <3 s: `exactMs - 4000` (antes `totalRound - 4000`).
   Se conserva: ramas >15 s y normal, salida con cues manuales, `isManualCue: false`, `_getLocalDurationSec` para matching de letra, exact_mix/Automix/Live DJ. Se elimina: NADA
-- 3.1.03 (pubspec `3.1.3+30103`): Automix ignora la última línea de la letra si llega o pasa la duración exacta (`lyricPastAudio` en `vocal_bounds.dart`) y decide el ADN; antes el mixOut quedaba tras el final (Bacilos 286880 vs 254783) y sin plan no había crossfade.
+- 3.1.03 (pubspec `3.1.3+30103`, `520a512`): Automix ignora la última línea de la letra si llega o pasa la duración exacta (`lyricPastAudio` en `vocal_bounds.dart`) y decide el ADN; antes el mixOut quedaba tras el final (Bacilos 286880 vs 254783) y sin plan no había crossfade.
   Se conserva: `lastLyricMs + 1500` en letras sanas, rama ADN, SET IN/OUT, plan del outro (clamp 1040), disparos 1790/1852. Se elimina: NADA

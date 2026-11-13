@@ -30,3 +30,7 @@ Si el gesto no está claro: PARA y pregunta. Prohibido inventar un flujo "mejor"
 - Entrega: 1 diff por turno, solo tras OK del LOG CAMBIO; función completa, sin "// ... resto", sin renombrar, Se elimina: NADA. Auditar estado, timers de mix_pause.dart y listeners.
 - UI: estética Traktor/Pioneer, GatoMixTheme, alta densidad, cero overflow (1920px / Mac 13" / móvil), RepaintBoundary en progreso, ondas y rueda LRC.
 - Agentes: Grok 4.7 Medium (256K, Fast off), 1 agente por cambio, máx. 5 iteraciones por chat.
+- Rol 1 (UI/QA) y Rol 3 (Flutter/Riverpod): auditar siempre ambos árboles, `lib/main.dart` (escritorio) y `lib/djiphone/` (móvil), con Grep de providers compartidos; ningún cambio queda huérfano en uno de los dos.
+- Ley 6 de Gobernanza (Independencia Multiplataforma, amplía la Ley 9 de CONTEXTO.md): si el cambio toca rutas, permisos, descargas (yt-dlp vs NewPipe), audio/FFI o UI, aislar lo propio de Windows, macOS, Android e iPhone con adaptadores o guardias por plataforma (`Platform.isX` / `core/hal/`); el código de un SO nunca rompe la compilación ni el comportamiento de los otros 3.
+- SKILL 2: el Grep de callers incluye `lib/djiphone/`.
+- LOG CAMBIO: fila obligatoria `Plataformas (Win | Mac | Android | iPhone):` con el impacto o la adaptación en cada una.
