@@ -529,7 +529,12 @@ typedef TrackMusic = ({String path, double bpm, String? camelot});
 
 /// Igual que [saveTrackMusic] para muchas pistas: por carpeta, una lectura y
 /// una escritura atómica asíncrona. No bloquea el hilo de la interfaz.
-Future<void> saveTrackMusicBatch(Iterable<TrackMusic> items) async {
+/// 3.1.17: con [stampMtime] (LAN Sync) guarda tambien en `djTimestamps` el
+/// mtime actual de cada pista en la misma escritura, para no reescanearla.
+Future<void> saveTrackMusicBatch(
+  Iterable<TrackMusic> items, {
+  bool stampMtime = false,
+}) async {
   final Map<String, List<TrackMusic>> byDir = <String, List<TrackMusic>>{};
   for (final TrackMusic t in items) {
     if (t.path.isEmpty) continue;
@@ -545,12 +550,29 @@ Future<void> saveTrackMusicBatch(Iterable<TrackMusic> items) async {
         for (final String k in map.keys) audioPathKey(k): k,
       };
       var changed = false;
+      Map<String, dynamic>? stamps;
       for (final TrackMusic t in e.value) {
         if (_mergeTrackMusic(map, slots, t.path, t.bpm, t.camelot)) {
           changed = true;
         }
+        if (!stampMtime) continue;
+        final int mtime;
+        try {
+          mtime = File(t.path).lastModifiedSync().millisecondsSinceEpoch;
+        } catch (_) {
+          continue;
+        }
+        final dynamic rawStamps = doc['djTimestamps'];
+        stamps ??= rawStamps is Map
+            ? Map<String, dynamic>.from(rawStamps)
+            : <String, dynamic>{};
+        stamps[t.path] = mtime;
       }
       if (changed) doc['djMetadata'] = map;
+      if (stamps != null) {
+        doc['djTimestamps'] = stamps;
+        changed = true;
+      }
       return changed;
     });
   }

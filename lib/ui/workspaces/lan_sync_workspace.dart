@@ -11,6 +11,8 @@ import 'package:mime/mime.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import '../../core/lan_sync_plan.dart';
+import '../../core/gatomix_store.dart' show TrackMusic, saveTrackMusicBatch;
+import '../../core/queue_bpm.dart' show knownBpm;
 
 /// Destino remoto de la raíz Música. El servidor ya resuelve `ROOT`.
 const String lanMusicRootToken = 'ROOT';
@@ -205,6 +207,24 @@ Future<int> lanUploadOnce(http.Client client, Uri uri, String path) async {
   final int status = response.statusCode;
   await response.stream.drain<void>();
   return status;
+}
+
+/// 3.1.17: guarda en el `.gatomix.json` del receptor el BPM que llego por
+/// LAN Sync, con la ruta local y el mtime del archivo ya escrito. Gana el
+/// destino ([lanBpmToSave]); solo `.mp3`. Un fallo no corta la transferencia.
+Future<void> lanSaveIncomingBpm(Map<String, Object?> incoming) async {
+  final List<TrackMusic> items = <TrackMusic>[];
+  incoming.forEach((String path, Object? raw) {
+    if (!path.toLowerCase().endsWith('.mp3')) return;
+    final double bpm = lanBpmToSave(localBpm: knownBpm(path), incoming: raw);
+    if (bpm > 0) items.add((path: path, bpm: bpm, camelot: null));
+  });
+  if (items.isEmpty) return;
+  try {
+    await saveTrackMusicBatch(items, stampMtime: true);
+  } catch (e) {
+    debugPrint('[LAN] BPM no guardado: $e');
+  }
 }
 
 class LanSyncWorkspace extends ConsumerStatefulWidget {
@@ -601,10 +621,15 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         if (dir.existsSync()) {
           for (var f in dir.listSync(recursive: false).whereType<File>()) {
             if (lanSyncable(f.path)) {
+              // 3.1.17: BPM ya resuelto (sin decodificar), nunca la ruta.
+              final double bpm = f.path.toLowerCase().endsWith('.mp3')
+                  ? lanBpm(knownBpm(f.path))
+                  : 0;
               filesMetadata.add({
                 "name": f.uri.pathSegments.last,
                 "size_bytes": f.lengthSync(),
                 "modified_ms": f.lastModifiedSync().millisecondsSinceEpoch,
+                if (bpm > 0) "bpm": bpm,
               });
             }
           }
@@ -709,6 +734,8 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         }
 
         final boundary = request.headers.contentType?.parameters['boundary'];
+        // 3.1.17: mp3 recibidos; su BPM llega en `?bpm=` de la URL.
+        final List<String> receivedMp3 = <String>[];
         if (boundary != null) {
           final transformer = MimeMultipartTransformer(boundary);
           final bodyStream = request.cast<List<int>>().transform(transformer);
@@ -757,6 +784,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                   await part.pipe(sink);
                   await sink.close();
                   await tmp.rename(savePath);
+                  if (savePath.toLowerCase().endsWith('.mp3')) {
+                    receivedMp3.add(savePath);
+                  }
                 } catch (e) {
                   if (lanMobile) {
                     writeFailed = true;
@@ -783,6 +813,11 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             ..statusCode = 200
             ..write("OK")
             ..close();
+          if (receivedMp3.isNotEmpty && query['bpm'] != null) {
+            await lanSaveIncomingBpm(<String, Object?>{
+              for (final String p in receivedMp3) p: query['bpm'],
+            });
+          }
           _scanLocalMusicFolders();
           if (_selectedLocalPath != null) {
             _loadFilesInFolder(_selectedLocalPath!);
@@ -1580,13 +1615,17 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           setState(() => _currentLog = "⬆️ ENVIANDO: $fileName");
         }
 
+        // 3.1.17: BPM resuelto en la URL (no en el multipart).
+        final String bpmQuery = file.path.toLowerCase().endsWith('.mp3')
+            ? lanBpmQuery(knownBpm(file.path))
+            : '';
         if (_lanMobile) {
           try {
             final int code = await lanSendWithRetry(() async {
               final request = http.MultipartRequest(
                 'POST',
                 Uri.parse(
-                  'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
+                  'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}$bpmQuery',
                 ),
               );
               request.files.add(
@@ -1636,7 +1675,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           // mismo cliente; solo cuenta en Saltados/Fallos si fallan todos.
           try {
             final Uri uploadUri = Uri.parse(
-              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
+              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}$bpmQuery',
             );
             final int code = await lanSendWithRetry(
               () => lanUploadOnce(lanClient, uploadUri, file.path),
@@ -1686,6 +1725,8 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
       final localDir = Directory(_selectedLocalPath!);
       final HttpClient client = HttpClient(); // 3.1.05: Keep-Alive
+      // 3.1.17: BPM de `/api/files` por pista recibida (ruta local).
+      final Map<String, Object?> pulledBpm = <String, Object?>{};
       List<String> localNames = <String>[];
       try {
         localNames = await localDir
@@ -1772,6 +1813,8 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             await response.pipe(tmp.openWrite());
             await tmp.rename(saveFile.path);
             _successfulTransfers++;
+            final Object? remoteBpm = (files[i] as Map)['bpm'];
+            if (remoteBpm != null) pulledBpm[saveFile.path] = remoteBpm;
           } else if (_lanMobile) {
             _failedTransfers++;
             _retryPull.add('$fileName');
@@ -1816,6 +1859,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         await Future.delayed(const Duration(milliseconds: 15));
       }
       client.close();
+      if (pulledBpm.isNotEmpty) await lanSaveIncomingBpm(pulledBpm);
       _scanLocalMusicFolders();
       _loadFilesInFolder(_selectedLocalPath!);
     }

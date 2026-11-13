@@ -95,3 +95,27 @@ bool lanAlreadyThere(Iterable<dynamic> remote, String name, int sizeBytes) {
   if (size is! int) return true;
   return size == sizeBytes;
 }
+
+/// 3.1.17: BPM que viaja por LAN Sync (numero o texto), en rango musical
+/// 40-250; fuera de rango, NaN o vacio da 0.
+double lanBpm(Object? value) {
+  final double bpm = value is num
+      ? value.toDouble()
+      : double.tryParse('${value ?? ''}'.trim()) ?? 0;
+  return (bpm >= 40 && bpm <= 250) ? bpm : 0;
+}
+
+/// 3.1.17: BPM recibido que el receptor guarda; 0 si no se guarda. Gana el
+/// destino: si ya conoce un BPM ([localBpm], de nombre, etiquetas o su
+/// `.gatomix.json`) no se pisa. Nunca viaja una ruta, solo el numero.
+double lanBpmToSave({required double localBpm, required Object? incoming}) {
+  if (lanBpm(localBpm) > 0) return 0;
+  return lanBpm(incoming);
+}
+
+/// 3.1.17: parametro `&bpm=` para la URL de `/api/upload` ('' sin BPM
+/// valido). Un receptor viejo ignora el parametro.
+String lanBpmQuery(double bpm) {
+  final double v = lanBpm(bpm);
+  return v > 0 ? '&bpm=${v.toStringAsFixed(2)}' : '';
+}
