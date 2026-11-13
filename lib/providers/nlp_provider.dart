@@ -15,6 +15,7 @@ import '../core/lrc_timeline.dart';
 import '../core/lyric_files.dart';
 import '../core/lyric_match.dart';
 import '../core/lyric_approx.dart';
+import '../core/vocal_bounds.dart';
 import '../services/id3_title_artist.dart';
 import 'db_provider.dart'; // 🛠️ Requerido para inyectar Cues a la BD
 
@@ -86,7 +87,7 @@ class NlpWorker {
   Future<void> _processVocalBoundingBox(
     String audioPath,
     String syncedLyrics,
-    int durationSec,
+    int durationMs,
   ) async {
     try {
       final db = ref.read(dbServiceProvider);
@@ -134,25 +135,20 @@ class NlpWorker {
       }
 
       if (firstMs != null && lastMs != null) {
-        int cueIn = firstMs - 5000;
-        if (cueIn < 0) cueIn = 0;
-
-        // 🛠️ FIX: Dinámica de Coda para Outpoints.
-        // En lugar de recortar a 6s estáticos, medimos si la canción tiene "Outro" instrumental.
-        int mixOut = lastMs + 1000; // Solo damos 1s de respiro post-letra
-        int totalMs = durationSec * 1000;
-
-        if (totalMs > 0) {
-          final timeRemaining = totalMs - mixOut;
-          // Si el instrumental de salida es larguísimo (> 15s), anclamos el mixOut más atrás para no aburrir
-          if (timeRemaining > 15000) {
-            mixOut = lastMs + 4000;
-          } else if (timeRemaining < 3000) {
-            // Si la letra llega hasta el mismísimo final, el mixOut debe retroceder para dar espacio al crossfade de la sig canción
-            mixOut = totalMs - 4000;
-          }
+        // 3.1.02: reglas en core/vocal_bounds.dart, contra la duración exacta en ms.
+        final VocalBounds? bounds = vocalBounds(
+          firstMs: firstMs,
+          lastMs: lastMs,
+          exactMs: durationMs,
+        );
+        if (bounds == null) {
+          debugPrint(
+            "[AUTO-MASTER] Letra desfasada (last=${lastMs}ms >= audio=${durationMs}ms): no se escriben cues -> $audioPath",
+          );
+          return;
         }
-        if (mixOut < 0) mixOut = 0;
+        final int cueIn = bounds.cueInMs;
+        final int mixOut = bounds.mixOutMs;
 
         try {
           await db.saveTrackMetadata(
@@ -220,8 +216,8 @@ class NlpWorker {
               .read(dbServiceProvider)
               .getTrackMetadata(file.path);
           if (meta == null || (!meta.isManualCue && meta.cueInMs == 0)) {
-            final localSec = await _getLocalDurationSec(file.path);
-            await _processVocalBoundingBox(file.path, content, localSec);
+            final localMs = await _getLocalDurationMs(file.path);
+            await _processVocalBoundingBox(file.path, content, localMs);
           }
           continue;
         }
@@ -241,6 +237,14 @@ class NlpWorker {
     try {
       final ms = await rust_dsp.exactDurationMs(inputPath: filePath);
       return (ms.toInt() / 1000).round();
+    } catch (_) {}
+    return 0;
+  }
+
+  // 3.1.02: duración exacta en ms, sin redondear, para los cues automáticos.
+  Future<int> _getLocalDurationMs(String filePath) async {
+    try {
+      return (await rust_dsp.exactDurationMs(inputPath: filePath)).toInt();
     } catch (_) {}
     return 0;
   }
@@ -334,8 +338,8 @@ class NlpWorker {
     await _unmarkAuto(lrcPath); // letra fijada a mano: ya no es automática
 
     // Inyectar el Bounding Box al forzar letra manual
-    final localSec = await _getLocalDurationSec(audioPath);
-    await _processVocalBoundingBox(audioPath, syncedLyrics, localSec);
+    final localMs = await _getLocalDurationMs(audioPath);
+    await _processVocalBoundingBox(audioPath, syncedLyrics, localMs);
 
     debugPrint(
       "🟢 [NLP Tracker] LRC manual sobreescrito con éxito y Cues calculados.",
@@ -704,8 +708,8 @@ class NlpWorker {
       if (choice.kind == LyricKind.synced) {
         await File(lrcPath).writeAsString(choice.fileText);
         await _markAuto(lrcPath);
-        final int localSec = await _getLocalDurationSec(audioPath);
-        await _processVocalBoundingBox(audioPath, choice.body, localSec);
+        final int localMs = await _getLocalDurationMs(audioPath);
+        await _processVocalBoundingBox(audioPath, choice.body, localMs);
         lastDetail = '';
         debugPrint("🟢 [NLP Tracker] Letra segura: $audioPath");
         return LyricStatus.ok;
@@ -945,7 +949,7 @@ class NlpWorker {
         await writeLrcKeepingBak(lrcPath, choice.fileText);
         await _markAuto(lrcPath);
         if (choice.kind == LyricKind.synced) {
-          await _processVocalBoundingBox(audioPath, choice.body, localSec);
+          await _processVocalBoundingBox(audioPath, choice.body, await _getLocalDurationMs(audioPath));
           lastDetail = '';
           return LyricStatus.ok;
         }

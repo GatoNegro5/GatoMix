@@ -10,7 +10,7 @@ Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo compro
 | Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
 | Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
 | Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
-| Local laptop (sin push) | **3.1.01** (pubspec `3.1.1+30101`) · rama `v3029` sobre `3df1aec` · sin commit ni tag |
+| Local laptop (sin push) | **3.1.02** (pubspec `3.1.2+30102`) · HEAD de `v3029` · sin push ni tag |
 | Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
 | main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
 | Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
@@ -88,7 +88,7 @@ Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart
 5. Fusionar la rama a `qa/v20`/`main` y limpiar las 7 ramas viejas (decide Gabriel).
 6. Bajón de volumen en la primera mezcla de Live DJ (no verificable). ¿MP3 320 kbps en móvil? (no verificable).
 7. Re-auditar BPM de 80s Inglés tras 3.0.31 (meta ±0,05); umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min.
-8. `lib/providers/nlp_provider.dart:152` `mixOut = totalMs - 4000`. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
+8. `automix_provider.dart:884`: validar que `lastMs + 1500` no supere `exactDurationMs` cuando un `.lrc` viene desfasado (caso Bacilos). Probar en celular: LAME Android, EQ adaptativa, duración exacta.
 9. Lote de karaoke `_K` en la laptop: estado desconocido.
 
 ## Notas de entorno (box)
@@ -147,5 +147,7 @@ Riesgo: 1920px / Mac 13" / móvil / audible
 - Infra (sin cambio de versión, local, sin push ni tag): CI `release.yml` con job `test` (`flutter test` + `cargo test` en rust/) que bloquea build y release si falla. `integration_test/simple_test.dart` (plantilla) → `smoke_app_test.dart` (arranca motores reales, Automix, "+ Agregar canciones", Live DJ "MODO RADIO"). `GATOMIX_EMU=1` agrega x86_64 (app y Cargokit) solo para el emulador `gm34`; el release sigue arm64. Estado al commit: `flutter test` 401 OK / **2 fallan preexistentes** (`mobile_explorer_3048_test`: "hoja 360x800 / 800x400: tocar canción la encola", no encuentra "Cancion") → **CI quedará en rojo hasta arreglarlos**; `cargo test` 42 OK, 6 ignorados. Humo en gm34 **FALLA por 2 bugs reales de la app**: (1) `LiveDjNotifier._initPersistence` sin sesión guardada (instalación nueva) llama `_schedulePhraseNeighbors` dentro de `build` → "uninitialized provider" (`livedj_provider.dart` ≈1103/312); (2) sin permiso de almacenamiento, `LabWorkspace._loadRegistry` (`lab_workspace.dart:140`) hace `writeAsStringSync` sin try en `initState` → PathAccessException. Correr: `GATOMIX_EMU=1 flutter test integration_test -d emulator-5554` (antes: `adb shell appops set com.gatonegro5.gatomix MANAGE_EXTERNAL_STORAGE allow` con la app instalada).
 - 3.0.48 fixes (`73a4ca3`, `87080f4`, `3df1aec`, sin tag): la prueba 3048 espera la búsqueda async; Live DJ difiere `_schedulePhraseNeighbors` hasta después de `build()`; Lab no tumba la app sin permiso de almacenamiento. No verificado en celular.
   Se elimina: NADA
-- 3.1.01 (pubspec `3.1.1+30101`, commit pendiente): nuevo versionado 3.X.YY sin +N (Ley 5); `AppVersionLabel.format()` muestra `3.1.01 (sha)`.
+- 3.1.01 (pubspec `3.1.1+30101`, `7c0e261`): nuevo versionado 3.X.YY sin +N (Ley 5); `AppVersionLabel.format()` muestra `3.1.01 (sha)`.
   Se conserva: firma de `format()`, estilo 11 px white38, entradas 3.0.xx+N. Se elimina: NADA (solo el texto "build N" visible)
+- 3.1.02 (pubspec `3.1.2+30102`): cues automáticos de la letra con la duración exacta en ms (sin redondeo a segundos); reglas en `lib/core/vocal_bounds.dart` (+ test con datos reales). Letra con última línea >= duración real (otra versión) no escribe cues en Isar. Rama <3 s: `exactMs - 4000` (antes `totalRound - 4000`).
+  Se conserva: ramas >15 s y normal, salida con cues manuales, `isManualCue: false`, `_getLocalDurationSec` para matching de letra, exact_mix/Automix/Live DJ. Se elimina: NADA
