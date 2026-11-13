@@ -1870,10 +1870,11 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
     set_ext(&mut tag, KEY_LEAD, a.lead_ms.to_string());
     set_ext(&mut tag, KEY_TAIL, a.tail_ms.to_string());
     let audio = decoded_duration_ms(input_path).ok();
-    if let Some(grid) = &a.grid {
+    if let Some(measured) = &a.grid {
         let old = stored_bpm(input_path, &tag).map(|s| s.value).unwrap_or(0.0);
-        stamp_grid(&mut tag, grid, a.grid_scope);
-        let bpm = entry_tbpm(grid, audio.unwrap_or(0));
+        let mut grid = measured.clone();
+        let bpm = reconcile_tbpm(old, &mut grid, audio.unwrap_or(0));
+        stamp_grid(&mut tag, &grid, a.grid_scope);
         tag.set_text("TBPM", format_tbpm(bpm));
         let name = Path::new(input_path)
             .file_name()
@@ -3002,6 +3003,33 @@ fn entry_tbpm(grid: &crate::bpm_exact::TempoGrid, audio_ms: u64) -> f64 {
     }
 }
 
+/// 3.1.10 (Gabriel): un TBPM valido ya escrito manda sobre una medicion libre.
+/// A +-2 BPM se refinan los decimales con lo medido. En relacion armonica exacta
+/// (2, 1/2, 3/2, 2/3, 4/3, 3/4; tolerancia 3 %) el TBPM es medido / R y los
+/// periodos de la rejilla se escalan por R con el mismo ancla. Sin relacion
+/// queda el TBPM del archivo y GMX_GRID con los golpes reales (veto tecnico:
+/// una rejilla forzada desfasaria el phase lock).
+fn reconcile_tbpm(old: f64, grid: &mut crate::bpm_exact::TempoGrid, audio_ms: u64) -> f64 {
+    let measured = entry_tbpm(grid, audio_ms);
+    if !(old.is_finite() && old > 0.0) || !(measured.is_finite() && measured > 0.0) {
+        return measured;
+    }
+    if (measured - old).abs() <= 2.0 {
+        return measured;
+    }
+    const RATIOS: [f64; 6] = [2.0, 0.5, 1.5, 2.0 / 3.0, 4.0 / 3.0, 0.75];
+    let q = measured / old;
+    if let Some(&r) = RATIOS.iter().find(|&&r| ((q - r) / r).abs() <= 0.03) {
+        grid.bpm = (grid.bpm / r * 100.0).round() / 100.0;
+        grid.period_ms *= r;
+        for seg in grid.segments.iter_mut() {
+            seg.period_ms *= r;
+        }
+        return (measured / r * 100.0).round() / 100.0;
+    }
+    old
+}
+
 fn stamp_grid(tag: &mut Tag, grid: &crate::bpm_exact::TempoGrid, scope: &str) {
     tag.set_text("TBPM", format_tbpm(grid.bpm));
     set_ext(tag, KEY_GRID, crate::bpm_exact::encode_grid(grid));
@@ -3044,9 +3072,9 @@ fn refresh_analysis_tags(path: &str) -> Result<f64, String> {
         return Ok(old);
     }
     let audio = decoded_duration_ms(path)?;
-    let (grid, scope) = measure_path_grid_scoped(path).ok_or("Sin periodicidad".to_string())?;
+    let (mut grid, scope) = measure_path_grid_scoped(path).ok_or("Sin periodicidad".to_string())?;
+    let bpm = reconcile_tbpm(old, &mut grid, audio);
     stamp_grid(&mut tag, &grid, scope);
-    let bpm = entry_tbpm(&grid, audio);
     tag.set_text("TBPM", format_tbpm(bpm));
     write_measured_duration(&mut tag, audio);
     tag.write_to_path(path, Version::Id3v24)
@@ -4911,7 +4939,12 @@ pub fn master_rewrite(
         }
         return Err(e);
     }
-    let bpm = grid.as_ref().map(|g| g.bpm).unwrap_or(0.0);
+    // 3.1.10: el TBPM ya escrito manda; la rejilla solo se escala en relacion armonica.
+    let mut grid = grid;
+    let bpm = grid
+        .as_mut()
+        .map(|g| reconcile_tbpm(old_bpm, g, 0))
+        .unwrap_or(0.0);
 
     if do_trim && !blocked {
         set_ext(&mut tag, KEY_TRIM, cut_head_ms.to_string());
@@ -4935,6 +4968,7 @@ pub fn master_rewrite(
     }
     if let Some(g) = &grid {
         stamp_grid(&mut tag, g, grid_scope);
+        tag.set_text("TBPM", format_tbpm(bpm));
         let dur_path = if rewritten {
             bpm_path.as_str()
         } else {
@@ -4947,7 +4981,7 @@ pub fn master_rewrite(
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(input_path.as_str());
-        eprintln!("BPM_FIX {name} {old_bpm:.2}->{:.2}", g.bpm);
+        eprintln!("BPM_FIX {name} {old_bpm:.2}->{bpm:.2}");
     }
     if blocked {
         set_ext(
@@ -6788,6 +6822,42 @@ mod master_guard_tests {
             (kept - 100.0).abs() < 0.02,
             "con BPM > 0 no debía re-medir: {kept}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 3.1.10: pulsos a 120 en %TEMP% (nunca ReGenial). TBPM 60 (x2) queda en
+    /// 60 con la rejilla escalada a 1000 ms; 119 se refina a 120; 96 (sin
+    /// relacion) se respeta y GMX_GRID sigue en los 500 ms reales.
+    #[test]
+    fn tbpm_3110_el_del_archivo_manda_y_la_rejilla_sigue_el_audio() {
+        let _g = guard_master();
+        let dir = std::env::temp_dir().join(format!("gmx_tbpm3110_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pcm = clicks(120.0, 20.0);
+        for (prior, want, want_period) in [("60", 60.0, 1000.0), ("119", 120.0, 500.0), ("96", 96.0, 500.0)] {
+            let path = dir.join(format!("clic_{prior}.mp3"));
+            let path_s = path.to_string_lossy().to_string();
+            let mut sink = Mp3Sink::new(&path_s, 44100, false, 160).unwrap();
+            sink.push(&pcm, 1).unwrap();
+            sink.finish().unwrap();
+            let mut tag = Tag::new();
+            tag.set_text("TBPM", prior);
+            tag.write_to_path(&path_s, Version::Id3v24).unwrap();
+            let got = refresh_analysis_tags(&path_s).unwrap();
+            assert!((got - want).abs() < 1.0, "TBPM {prior} paso a {got}");
+            let tag = Tag::read_from_path(&path_s).unwrap();
+            let grid = ext_text(&tag, KEY_GRID).unwrap();
+            let period: f64 = grid
+                .split('|')
+                .next()
+                .and_then(|head| head.split(';').nth(1))
+                .and_then(|v| v.parse().ok())
+                .unwrap();
+            assert!(
+                (period - want_period).abs() / want_period < 0.02,
+                "TBPM {prior}: periodo {period} ms en {grid}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
