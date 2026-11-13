@@ -196,6 +196,17 @@ Future<int> lanSendWithRetry(
   throw lastError ?? StateError('lan send');
 }
 
+/// 3.1.07: un intento de subida (escritorio). Arma el multipart en cada
+/// intento y vacia la respuesta para que el socket vuelva al pool (Keep-Alive).
+Future<int> lanUploadOnce(http.Client client, Uri uri, String path) async {
+  final http.MultipartRequest request = http.MultipartRequest('POST', uri);
+  request.files.add(await http.MultipartFile.fromPath('file', path));
+  final http.StreamedResponse response = await client.send(request);
+  final int status = response.statusCode;
+  await response.stream.drain<void>();
+  return status;
+}
+
 class LanSyncWorkspace extends ConsumerStatefulWidget {
   const LanSyncWorkspace({super.key});
 
@@ -1619,18 +1630,16 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             });
           }
         } else {
+          // 3.1.07: reintento transparente (1 + 3, esperas 1/2/4 s) sobre el
+          // mismo cliente; solo cuenta en Saltados/Fallos si fallan todos.
           try {
-            final request = http.MultipartRequest(
-              'POST',
-              Uri.parse(
-                'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
-              ),
+            final Uri uploadUri = Uri.parse(
+              'http://$_selectedDeviceIp:$_restPort/api/upload?dir=${Uri.encodeComponent(_selectedRemotePath ?? "ROOT")}&rel=${Uri.encodeComponent(relativeFolder)}&ow=${_overwriteExisting ? 1 : 0}',
             );
-            request.files.add(
-              await http.MultipartFile.fromPath('file', file.path),
+            final int code = await lanSendWithRetry(
+              () => lanUploadOnce(lanClient, uploadUri, file.path),
             );
-            final response = await lanClient.send(request);
-            if (response.statusCode == 200) {
+            if (code == 200) {
               _successfulTransfers++;
               sentBytes += file.lengthSync();
             } else {
