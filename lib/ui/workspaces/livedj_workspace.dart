@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import '../widgets/approx_lyric_icon.dart';
 import 'package:flutter/material.dart';
@@ -1223,7 +1224,7 @@ class _NextTrackStrip extends StatelessWidget {
               horizontal: compact ? 10 : 14,
               vertical: compact ? 6 : 7,
             ),
-            child: _NextTrackLine(label: label, style: style),
+            child: NextTrackLine(label: label, style: style),
           ),
         ),
       ),
@@ -1231,32 +1232,121 @@ class _NextTrackStrip extends StatelessWidget {
   }
 }
 
-/// Una línea. Si el nombre cabe, se queda (con puntos suspensivos de
+/// Una linea. Si el nombre cabe, se queda (con puntos suspensivos de
 /// respaldo). Si no cabe, se desplaza dentro del recorte.
-class _NextTrackLine extends StatefulWidget {
+/// 3.1.22 (Pendiente 22e): ida, pausa 2,5 s, vuelta, pausa 2,5 s; tope de 3
+/// ciclos y queda quieto al inicio. Las pausas son Timer (0 cuadros).
+class NextTrackLine extends StatefulWidget {
   final String label;
   final TextStyle style;
 
-  const _NextTrackLine({required this.label, required this.style});
+  const NextTrackLine({super.key, required this.label, required this.style});
+
+  static const Duration endPause = Duration(milliseconds: 2500);
+  static const int maxCycles = 3;
+
+  /// Duracion de una pasada segun el exceso de ancho.
+  static int legMs(double travel) => (travel * 18).round().clamp(4000, 14000);
 
   @override
-  State<_NextTrackLine> createState() => _NextTrackLineState();
+  State<NextTrackLine> createState() => _NextTrackLineState();
 }
 
-class _NextTrackLineState extends State<_NextTrackLine>
+class _NextTrackLineState extends State<NextTrackLine>
     with SingleTickerProviderStateMixin {
   late final AnimationController _move;
+  Timer? _pause;
+  int _cycles = 0;
+  bool _nextForward = true;
+  bool _tickersOn = true;
+  bool _overflow = false;
+  double _travel = 0;
 
   @override
   void initState() {
     super.initState();
-    _move = AnimationController(vsync: this);
+    _move = AnimationController(vsync: this)..addStatusListener(_onStatus);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final bool on = TickerMode.valuesOf(context).enabled;
+    if (on == _tickersOn) return;
+    _tickersOn = on;
+    if (on) _resume();
+  }
+
+  @override
+  void didUpdateWidget(covariant NextTrackLine oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.label != widget.label || oldWidget.style != widget.style) {
+      _restart();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resume());
+    }
   }
 
   @override
   void dispose() {
+    _pause?.cancel();
     _move.dispose();
     super.dispose();
+  }
+
+  void _onStatus(AnimationStatus s) {
+    if (!mounted) return;
+    if (s == AnimationStatus.completed) {
+      _nextForward = false;
+      _schedulePause();
+    } else if (s == AnimationStatus.dismissed && !_nextForward) {
+      _cycles++;
+      _nextForward = true;
+      if (_cycles < NextTrackLine.maxCycles) _schedulePause();
+    }
+  }
+
+  void _schedulePause() {
+    _pause?.cancel();
+    _pause = Timer(NextTrackLine.endPause, () {
+      _pause = null;
+      if (!mounted) return;
+      _resume();
+    });
+  }
+
+  /// Arranca la pasada pendiente si hace falta y se puede.
+  void _resume() {
+    if (!mounted || !_tickersOn || !_overflow) return;
+    if (_pause != null || _move.isAnimating) return;
+    if (_cycles >= NextTrackLine.maxCycles) return;
+    _move.duration = Duration(milliseconds: NextTrackLine.legMs(_travel));
+    if (_nextForward) {
+      _move.forward(from: 0);
+    } else {
+      _move.reverse(from: 1);
+    }
+  }
+
+  /// Texto o ancho nuevo: corta la pausa, vuelve al inicio y cuenta de 0.
+  void _restart() {
+    _pause?.cancel();
+    _pause = null;
+    _move.stop();
+    _move.value = 0;
+    _cycles = 0;
+    _nextForward = true;
+  }
+
+  void _syncLayout(bool overflow, double travel) {
+    if (overflow == _overflow && (travel - _travel).abs() < 0.5) return;
+    final bool wasOverflow = _overflow;
+    _overflow = overflow;
+    _travel = travel;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (wasOverflow || !_overflow) _restart();
+      _resume();
+    });
   }
 
   @override
@@ -1273,12 +1363,8 @@ class _NextTrackLineState extends State<_NextTrackLine>
         final double textH = painter.height;
         painter.dispose();
         final bool overflow = maxW.isFinite && textW > maxW + 1;
+        _syncLayout(overflow, overflow ? textW - maxW : 0);
         if (!overflow) {
-          if (_move.isAnimating) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _move.stop();
-            });
-          }
           return Text(
             widget.label,
             maxLines: 1,
@@ -1287,44 +1373,37 @@ class _NextTrackLineState extends State<_NextTrackLine>
           );
         }
         final double travel = textW - maxW;
-        final int ms = (travel * 18).round().clamp(4000, 14000);
-        if (!_move.isAnimating) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted || _move.isAnimating) return;
-            _move.duration = Duration(milliseconds: ms);
-            _move.repeat();
-          });
-        }
         // El texto mide su ancho real y se desliza; el recorte impide
-        // que pinte encima de la barra de mezcla.
+        // que pinte encima de la barra de mezcla. RepaintBoundary: cada
+        // cuadro repinta solo esta linea, no la franja.
         return SizedBox(
           width: maxW,
           height: textH,
-          child: ClipRect(
-            child: AnimatedBuilder(
-              animation: _move,
-              builder: (context, _) {
-                final double t = Curves.easeInOut.transform(
-                  _move.value < 0.5 ? _move.value * 2 : (1 - _move.value) * 2,
-                );
-                return Transform.translate(
-                  offset: Offset(-travel * t, 0),
-                  child: OverflowBox(
-                    alignment: Alignment.centerLeft,
-                    minWidth: textW,
-                    maxWidth: textW,
-                    minHeight: textH,
-                    maxHeight: textH,
-                    child: Text(
-                      widget.label,
-                      maxLines: 1,
-                      softWrap: false,
-                      overflow: TextOverflow.visible,
-                      style: widget.style,
+          child: RepaintBoundary(
+            child: ClipRect(
+              child: AnimatedBuilder(
+                animation: _move,
+                builder: (context, _) {
+                  final double t = Curves.easeInOut.transform(_move.value);
+                  return Transform.translate(
+                    offset: Offset(-travel * t, 0),
+                    child: OverflowBox(
+                      alignment: Alignment.centerLeft,
+                      minWidth: textW,
+                      maxWidth: textW,
+                      minHeight: textH,
+                      maxHeight: textH,
+                      child: Text(
+                        widget.label,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.visible,
+                        style: widget.style,
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
           ),
         );

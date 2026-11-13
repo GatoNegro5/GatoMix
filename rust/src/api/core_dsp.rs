@@ -6337,12 +6337,55 @@ impl KStft {
 
 type KInfer = Box<dyn FnMut(&[f32]) -> Result<Vec<f32>, String>>;
 
-/// Escritorio (Windows/macOS): ONNX Runtime oficial (MIT). Máximo 2 hilos.
+/// 3.1.22 (Pendiente 22c): pausa tras cada ventana de inferencia: 15 % del
+/// tiempo de la ventana, tope 250 ms (uso sostenido ~87 %).
+fn kar_duty_pause_ms(infer_ms: u64) -> u64 {
+    (infer_ms.saturating_mul(15) / 100).min(250)
+}
+
+/// 3.1.22: hilo que corre `f` con PriorityGuard (EcoQoS/background en Windows,
+/// QoS en Mac, nice en Android). La prioridad es por hilo y no se hereda.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+fn eco_spawn<F: FnOnce() + Send + 'static>(
+    f: F,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("gmx-ort".into())
+        .spawn(move || {
+            let _g = PriorityGuard::enter();
+            f();
+        })
+}
+
+/// 3.1.22: ONNX Runtime crea sus hilos intra-op por aqui; sin esto nacen a
+/// prioridad normal y sin EcoQoS, fuera del PriorityGuard del llamador.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn karaoke_backend(model_path: &str) -> Result<KInfer, String> {
+struct EcoThreads;
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl ort::environment::ThreadManager for EcoThreads {
+    type Thread = std::thread::JoinHandle<()>;
+
+    fn create(
+        &mut self,
+        worker: ort::environment::ThreadWorker,
+    ) -> ort::error::Result<Self::Thread> {
+        eco_spawn(move || worker.work()).map_err(|e| ort::error::Error::new(e.to_string()))
+    }
+
+    fn join(thread: Self::Thread) -> ort::error::Result<()> {
+        thread
+            .join()
+            .map_err(|_| ort::error::Error::new("hilo de ONNX Runtime con panic"))
+    }
+}
+
+/// 3.1.22: sesion de ORT sin modelo: 2 hilos intra, 1 inter, sin spinning y
+/// con los hilos de ORT creados por EcoThreads.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn kar_session_builder() -> Result<ort::session::builder::SessionBuilder, String> {
     use ort::session::{builder::GraphOptimizationLevel, Session};
-    use ort::value::Tensor;
-    let mut session = Session::builder()
+    Session::builder()
         .map_err(|e| e.to_string())?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| e.to_string())?
@@ -6352,6 +6395,19 @@ fn karaoke_backend(model_path: &str) -> Result<KInfer, String> {
         .map_err(|e| e.to_string())?
         .with_parallel_execution(false)
         .map_err(|e| e.to_string())?
+        .with_intra_op_spinning(false)
+        .map_err(|e| e.to_string())?
+        .with_inter_op_spinning(false)
+        .map_err(|e| e.to_string())?
+        .with_thread_manager(EcoThreads)
+        .map_err(|e| e.to_string())
+}
+
+/// Escritorio (Windows/macOS): ONNX Runtime oficial (MIT). Máximo 2 hilos.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn karaoke_backend(model_path: &str) -> Result<KInfer, String> {
+    use ort::value::Tensor;
+    let mut session = kar_session_builder()?
         .commit_from_file(model_path)
         .map_err(|e| format!("Modelo inválido: {e}"))?;
     Ok(Box::new(move |data: &[f32]| {
@@ -6511,6 +6567,19 @@ pub fn karaoke_separate(
     };
 
     let mut infer = karaoke_backend(&model_path)?;
+    // 3.1.22 (22c): pausa proporcional tras cada ventana; headless, sin pausa.
+    let duty = !headless_master_folder();
+    let mut infer_duty = |data: &[f32]| -> Result<Vec<f32>, String> {
+        let t0 = std::time::Instant::now();
+        let out = infer(data);
+        if duty && out.is_ok() {
+            let p = kar_duty_pause_ms(t0.elapsed().as_millis() as u64);
+            if p > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(p));
+            }
+        }
+        out
+    };
 
     let tmp = format!("{output_path}.part");
     let mut sink = Mp3Sink::new(&tmp, K_RATE, true, 320)?;
@@ -6555,7 +6624,7 @@ pub fn karaoke_separate(
         }
     };
     let mut emit = |inter: &[f32]| sink.push(inter, 2);
-    let res = kar_stream(&mut next, &mut *infer, &mut emit, total_hint);
+    let res = kar_stream(&mut next, &mut infer_duty, &mut emit, total_hint);
     if let Err(e) = res {
         drop(sink);
         let _ = std::fs::remove_file(&tmp);
@@ -9264,5 +9333,44 @@ mod master_3112_tests {
         assert!((times.out_lufs - TARGET_LUFS).abs() <= LUFS_TOL);
         assert!(peak < 200.0, "pico {peak:.1} MB");
         assert_eq!(mtime(&orig), before, "el original no se toca");
+    }
+}
+
+/// 3.1.22 (Pendiente 22c): pausa del duty-cycle, hilo de ORT con PriorityGuard
+/// y builder sin spinning. Sin modelo ONNX y sin tocar ReGenial.
+#[cfg(test)]
+mod kar_3122_tests {
+    #[test]
+    fn kar_3122_pausa_15_por_ciento_con_tope_250() {
+        assert_eq!(super::kar_duty_pause_ms(0), 0);
+        assert_eq!(super::kar_duty_pause_ms(6), 0);
+        assert_eq!(super::kar_duty_pause_ms(100), 15);
+        assert_eq!(super::kar_duty_pause_ms(1000), 150);
+        assert_eq!(super::kar_duty_pause_ms(1666), 249);
+        assert_eq!(super::kar_duty_pause_ms(1667), 250);
+        assert_eq!(super::kar_duty_pause_ms(60_000), 250);
+        assert_eq!(super::kar_duty_pause_ms(u64::MAX), 250);
+    }
+
+    #[test]
+    fn kar_3122_eco_spawn_corre_el_trabajo_bajo_priority_guard() {
+        let fuera = super::PRIO_DEPTH.with(|d| d.get());
+        let h = super::eco_spawn(|| {
+            let dentro = super::PRIO_DEPTH.with(|d| d.get());
+            assert_eq!(dentro, 1, "el hilo de ORT debe nacer con PriorityGuard");
+        })
+        .unwrap();
+        h.join().unwrap();
+        assert_eq!(super::PRIO_DEPTH.with(|d| d.get()), fuera);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn kar_3122_builder_acepta_spinning_false_y_eco_threads() {
+        use ort::environment::ThreadManager;
+        let b = super::kar_session_builder();
+        assert!(b.is_ok(), "builder: {:?}", b.err());
+        let h = super::eco_spawn(|| ()).unwrap();
+        assert!(<super::EcoThreads as ThreadManager>::join(h).is_ok());
     }
 }
