@@ -176,7 +176,10 @@ double _knownBpmRead(String path) {
     caseSensitive: false,
   ).firstMatch(fileName);
   if (match != null) {
-    final double named = double.tryParse(match.group(1)!) ?? 0;
+    // 3.1.14: mismo rango musical (40-250) que el resto de fuentes.
+    final double named = TrackTags.musicalBpm(
+      double.tryParse(match.group(1)!) ?? 0,
+    );
     if (named > 0) return named;
   }
   final double peeked = TrackTags.peek(path)?.bpm ?? 0;

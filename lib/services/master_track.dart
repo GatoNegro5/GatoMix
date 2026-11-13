@@ -7,6 +7,7 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import '../core/exact_mix.dart';
 import '../core/gatomix_store.dart';
 import '../core/master_skip.dart';
+import '../core/phrase_grid.dart';
 import '../core/queue_bpm.dart';
 import '../core/stored_grid.dart';
 import '../services/track_tags.dart';
@@ -630,6 +631,8 @@ class MasterTrack {
         }
       }
     }
+    // 3.1.14 (Pendiente 18): phraseGrid guarda ms absolutos; se mueve igual.
+    PhraseGridMemory.shiftForTrim(path, net);
     final db = ref.read(dbServiceProvider);
     final meta = await db.getTrackMetadata(path);
     if (meta == null) return;

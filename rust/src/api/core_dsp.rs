@@ -3241,7 +3241,7 @@ fn entry_tbpm(grid: &crate::bpm_exact::TempoGrid, audio_ms: u64) -> f64 {
 /// una rejilla forzada desfasaria el phase lock).
 fn reconcile_tbpm(old: f64, grid: &mut crate::bpm_exact::TempoGrid, audio_ms: u64) -> f64 {
     let measured = entry_tbpm(grid, audio_ms);
-    if !(old.is_finite() && (40.0..=240.0).contains(&old)) || !(measured.is_finite() && measured > 0.0) {
+    if !(old.is_finite() && (40.0..=250.0).contains(&old)) || !(measured.is_finite() && measured > 0.0) {
         return measured;
     }
     if (measured - old).abs() <= 2.0 {

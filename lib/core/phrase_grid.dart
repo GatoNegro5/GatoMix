@@ -121,6 +121,35 @@ class PhraseTrack {
 
 double _round(double v) => (v * 10000).round() / 10000;
 
+/// 3.1.14 (Pendiente 18): perfil tras recortar [netMs] del inicio. `beat`,
+/// frases, intro, outro y duracion se mueven igual que el audio. Null si
+/// queda inconsistente (el llamador borra la entrada y se vuelve a medir).
+PhraseTrack? shiftPhraseTrack(PhraseTrack t, int netMs) {
+  if (netMs == 0) return t;
+  final int beat = t.beatMs - netMs;
+  final int dur = t.durationMs > 0 ? t.durationMs - netMs : t.durationMs;
+  if (beat < 0 || (t.durationMs > 0 && dur <= 0)) return null;
+  int moved(int ms) => ms < 0 ? ms : math.max(0, ms - netMs);
+  final List<PhrasePhrase> phrases = <PhrasePhrase>[
+    for (final PhrasePhrase p in t.phrases)
+      if (p.startMs - netMs >= 0)
+        PhrasePhrase(startMs: p.startMs - netMs, rms: p.rms, vocal: p.vocal),
+  ];
+  if (phrases.isEmpty) return null;
+  final int outro = moved(t.outroMs);
+  final int intro = moved(t.introEndMs);
+  if (dur > 0 && (outro > dur || intro > dur)) return null;
+  return PhraseTrack(
+    bpm: t.bpm,
+    beatMs: beat,
+    durationMs: dur,
+    outroMs: outro,
+    introEndMs: intro,
+    bodyRms: t.bodyRms,
+    phrases: phrases,
+  );
+}
+
 /// BPM con el que suena la entrante: el suyo, o el común ya igualado.
 double phraseSoundingBpm({
   required double incomingBpm,
@@ -581,6 +610,36 @@ class PhraseGridMemory {
     _tracks[want] = track;
     _gaveUp.remove(want);
     _absorbed.add(dir);
+  }
+
+  /// 3.1.14: el recorte inicial de Masterizar mueve el perfil guardado. Si
+  /// no cuadra, se borra y se vuelve a medir.
+  static void shiftForTrim(String path, int netMs) {
+    if (path.isEmpty || netMs == 0) return;
+    final String dir = File(path).parent.path;
+    final Map<String, dynamic> map = GatomixStore.readMap(dir, phraseGridSection);
+    final String want = audioPathKey(path);
+    String? key;
+    for (final String k in map.keys) {
+      if (audioPathKey(k) == want) {
+        key = k;
+        break;
+      }
+    }
+    if (key == null) {
+      _tracks.remove(want);
+      return;
+    }
+    final PhraseTrack? old = PhraseTrack.fromJson(map[key]);
+    final PhraseTrack? moved = old == null ? null : shiftPhraseTrack(old, netMs);
+    if (moved == null) {
+      map.remove(key);
+      _tracks.remove(want);
+    } else {
+      map[key] = moved.toJson();
+      _tracks[want] = moved;
+    }
+    GatomixStore.writeMap(dir, phraseGridSection, map);
   }
 
   static void debugReset() {

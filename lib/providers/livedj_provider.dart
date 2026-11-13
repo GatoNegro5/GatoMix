@@ -17,6 +17,7 @@ import '../core/gatomix_store.dart';
 import '../core/hal/platform_strategy.dart';
 import '../core/mode_session.dart';
 import '../core/livedj_next.dart';
+import '../core/bpm_backfill_worker.dart';
 import '../core/livedj_order.dart';
 import '../core/dna_mix.dart';
 import '../core/phrase_grid.dart';
@@ -192,6 +193,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> get addSettled => _queueAddChain;
   final Set<String> _queueAddPending = <String>{};
   int _addEpoch = 0;
+  // 3.1.14: BPM de las pistas sin medir mientras suena la sesion.
+  BpmBackfillWorker? _backfill;
+  // queueEpoch: la lista inmutable de la cola del ultimo orden aplicado.
+  List<File>? _backfillEpoch;
   bool _queueHold = false;
   bool _queueRestart = false;
   RadioMemory? _radioMem;
@@ -941,7 +946,75 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       mixStrategy: LiveDjMixStrategy.random,
     );
     _saveSnapshot();
+    _startBackfill();
     debugPrint("🔀 [TRACKER] Shuffle armónico: ${ordered.length} pistas.");
+  }
+
+  // 3.1.14: worker silencioso de BPM. Mide de una en una las pistas sin BPM
+  // desde index + 2 (queue[1..]; queue[0] es la siguiente) y se pausa solo
+  // durante el cruce entre los 2 decks.
+  void _startBackfill() {
+    if (state.mixStrategy != LiveDjMixStrategy.random || state.radioOn) return;
+    _backfillEpoch = state.queue;
+    final BpmBackfillWorker worker = _backfill ??= BpmBackfillWorker(
+      measure: measureAndStampBpm,
+      isPaused: () => _isCrossfading,
+      onBatch: (_) => _backfillReorder(),
+    );
+    worker.enqueue(
+      backfillCandidates(
+        <String>[for (final File f in state.queue) f.path],
+        _liveFixedCount(),
+        knownBpm,
+      ),
+    );
+  }
+
+  int _liveFixedCount() {
+    var fixed = 1;
+    final String? armed = _standbyArmedPath;
+    if (armed != null) {
+      final int at = state.queue.indexWhere(
+        (File f) => sameAudioPath(f.path, armed),
+      );
+      if (at + 1 > fixed) fixed = at + 1;
+    }
+    return fixed;
+  }
+
+  /// Reordena queue[fijas..] solo si la cola sigue siendo la del ultimo
+  /// orden (queueEpoch): un cambio manual se respeta hasta el proximo Shuffle.
+  void _backfillReorder() {
+    if (state.mixStrategy != LiveDjMixStrategy.random || state.radioOn) return;
+    if (!sameQueueEpoch(_backfillEpoch, state.queue)) return;
+    final List<String>? ordered = reorderQueueTail(
+      <String>[for (final File f in state.queue) f.path],
+      _liveFixedCount(),
+      (List<String> tail, String? from) => buildHarmonicShuffle(
+        tail,
+        knownBpm,
+        keyOf: camelotFromPath,
+        continueFrom: from,
+      ).tracks,
+    );
+    if (ordered == null) return;
+    state = state.copyWith(queue: ordered.map(File.new).toList());
+    _backfillEpoch = state.queue;
+    _saveSnapshot();
+  }
+
+  void _backfillOnTrackChange(List<File> before) {
+    final BpmBackfillWorker? worker = _backfill;
+    if (worker == null || !sameQueueEpoch(_backfillEpoch, before)) return;
+    _backfillEpoch = state.queue;
+    if (worker.takeUnapplied() > 0) _backfillReorder();
+    worker.enqueue(
+      backfillCandidates(
+        <String>[for (final File f in state.queue) f.path],
+        _liveFixedCount(),
+        knownBpm,
+      ),
+    );
   }
 
   /// Orden de la cola en Secuencial. Se guarda y se vuelve a aplicar a lo
@@ -1234,6 +1307,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   void clearQueue() {
     _addEpoch++;
+    _backfill?.cancel();
+    _backfillEpoch = null;
     _queueAddPending.clear();
     _queueAddChain = Future<void>.value();
     if (state.radioOn) {
@@ -3043,6 +3118,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     _publishedFadeMs = phraseFadeOverride ??
         (dnaPlan != null && !dnaPlan.legacy ? dnaPlan.fadeMs : 0);
 
+    final List<File> backfillBefore = state.queue;
     state = state.copyWith(
       radioOn: autoRadio ? true : null,
       queue: newQueue,
@@ -3056,6 +3132,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     _saveSnapshot();
     _schedulePhraseNeighbors();
+    _backfillOnTrackChange(backfillBefore);
     // Con la Radio encendida el siguiente se elige apenas empieza esta pista.
     if (state.radioOn) unawaited(_radioNextPath());
 

@@ -25,6 +25,7 @@ import '../core/audio_path.dart';
 import '../core/dna_mix.dart';
 import '../core/gatomix_store.dart';
 import '../services/track_tags.dart';
+import '../core/bpm_backfill_worker.dart';
 import '../core/livedj_order.dart';
 import '../core/mode_session.dart';
 import '../core/queue_bpm.dart';
@@ -166,6 +167,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
   bool _isCrossfading = false;
   bool get nextTrackLocked => _isCrossfading;
+  // 3.1.14: BPM de las pistas sin medir mientras suena la sesion.
+  BpmBackfillWorker? _backfill;
+  // queueEpoch: la lista inmutable del ultimo orden aplicado.
+  List<String>? _backfillEpoch;
   bool _parking = false;
   bool _isPrepModeBypass = false;
   int _lastSavedPositionMs = 0;
@@ -656,6 +661,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     _saveSnapshot();
     _recalculateMixWindow();
+    _startBackfill();
 
     debugPrint("🔀 [DSP] Shuffle armónico. ${rest.length} pistas.");
   }
@@ -841,6 +847,67 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (state.currentTrackPath == null || _isCrossfading) return;
     _isPrepModeBypass = false;
     await _activeAutomix.seek(position);
+  }
+
+  // 3.1.14: worker silencioso de BPM. Mide de una en una las pistas sin BPM
+  // desde currentIndex + 2 y se pausa solo durante el cruce entre decks.
+  void _startBackfill() {
+    if (state.mixStrategy != MixStrategy.random) return;
+    _backfillEpoch = state.playlist;
+    final BpmBackfillWorker worker = _backfill ??= BpmBackfillWorker(
+      measure: measureAndStampBpm,
+      isPaused: () => _isCrossfading,
+      onBatch: (_) => _backfillReorder(),
+    );
+    worker.enqueue(
+      backfillCandidates(state.playlist, _autoFixedCount(), knownBpm),
+    );
+  }
+
+  int _autoFixedCount() {
+    var fixed = (state.currentIndex < 0 ? 0 : state.currentIndex) + 2;
+    final String? next = state.nextTrackPath;
+    if (next != null) {
+      final int at = state.playlist.indexWhere(
+        (String p) => sameAudioPath(p, next),
+      );
+      if (at + 1 > fixed) fixed = at + 1;
+    }
+    return fixed;
+  }
+
+  /// Reordena playlist[fijas..] solo si la lista sigue siendo la del ultimo
+  /// orden (queueEpoch): un cambio manual se respeta hasta el proximo Shuffle.
+  void _backfillReorder() {
+    if (state.mixStrategy != MixStrategy.random) return;
+    if (!sameQueueEpoch(_backfillEpoch, state.playlist)) return;
+    final List<String>? ordered = reorderQueueTail(
+      state.playlist,
+      _autoFixedCount(),
+      (List<String> tail, String? from) => buildHarmonicShuffle(
+        tail,
+        _extractBpm,
+        keyOf: camelotFromPath,
+        continueFrom: from,
+      ).tracks,
+    );
+    if (ordered == null) return;
+    state = state.copyWith(playlist: ordered);
+    _backfillEpoch = state.playlist;
+    _saveSnapshot();
+    try {
+      _recalculateMixWindow();
+    } catch (_) {}
+  }
+
+  void _backfillOnTrackChange(List<String> before) {
+    final BpmBackfillWorker? worker = _backfill;
+    if (worker == null || !sameQueueEpoch(_backfillEpoch, before)) return;
+    _backfillEpoch = state.playlist;
+    if (worker.takeUnapplied() > 0) _backfillReorder();
+    worker.enqueue(
+      backfillCandidates(state.playlist, _autoFixedCount(), knownBpm),
+    );
   }
 
   double _extractBpm(String? path) => knownBpm(path);
@@ -1404,6 +1471,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _usePlayerA = !_usePlayerA;
     _attachListeners(_activeAutomix);
 
+    final List<String> backfillBefore = state.playlist;
     List<String> newPlaylist = List.from(state.playlist);
     if (state.currentTrackPath != null) {
       newPlaylist.remove(state.currentTrackPath);
@@ -1420,6 +1488,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
       activeLyricIndex: -1,
     );
+    _backfillOnTrackChange(backfillBefore);
 
     await _loadLyrics(nextTrack);
     await _loadTrackMetadata(nextTrack);
@@ -1502,6 +1571,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _usePlayerA = !_usePlayerA;
     _attachListeners(_activeAutomix);
 
+    final List<String> backfillBefore = state.playlist;
     List<String> newPlaylist = List.from(state.playlist);
     if (state.currentTrackPath != null) {
       newPlaylist.remove(state.currentTrackPath);
@@ -1518,6 +1588,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
       lyrics: _lyricPrime[nextTrack] ?? const <LyricLine>[],
       activeLyricIndex: -1,
     );
+    _backfillOnTrackChange(backfillBefore);
 
     await _loadLyrics(nextTrack);
     await _loadTrackMetadata(nextTrack);
