@@ -31,6 +31,7 @@ import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
 import '../core/dj_trace.dart';
 import '../core/exact_mix.dart';
+import '../services/adaptive_eq.dart' show AdaptiveEq;
 import '../services/track_tags.dart';
 import '../core/audio/dj_audio_handler.dart';
 import 'equalizer_provider.dart';
@@ -3247,7 +3248,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
               ),
       );
 
-      await incomingPlayer.setVolume(0.0);
+      await AdaptiveEq.setDeckVolume(incomingPlayer, 0.0);
 
       final bool phraseNow =
           ref.read(mixFormulaProvider) == MixFormula.phraseGrid;
@@ -3316,10 +3317,15 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           );
         }
 
-        await incomingPlayer.setVolume(
+        // 3.1.20: respeta la rampa de AdaptiveEq en curso.
+        await AdaptiveEq.setDeckVolume(
+          incomingPlayer,
           (smoothRateIn * 100.0).clamp(0.0, 100.0),
         );
-        await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
+        await AdaptiveEq.setDeckVolume(
+          fadingPlayer,
+          (smoothRateOut * 100.0).clamp(0.0, 100.0),
+        );
 
         await _mix.slice(32, fadeClock);
       }
@@ -3333,10 +3339,10 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
 
       try {
-        await incomingPlayer.setVolume(100.0);
+        await AdaptiveEq.setDeckVolume(incomingPlayer, 100.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
-        await fadingPlayer.setVolume(0.0);
+        await AdaptiveEq.setDeckVolume(fadingPlayer, 0.0);
         await fadingPlayer.setRate(1.0);
         await fadingPlayer.stop();
       } catch (_) {}

@@ -12,6 +12,43 @@ import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 import '../core/audio/af_caps.dart';
 import '../core/hal/platform_strategy.dart';
 
+/// Paso de la rampa de sonoridad (3.1.20).
+class LevelGlideStep {
+  final int atMs;
+  final double trim;
+  final bool applyAf;
+  const LevelGlideStep(this.atMs, this.trim, this.applyAf);
+}
+
+/// Plan puro de la rampa para pasar [deltaDb] en [rampMs] y [steps] pasos.
+/// Baja (delta < 0): baja el recorte en pasos y al final cambia el `af` y
+/// devuelve el recorte a 1 a la vez (misma sonoridad). Sube (delta > 0):
+/// cambia el `af` con el recorte compensado y luego lo sube. Recorte <= 1.
+List<LevelGlideStep> levelGlidePlan(
+  double deltaDb, {
+  int rampMs = 50,
+  int steps = 5,
+}) {
+  if (deltaDb.abs() < 0.05 || steps < 1) return const <LevelGlideStep>[];
+  double lin(double db) => pow(10.0, db / 20.0).toDouble();
+  final int dt = rampMs ~/ steps;
+  final List<LevelGlideStep> out = <LevelGlideStep>[];
+  if (deltaDb < 0) {
+    for (int i = 1; i <= steps; i++) {
+      out.add(LevelGlideStep(dt * (i - 1), lin(deltaDb * i / steps), false));
+    }
+    out.add(LevelGlideStep(rampMs, 1.0, true));
+  } else {
+    out.add(LevelGlideStep(0, lin(-deltaDb), true));
+    for (int i = 1; i <= steps; i++) {
+      out.add(
+        LevelGlideStep(dt * i, i == steps ? 1.0 : lin(-deltaDb * (1 - i / steps)), false),
+      );
+    }
+  }
+  return out;
+}
+
 /// Perfil medido de una canción.
 class AdaptiveProfile {
   /// Corrección espectral (dB) en las 10 bandas octava.
@@ -196,6 +233,74 @@ class AdaptiveEq {
   static double levelFor(Player player) =>
       enabled ? (_levels[player] ?? 0.0) : 0.0;
 
+  // 3.1.20 (Pendiente 6): rampa de sonoridad. mpv reconstruye el `af` al
+  // instante, asi que un onReady tardio (cache fria) en un deck que suena
+  // movia de golpe todo el nivel (p. ej. -6 dB en plena mezcla). La rampa
+  // va por el volumen del deck con un recorte <= 1 (nunca pasa de 100).
+  static final Expando<double> _trim = Expando<double>('gmxLevelTrim');
+  static final Expando<double> _applied = Expando<double>('gmxLevelApplied');
+  static final Expando<double> _base = Expando<double>('gmxDeckBase');
+
+  /// Recorte lineal (<= 1) de la rampa en curso del [player]; 1 sin rampa.
+  static double trimFor(Player player) => _trim[player] ?? 1.0;
+
+  /// El motor anota el nivel (dB) que lleva el `af` que construye.
+  static void noteApplied(Player player, double db) => _applied[player] = db;
+
+  /// Volumen de un deck respetando la rampa en curso (cruce de Live DJ).
+  static Future<void> setDeckVolume(Player player, double volume) {
+    _base[player] = volume;
+    return player.setVolume((volume * trimFor(player)).clamp(0.0, 100.0));
+  }
+
+  /// Aplica el nuevo nivel [toDb] con [levelGlidePlan] si el deck suena;
+  /// si esta en silencio o pausado, [applyAf] directo (sin rampa).
+  static Future<void> glideLevel(
+    Player player, {
+    required double toDb,
+    required void Function() applyAf,
+  }) async {
+    final bool audible = player.state.playing && player.state.volume > 0;
+    final double from = _applied[player] ?? 0.0;
+    final List<LevelGlideStep> plan = audible
+        ? levelGlidePlan(toDb - from)
+        : const <LevelGlideStep>[];
+    if (plan.isEmpty) {
+      applyAf();
+      return;
+    }
+    final Object? token = _token[player];
+    _base[player] = player.state.volume;
+    int at = 0;
+    bool afDone = false;
+    try {
+      for (final LevelGlideStep st in plan) {
+        if (st.atMs > at) {
+          await Future<void>.delayed(Duration(milliseconds: st.atMs - at));
+          at = st.atMs;
+        }
+        if (_token[player] != token) return; // cambio de cancion
+        _trim[player] = st.trim;
+        if (st.applyAf) {
+          applyAf();
+          afDone = true;
+        }
+        await player.setVolume(
+          ((_base[player] ?? 0.0) * st.trim).clamp(0.0, 100.0),
+        );
+      }
+    } catch (_) {
+    } finally {
+      _trim[player] = null;
+      if (!afDone && _token[player] == token) {
+        try {
+          applyAf();
+          await player.setVolume((_base[player] ?? 0.0).clamp(0.0, 100.0));
+        } catch (_) {}
+      }
+    }
+  }
+
   /// Registra la canción [path] en el [player]: limpia lo anterior, mide la
   /// canción (o toma la caché) y aplica sonoridad + notifica a [onReady] para
   /// que el motor reconstruya el `af` del deck con la nueva EQ.
@@ -215,7 +320,7 @@ class AdaptiveEq {
       if (_token[player] != path) return; // el deck ya cambió de canción
       _gains[player] = prof.gains;
       _levels[player] = prof.levelDb;
-      onReady();
+      onReady(); // 3.1.20: el motor aplica el nivel con glideLevel
     }();
   }
 

@@ -128,8 +128,11 @@ class AudioEqualizerService {
 
   /// Cadena completa del [player]: EQ del usuario + corrección adaptativa de
   /// SU canción.
-  String filterFor(Player player) =>
-      _compose(AdaptiveEq.gainsFor(player), AdaptiveEq.levelFor(player));
+  String filterFor(Player player) {
+    final double level = AdaptiveEq.levelFor(player);
+    AdaptiveEq.noteApplied(player, level); // 3.1.20: base de la rampa
+    return _compose(AdaptiveEq.gainsFor(player), level);
+  }
 
   /// Llamar tras `open()` en un deck: mide la canción, fija su sonoridad y
   /// aplica su curva.
@@ -138,9 +141,16 @@ class AudioEqualizerService {
       player,
       path,
       onReady: () {
-        try {
-          (player.platform as dynamic)?.setProperty('af', filterFor(player));
-        } catch (_) {}
+        // 3.1.20 (Pendiente 6): rampa de 50 ms si el deck suena.
+        AdaptiveEq.glideLevel(
+          player,
+          toDb: AdaptiveEq.levelFor(player),
+          applyAf: () {
+            try {
+              (player.platform as dynamic)?.setProperty('af', filterFor(player));
+            } catch (_) {}
+          },
+        );
       },
     );
   }

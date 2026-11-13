@@ -212,6 +212,8 @@ pub async fn decode_mono_pcm(
     length_secs: u32,
     target_rate: u32,
 ) -> Result<Vec<u8>, String> {
+    // 3.1.20 (Pendiente 22c): EcoQoS + prioridad baja mientras decodifica.
+    let _prio = PriorityGuard::enter();
     let d = decode_channels(&input_path, start_secs, length_secs, 2)?;
     let mono = to_mono(&d);
     let ratio = d.rate as f64 / target_rate as f64;
@@ -8218,6 +8220,75 @@ mod priority_tests {
         .unwrap();
         assert_eq!(label, "nice10");
         assert_eq!(super::nice_priority::current_nice(), main_before);
+    }
+
+    /// 3.1.20: decode_mono_pcm entra con PriorityGuard. WAV sintetico de
+    /// 70 s en %TEMP% (cero escritura en ReGenial).
+    #[test]
+    fn decode_mono_3120_usa_priority_guard() {
+        let rate: u32 = 44_100;
+        let secs: u32 = 70;
+        let n = (rate * secs) as usize;
+        let mut wav: Vec<u8> = Vec::with_capacity(44 + n * 4);
+        let data_len = (n * 4) as u32;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 8000.0) as i16;
+            wav.extend_from_slice(&v.to_le_bytes());
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        let path = std::env::temp_dir().join("gmx_3120_decode.wav");
+        std::fs::write(&path, &wav).unwrap();
+        let ps = path.to_string_lossy().to_string();
+        super::store_priority_label("");
+        let t0 = std::time::Instant::now();
+        let (len, label) = std::thread::spawn(move || {
+            let mut len = 0usize;
+            for start in [30u32, 0, 60] {
+                let b = futures_lite_block(super::decode_mono_pcm(ps.clone(), start, 30, 22_050))
+                    .unwrap();
+                if start == 30 {
+                    len = b.len();
+                }
+            }
+            (len, super::priority_label())
+        })
+        .join()
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+        println!("3120 decode 3 ventanas: {:?} | etiqueta={} | bytes={}", t0.elapsed(), label, len);
+        assert!(!label.is_empty(), "decode_mono_pcm no entro con PriorityGuard");
+        let want = 30 * 22_050 * 2;
+        assert!(len + 2_000 >= want && len <= want + 2_000, "bytes={}", len);
+    }
+
+    /// Ejecuta un future sin await internos (decode_mono_pcm es sincronico por dentro).
+    fn futures_lite_block<F: std::future::Future>(f: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn noop(_: *const ()) {}
+        fn clone(p: *const ()) -> RawWaker {
+            RawWaker::new(p, &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut f = std::pin::pin!(f);
+        loop {
+            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
     }
 }
 
