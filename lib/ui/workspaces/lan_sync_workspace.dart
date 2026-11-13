@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mime/mime.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import '../../core/lan_sync_plan.dart';
 
 /// Destino remoto de la raíz Música. El servidor ya resuelve `ROOT`.
 const String lanMusicRootToken = 'ROOT';
@@ -22,6 +23,9 @@ const List<Duration> lanSendBackoff = <Duration>[
   Duration(seconds: 4),
 ];
 const int lanSendMaxAttempts = 4;
+
+/// 3.1.05: ultima IP que respondio `/api/whoami` en esta sesion.
+String? _lanLastPeerIp;
 
 enum LanFileResult { copied, existed, failed }
 
@@ -152,8 +156,10 @@ String? pickLanIpv4(
     if (name.contains('virtual') || name == 'lo') continue;
     if (interface.addresses.isEmpty) continue;
     final String address = interface.addresses.first;
+    // 3.1.05: 169.254.x (sin DHCP) no es la LAN.
+    if (address.startsWith('169.254.')) continue;
     first ??= address;
-    if (preferWlan && name.contains('wlan')) {
+    if (preferWlan && lanIsWlanName(name)) {
       wlan ??= address;
     }
   }
@@ -450,10 +456,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             .listSync(recursive: false, followLinks: false)
             .whereType<File>()
             .where((f) {
-              final ext = f.path.toLowerCase();
-              return ext.endsWith('.mp3') ||
-                  ext.endsWith('.lrc') ||
-                  ext.endsWith('.txt');
+              return lanSyncable(f.path);
             })
             .toList();
         _currentLocalFiles.sort(
@@ -475,10 +478,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       final entities = dir.listSync(recursive: false, followLinks: false);
       for (var e in entities) {
         if (e is File) {
-          final ext = e.path.toLowerCase();
-          if (ext.endsWith('.mp3') ||
-              ext.endsWith('.lrc') ||
-              ext.endsWith('.txt')) {
+          if (lanSyncable(e.path)) {
             result.add(e);
           }
         } else if (e is Directory) {
@@ -516,30 +516,21 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
       );
-      if (_lanMobile) {
-        final String? ip = pickLanIpv4(
-          <({String name, List<String> addresses})>[
-            for (final NetworkInterface interface in interfaces)
-              (
-                name: interface.name,
-                addresses: <String>[
-                  for (final InternetAddress address in interface.addresses)
-                    address.address,
-                ],
-              ),
-          ],
-          preferWlan: true,
-        );
-        if (ip != null) _localIp = ip;
-      } else {
-        for (var interface in interfaces) {
-          if (!interface.name.toLowerCase().contains('virtual') &&
-              interface.name != 'lo') {
-            _localIp = interface.addresses.first.address;
-            break;
-          }
-        }
-      }
+      // 3.1.05: escritorio y movil eligen la IP igual (prefiere Wi-Fi).
+      final String? ip = pickLanIpv4(
+        <({String name, List<String> addresses})>[
+          for (final NetworkInterface interface in interfaces)
+            (
+              name: interface.name,
+              addresses: <String>[
+                for (final InternetAddress address in interface.addresses)
+                  address.address,
+              ],
+            ),
+        ],
+        preferWlan: true,
+      );
+      if (ip != null) _localIp = ip;
 
       _server = await HttpServer.bind(InternetAddress.anyIPv4, _restPort);
       _server!.listen(_handleRestRequests);
@@ -597,10 +588,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         if (dir.existsSync()) {
           for (var f in dir.listSync(recursive: false).whereType<File>()) {
-            final ext = f.path.toLowerCase();
-            if (ext.endsWith('.mp3') ||
-                ext.endsWith('.lrc') ||
-                ext.endsWith('.txt')) {
+            if (lanSyncable(f.path)) {
               filesMetadata.add({
                 "name": f.uri.pathSegments.last,
                 "size_bytes": f.lengthSync(),
@@ -722,8 +710,13 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               ).firstMatch(contentDisposition);
               if (match != null) {
                 try {
+                  final List<String> present = await dir
+                      .list(followLinks: false)
+                      .where((e) => e is File)
+                      .map((e) => lanBaseName(e.path))
+                      .toList();
                   final savePath =
-                      '${dir.path}${Platform.pathSeparator}${match.group(1)}';
+                      '${dir.path}${Platform.pathSeparator}${lanResolveName(present, match.group(1)!)}';
                   if (savePath.toLowerCase().endsWith('.lrc')) {
                     // 1.0.20+38: la letra confirmada gana; nunca vuelve a
                     // aproximada ([gmx_approx]).
@@ -746,9 +739,12 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                     }
                     continue;
                   }
-                  final sink = File(savePath).openWrite();
+                  // 3.1.05: escritura atomica; un .part viejo se sobrescribe.
+                  final File tmp = File('$savePath$lanPartSuffix');
+                  final sink = tmp.openWrite();
                   await part.pipe(sink);
                   await sink.close();
+                  await tmp.rename(savePath);
                 } catch (e) {
                   if (lanMobile) {
                     writeFailed = true;
@@ -1106,6 +1102,14 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     final subnet = '${subnetParts[0]}.${subnetParts[1]}.${subnetParts[2]}';
 
     while (mounted && _isSweeping) {
+        // 3.1.05: primero el ultimo equipo que respondio (400 ms).
+        final String? lastPeer = _lanLastPeerIp;
+        if (lastPeer != null && lastPeer != _localIp) {
+          await _probeDeviceHttp(
+            lastPeer,
+            timeout: const Duration(milliseconds: 400),
+          );
+        }
       for (int i = 1; i <= 254; i += 50) {
         if (!mounted) break;
         List<Future<void>> batch = [];
@@ -1134,6 +1138,14 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     final subnetParts = _localIp.split('.');
     if (subnetParts.length == 4) {
       final subnet = '${subnetParts[0]}.${subnetParts[1]}.${subnetParts[2]}';
+      // 3.1.05: primero el ultimo equipo que respondio (400 ms).
+      final String? lastPeer = _lanLastPeerIp;
+      if (lastPeer != null && lastPeer != _localIp) {
+        await _probeDeviceHttp(
+          lastPeer,
+          timeout: const Duration(milliseconds: 400),
+        );
+      }
       for (int i = 1; i <= 254; i += 50) {
         if (!mounted) break;
         List<Future<void>> batch = [];
@@ -1157,13 +1169,17 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     }
   }
 
-  Future<void> _probeDeviceHttp(String targetIp) async {
+  Future<void> _probeDeviceHttp(
+    String targetIp, {
+    Duration timeout = const Duration(milliseconds: 1500),
+  }) async {
     try {
       final response = await http
           .get(Uri.parse('http://$targetIp:$_restPort/api/whoami'))
-          .timeout(const Duration(milliseconds: 1500));
+          .timeout(timeout);
 
       if (response.statusCode == 200) {
+        _lanLastPeerIp = targetIp; // 3.1.05: fast-path de reconexion
         final data = jsonDecode(response.body);
         if (mounted && _discoveredDevices[targetIp] != data['name']) {
           setState(() => _discoveredDevices[targetIp] = data['name']);
@@ -1457,13 +1473,29 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             ).map((f) => f.path),
           );
         } else {
+          final Map<String, List<String>> dirNames = <String, List<String>>{};
           for (String path in _selectedFilesToTransfer) {
             pushQueue.add(path);
             if (path.toLowerCase().endsWith('.mp3')) {
-              final lrcPath = '${path.substring(0, path.length - 4)}.lrc';
-              final txtPath = '${path.substring(0, path.length - 4)}.txt';
-              if (File(lrcPath).existsSync()) pushQueue.add(lrcPath);
-              if (File(txtPath).existsSync()) pushQueue.add(txtPath);
+              // 3.1.05: hermanos .lrc/.txt/_K sin distinguir mayusculas; nunca .part.
+              final Directory parent = File(path).parent;
+              if (!dirNames.containsKey(parent.path)) {
+                List<String> names = <String>[];
+                try {
+                  names = await parent
+                      .list(followLinks: false)
+                      .where((e) => e is File)
+                      .map((e) => lanBaseName(e.path))
+                      .toList();
+                } catch (_) {}
+                dirNames[parent.path] = names;
+              }
+              for (final String name in lanCompanions(
+                lanBaseName(path),
+                dirNames[parent.path]!,
+              )) {
+                pushQueue.add('${parent.path}${Platform.pathSeparator}$name');
+              }
             }
           }
         }
@@ -1476,6 +1508,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           .split(Platform.pathSeparator)
           .last;
 
+      final http.Client lanClient = http.Client(); // 3.1.05: Keep-Alive
+      final Stopwatch lanWatch = Stopwatch()..start();
+      int sentBytes = 0;
       for (int i = 0; i < files.length; i++) {
         if (_cancelRequested) break;
         final file = files[i];
@@ -1505,8 +1540,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         });
 
         final bool isLrc = fileName.toLowerCase().endsWith('.lrc');
-        if (_currentRemoteFiles.any((f) => f['name'] == fileName)) {
-          if (!_overwriteExisting && !isLrc) {
+        if (lanRemoteHas(_currentRemoteFiles, fileName)) {
+          if (!_overwriteExisting &&
+              !isLrc &&
+              lanAlreadyThere(_currentRemoteFiles, fileName, file.lengthSync())) {
             setState(() {
               _currentLog = "⏩ SALTADO (Ya existe): $fileName";
               if (_lanMobile) {
@@ -1542,7 +1579,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               request.files.add(
                 await http.MultipartFile.fromPath('file', file.path),
               );
-              final http.StreamedResponse response = await request.send();
+              final http.StreamedResponse response = await lanClient.send(request);
               final int status = response.statusCode;
               await response.stream.drain<void>();
               return status;
@@ -1550,6 +1587,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             final LanFileResult result = lanClassifyStatus(code);
             if (result == LanFileResult.copied) {
               _successfulTransfers++;
+              sentBytes += file.lengthSync();
             } else {
               _failedTransfers++;
               _retryPush.add(file);
@@ -1591,9 +1629,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             request.files.add(
               await http.MultipartFile.fromPath('file', file.path),
             );
-            final response = await request.send();
+            final response = await lanClient.send(request);
             if (response.statusCode == 200) {
               _successfulTransfers++;
+              sentBytes += file.lengthSync();
             } else {
               _skippedTransfers++;
             }
@@ -1604,6 +1643,12 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         await Future.delayed(const Duration(milliseconds: 15));
       }
+      lanClient.close();
+      final double lanSecs = lanWatch.elapsedMilliseconds / 1000.0;
+      final double lanMb = sentBytes / (1024 * 1024);
+      debugPrint(
+        "[LAN] Envio: ${lanMb.toStringAsFixed(1)} MB en ${lanSecs.toStringAsFixed(1)} s (${lanSecs > 0 ? (lanMb / lanSecs).toStringAsFixed(2) : '0'} MB/s)",
+      );
 
       // 📡 WEBHOOK TRIGGER (Notificamos a la App destino que terminó)
       if (_successfulTransfers > 0 && !_cancelRequested) {
@@ -1629,6 +1674,15 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       setState(() => _totalFiles = files.length);
 
       final localDir = Directory(_selectedLocalPath!);
+      final HttpClient client = HttpClient(); // 3.1.05: Keep-Alive
+      List<String> localNames = <String>[];
+      try {
+        localNames = await localDir
+            .list(followLinks: false)
+            .where((e) => e is File)
+            .map((e) => lanBaseName(e.path))
+            .toList();
+      } catch (_) {}
       for (int i = 0; i < files.length; i++) {
         if (_cancelRequested) break;
         final fileName = files[i]['name'];
@@ -1640,13 +1694,16 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           }
         });
 
+        final dynamic remoteSize = (files[i] as Map)['size_bytes'];
         final saveFile = File(
-          '${localDir.path}${Platform.pathSeparator}$fileName',
+          '${localDir.path}${Platform.pathSeparator}${lanResolveName(localNames, '$fileName')}',
         );
 
         final bool isLrc = '$fileName'.toLowerCase().endsWith('.lrc');
         if (saveFile.existsSync()) {
-          if (!_overwriteExisting && !isLrc) {
+          if (!_overwriteExisting &&
+              !isLrc &&
+              (remoteSize == null || saveFile.lengthSync() == remoteSize)) {
             setState(() {
               _currentLog = "⏩ SALTADO (Ya existe): $fileName";
               if (_lanMobile) {
@@ -1671,7 +1728,6 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         }
 
         try {
-          final client = HttpClient();
           final request = await client.getUrl(
             Uri.parse(
               'http://$_selectedDeviceIp:$_restPort/api/download?file=${Uri.encodeComponent("$_selectedRemotePath/$fileName")}',
@@ -1700,7 +1756,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               _skippedTransfers++;
             }
           } else if (response.statusCode == 200) {
-            await response.pipe(saveFile.openWrite());
+            // 3.1.05: escritura atomica (.part y rename).
+            final File tmp = File('${saveFile.path}$lanPartSuffix');
+            await response.pipe(tmp.openWrite());
+            await tmp.rename(saveFile.path);
             _successfulTransfers++;
           } else if (_lanMobile) {
             _failedTransfers++;
@@ -1721,7 +1780,6 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           } else {
             _skippedTransfers++;
           }
-          client.close();
         } catch (_) {
           if (_lanMobile) {
             _failedTransfers++;
@@ -1746,6 +1804,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         await Future.delayed(const Duration(milliseconds: 15));
       }
+      client.close();
       _scanLocalMusicFolders();
       _loadFilesInFolder(_selectedLocalPath!);
     }
