@@ -60,7 +60,6 @@ MusicPickerScreen _picker(
     onEnqueue: (_) {},
     onUndo: (_) {},
     onPlayNext: (_) {},
-    onAddFolder: (_) {},
     onMixFolder: onMix,
   );
 }
@@ -163,9 +162,9 @@ void main() {
         expect(find.text('A'), findsOneWidget);
         await tester.enterText(find.byType(TextField), '');
         await tester.pump();
-        await tester.tap(find.text('Canciones'));
+        await tester.tap(find.byTooltip('Canciones'));
         await tester.pump();
-        await tester.tap(find.text('Carpetas'));
+        await tester.tap(find.byTooltip('Carpetas'));
         await tester.pump();
         expect(calls, 0);
         probe.value = true;
@@ -216,12 +215,12 @@ void main() {
     );
     await _settle(tester);
     final Finder salsaMix = find.descendant(
-      of: find.widgetWithText(ListTile, 'Salsa'),
+      of: find.widgetWithText(InkWell, 'Salsa'),
       matching: find.widgetWithText(TextButton, 'Mezclar todo'),
     );
     expect(tester.getSize(salsaMix).height, greaterThanOrEqualTo(48.0));
     expect(
-      tester.getSize(find.widgetWithText(TextButton, 'Carpetas')).height,
+      tester.getSize(find.byTooltip('Carpetas')).height,
       greaterThanOrEqualTo(48.0),
     );
 

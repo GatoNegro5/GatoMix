@@ -19,6 +19,13 @@ import '../../providers/theme_provider.dart';
 
 final automixSyncArmedProvider = StateProvider<bool>((ref) => false);
 
+/// Solo pruebas: fuerza el layout movil de Automix (null = segun plataforma).
+@visibleForTesting
+bool? debugAutomixForceMobile;
+
+bool automixIsMobile() =>
+    debugAutomixForceMobile ?? (Platform.isAndroid || Platform.isIOS);
+
 // =====================================================================
 // ROUTE 0: UNIFIED DJ WORKSPACE (IDE 3-PANEL REKORDBOX STYLE)
 // =====================================================================
@@ -51,7 +58,7 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
       }
     });
 
-    final bool compactLibrary = Platform.isAndroid || Platform.isIOS;
+    final bool compactLibrary = automixIsMobile();
     final Widget threeSelectorPanels = Row(
       children: [
         if (!compactLibrary) ...<Widget>[
@@ -74,7 +81,7 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
       ],
     );
 
-    final compact = Platform.isAndroid || Platform.isIOS;
+    final compact = automixIsMobile();
     final bool syncArmed = compact && ref.watch(automixSyncArmedProvider);
     return Column(
       children: [
@@ -95,16 +102,16 @@ class _AutomixWorkspaceState extends ConsumerState<AutomixWorkspace> {
 }
 
 class AutomixMobileLibrary extends ConsumerWidget {
-  final ScrollController? scrollController;
+  final VoidCallback? onClose;
 
-  const AutomixMobileLibrary({super.key, this.scrollController});
+  const AutomixMobileLibrary({super.key, this.onClose});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final List<File> queue = ref.watch(automixQueueProvider);
     return MusicPickerScreen(
       rootPath: gatomixMusicRoot(),
-      scrollController: scrollController,
+      onClose: onClose,
       queuePaths: <String>[for (final File file in queue) file.path],
       onEnqueue: (File file) {
         ref.read(playedTracksProvider.notifier).removeTrack(file.path);
@@ -124,12 +131,6 @@ class AutomixMobileLibrary extends ConsumerWidget {
         ref.read(playedTracksProvider.notifier).removeTrack(file.path);
         ref.read(automixQueueProvider.notifier).restoreQueue(paths);
         ref.read(automixProvider.notifier).syncDynamicPlaylist(paths);
-      },
-      onAddFolder: (List<File> files) {
-        for (final File file in files) {
-          ref.read(playedTracksProvider.notifier).removeTrack(file.path);
-        }
-        ref.read(automixQueueProvider.notifier).addAll(files);
       },
       onMixFolder: (List<File> files) async {
         if (files.isEmpty) return;
@@ -873,33 +874,24 @@ class AutomixPanel extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (Platform.isAndroid || Platform.isIOS)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: () {
-                      showMusicPickerSheet(
-                        context,
-                        child: (ScrollController controller) =>
-                            AutomixMobileLibrary(scrollController: controller),
-                      );
-                    },
-                    style: TextButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      visualDensity: VisualDensity.compact,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      minimumSize: const Size(0, 32),
-                    ),
-                    child: const Text(
-                      '+ Agregar canciones',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
               Row(
             children: [
+              // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
+              if (automixIsMobile()) ...<Widget>[
+                // Flexible: en anchos chicos se recorta con elipsis.
+                Flexible(
+                  child: MusicPickerAddButton(
+                    onPressed: () {
+                      showMusicPickerPanel(
+                        context,
+                        child: (VoidCallback close) =>
+                            AutomixMobileLibrary(onClose: close),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
               Icon(
                 Icons.shuffle,
                 color: const Color(0xFFFF007F),

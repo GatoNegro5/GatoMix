@@ -119,16 +119,16 @@ class LiveDjWorkspace extends ConsumerWidget {
 }
 
 class LiveDjMobileLibrary extends ConsumerWidget {
-  final ScrollController? scrollController;
+  final VoidCallback? onClose;
 
-  const LiveDjMobileLibrary({super.key, this.scrollController});
+  const LiveDjMobileLibrary({super.key, this.onClose});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final List<File> queue = ref.watch(liveDjProvider.select((s) => s.queue));
     return MusicPickerScreen(
       rootPath: gatomixMusicRoot(),
-      scrollController: scrollController,
+      onClose: onClose,
       queuePaths: <String>[for (final File file in queue) file.path],
       onEnqueue: (File file) {
         ref.read(liveDjProvider.notifier).addTrack(file);
@@ -137,9 +137,6 @@ class LiveDjMobileLibrary extends ConsumerWidget {
         ref.read(liveDjProvider.notifier).removeTrack(file.path);
       },
       onPlayNext: (File file) => _liveDjPlayNext(ref, file),
-      onAddFolder: (List<File> files) {
-        ref.read(liveDjProvider.notifier).addAllTracks(files);
-      },
       onMixFolder: (List<File> files) => _liveDjMix(ref, files),
     );
   }
@@ -1459,33 +1456,24 @@ class LiveDjCartridgePanel extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (liveDjIsMobile())
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: () {
-                      showMusicPickerSheet(
-                        context,
-                        child: (ScrollController controller) =>
-                            LiveDjMobileLibrary(scrollController: controller),
-                      );
-                    },
-                    style: TextButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      visualDensity: VisualDensity.compact,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      minimumSize: const Size(0, 32),
-                    ),
-                    child: const Text(
-                      '+ Agregar canciones',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
               Row(
             children: [
+              // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
+              if (liveDjIsMobile()) ...<Widget>[
+                // Flexible: en anchos chicos se recorta con elipsis.
+                Flexible(
+                  child: MusicPickerAddButton(
+                    onPressed: () {
+                      showMusicPickerPanel(
+                        context,
+                        child: (VoidCallback close) =>
+                            LiveDjMobileLibrary(onClose: close),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
               const Icon(Icons.shuffle, color: Colors.pinkAccent, size: 18),
               const SizedBox(width: 8),
               Expanded(

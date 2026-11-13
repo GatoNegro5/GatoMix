@@ -56,13 +56,12 @@ void main() {
               onEnqueue: (File f) => queued.add(f.path),
               onUndo: (File f) => queued.remove(f.path),
               onPlayNext: (_) {},
-              onAddFolder: (_) {},
               onMixFolder: (_) async {},
             ),
           ),
         );
         await tester.pump();
-        await tester.tap(find.text('Canciones'));
+        await tester.tap(find.byTooltip('Canciones'));
         await tester.pump();
         // La lista recursiva corre en Isolate.run (v3.0.48): esperar en tiempo real.
         await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 500)));

@@ -302,27 +302,85 @@ File? musicPickerCover(File audio) {
   return null;
 }
 
-Future<void> showMusicPickerSheet(
+/// 3.1.25: ancho del panel lateral (45 % de la pantalla, 340..420 dp).
+double musicPickerPanelWidth(double screenWidth) =>
+    (screenWidth * 0.45).clamp(340.0, 420.0).toDouble();
+
+/// 3.1.25: explorador movil como panel derecho de alto completo. La barrera
+/// translucida deja ver el deck y tocar fuera cierra. El panel trae su propio
+/// ScaffoldMessenger para que "Deshacer" salga dentro del panel.
+Future<void> showMusicPickerPanel(
   BuildContext context, {
-  required Widget Function(ScrollController controller) child,
+  required Widget Function(VoidCallback onClose) child,
 }) {
-  return showModalBottomSheet<void>(
+  return showGeneralDialog<void>(
     context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: _bg,
-    builder: (BuildContext ctx) {
-      return DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.92,
-        minChildSize: 0.25,
-        maxChildSize: 0.92,
-        builder: (BuildContext context, ScrollController controller) {
-          return child(controller);
-        },
+    barrierDismissible: true,
+    barrierLabel: 'Cerrar',
+    barrierColor: const Color(0x66000000),
+    transitionDuration: const Duration(milliseconds: 200),
+    pageBuilder:
+        (BuildContext ctx, Animation<double> _, Animation<double> _) {
+      final double width = musicPickerPanelWidth(MediaQuery.sizeOf(ctx).width);
+      return Align(
+        alignment: Alignment.centerRight,
+        child: SizedBox(
+          width: width,
+          height: double.infinity,
+          child: ScaffoldMessenger(
+            child: Scaffold(
+              backgroundColor: _bg,
+              body: SafeArea(
+                left: false,
+                child: child(() => Navigator.of(ctx).pop()),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+    transitionBuilder:
+        (
+          BuildContext ctx,
+          Animation<double> animation,
+          Animation<double> _,
+          Widget panel,
+        ) {
+      return SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(1, 0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic)),
+        child: panel,
       );
     },
   );
+}
+
+/// 3.1.25: "+ Agregar canciones" de 48 px para la fila de cabecera de
+/// Automix y Live DJ (sin densidad compacta).
+class MusicPickerAddButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const MusicPickerAddButton({super.key, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        minimumSize: const Size(48, 48),
+        tapTargetSize: MaterialTapTargetSize.padded,
+      ),
+      child: const Text(
+        '+ Agregar canciones',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
 }
 
 class MusicPickerScreen extends StatefulWidget {
@@ -332,8 +390,8 @@ class MusicPickerScreen extends StatefulWidget {
   final void Function(File file) onEnqueue;
   final void Function(File file) onUndo;
   final void Function(File file) onPlayNext;
-  final void Function(List<File> files) onAddFolder;
   final Future<void> Function(List<File> files) onMixFolder;
+  final VoidCallback? onClose;
 
   const MusicPickerScreen({
     super.key,
@@ -342,9 +400,9 @@ class MusicPickerScreen extends StatefulWidget {
     required this.onEnqueue,
     required this.onUndo,
     required this.onPlayNext,
-    required this.onAddFolder,
     required this.onMixFolder,
     this.scrollController,
+    this.onClose,
   });
 
   @override
@@ -542,150 +600,196 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
 
     return Scaffold(
       backgroundColor: _bg,
-      body: CustomScrollView(
-        controller: widget.scrollController,
-        slivers: <Widget>[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-              child: TextField(
-                controller: _search,
-                style: _titleStyle,
-                cursorColor: _text,
-                decoration: const InputDecoration(
-                  hintText: 'Buscar',
-                  hintStyle: _metaStyle,
-                  prefixIcon: Icon(Icons.search, color: _muted),
-                  filled: true,
-                  fillColor: _card,
-                  border: OutlineInputBorder(
-                    borderSide: BorderSide.none,
-                    borderRadius: BorderRadius.all(Radius.circular(8)),
-                  ),
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 12),
-                ),
-                onChanged: (String v) => setState(() {
-                  if (v.trim().isNotEmpty) _tab = 1;
-                }),
-              ),
-            ),
-          ),
-          if (!_atRoot)
-            SliverToBoxAdapter(
+      body: Column(
+        children: <Widget>[
+          // 3.1.25: una sola barra de 48 px (Atras, buscador, pestanas,
+          // Cerrar); la carpeta actual va en el hint del buscador.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: SizedBox(
+              height: 48,
               child: Row(
                 children: <Widget>[
-                  IconButton(
-                    tooltip: 'Atrás',
-                    onPressed: _up,
-                    icon: const Icon(Icons.arrow_back, color: _text),
-                  ),
+                  if (!_atRoot)
+                    IconButton(
+                      tooltip: 'Atrás',
+                      onPressed: _up,
+                      style: IconButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                      ),
+                      icon: const Icon(Icons.arrow_back, color: _text),
+                    ),
                   Expanded(
-                    child: Text(
-                      here,
+                    child: TextField(
+                      controller: _search,
                       style: _titleStyle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      cursorColor: _text,
+                      decoration: InputDecoration(
+                        hintText: 'Buscar en $here',
+                        hintStyle: _metaStyle.copyWith(
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        hintMaxLines: 1,
+                        prefixIcon: const Icon(
+                          Icons.search,
+                          color: _muted,
+                          size: 20,
+                        ),
+                        prefixIconConstraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                        filled: true,
+                        fillColor: _card,
+                        border: const OutlineInputBorder(
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.all(Radius.circular(8)),
+                        ),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 10,
+                        ),
+                      ),
+                      onChanged: (String v) => setState(() {
+                        if (v.trim().isNotEmpty) _tab = 1;
+                      }),
                     ),
                   ),
+                  _tabButton(Icons.folder, 'Carpetas', 0),
+                  _tabButton(Icons.music_note, 'Canciones', 1),
+                  if (widget.onClose != null)
+                    IconButton(
+                      tooltip: 'Cerrar',
+                      onPressed: widget.onClose,
+                      style: IconButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                      ),
+                      icon: const Icon(Icons.close, color: _text),
+                    ),
                 ],
               ),
             ),
-          SliverToBoxAdapter(
-            child: Row(
-              children: <Widget>[
-                Expanded(child: _tabButton('Carpetas', 0)),
-                Expanded(child: _tabButton('Canciones', 1)),
-              ],
-            ),
           ),
-          if (!readable)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: Center(
-                child: Text(
-                  'No se pudo leer la carpeta de música',
-                  style: _metaStyle,
-                ),
-              ),
-            )
-          else if (pending)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Center(child: CircularProgressIndicator(color: _muted)),
-              ),
-            )
-          else if (showFolders)
-            SliverList(
-              delegate: SliverChildBuilderDelegate((
-                BuildContext context,
-                int index,
-              ) {
-                final String path = folders[index];
-                final int? n = _counts[path];
-                final bool mixing = _mixing.contains(path);
-                return ListTile(
-                  leading: const Icon(Icons.folder, color: _text, size: 28),
-                  title: Text(
-                    _pickerName(path),
-                    style: _titleStyle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: Text(
-                    n == null ? '...' : '$n canciones',
-                    style: _metaStyle,
-                  ),
-                  trailing: TextButton(
-                    style: TextButton.styleFrom(
-                      // Gris mientras resuelve; el boton sigue tomando el
-                      // toque para que no abra la carpeta por debajo.
-                      foregroundColor: mixing ? _muted : _text,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(48, 48),
+          Expanded(
+            child: CustomScrollView(
+              controller: widget.scrollController,
+              slivers: <Widget>[
+              if (!readable)
+                const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Center(
+                    child: Text(
+                      'No se pudo leer la carpeta de música',
+                      style: _metaStyle,
                     ),
-                    onPressed: () => _mix(path),
-                    child: const Text('Mezclar todo', maxLines: 1),
                   ),
-                  onTap: () => _openFolder(path),
-                );
-              }, childCount: folders.length),
-            )
-          else
-            SliverList(
-              delegate: SliverChildBuilderDelegate((
-                BuildContext context,
-                int index,
-              ) {
-                final File song = songs[index];
-                return _SongRow(
-                  file: song,
-                  cover: _covers[song.path],
-                  lrc: _lrc.contains(song.path),
-                  onTap: () => _enqueue(song),
-                  onPlayNext: () => widget.onPlayNext(song),
-                );
-              }, childCount: songs.length),
-            ),
-          // Espacio para que el aviso "Agregada a la cola" no tape la última
-          // canción.
-          const SliverToBoxAdapter(child: SizedBox(height: 72)),
-        ],
-      ),
+                )
+              else if (pending)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: CircularProgressIndicator(color: _muted)),
+                  ),
+                )
+              else if (showFolders)
+                SliverList(
+                  delegate: SliverChildBuilderDelegate((
+                    BuildContext context,
+                    int index,
+                  ) {
+                    final String path = folders[index];
+                    final int? n = _counts[path];
+                    final bool mixing = _mixing.contains(path);
+                    // 3.1.25: fila de 56 dp (antes 72 dp).
+                    return Material(
+                      color: _bg,
+                      child: InkWell(
+                        onTap: () => _openFolder(path),
+                        child: SizedBox(
+                          height: 56,
+                          child: Row(
+                            children: <Widget>[
+                              const SizedBox(width: 12),
+                              const Icon(Icons.folder, color: _text, size: 28),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    Text(
+                                      _pickerName(path),
+                                      style: _titleStyle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    Text(
+                                      n == null ? '...' : '$n canciones',
+                                      style: _metaStyle,
+                                      maxLines: 1,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  // Gris mientras resuelve; el boton sigue tomando
+                                  // el toque para que no abra la carpeta por debajo.
+                                  foregroundColor: mixing ? _muted : _text,
+                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  minimumSize: const Size(48, 48),
+                                ),
+                                onPressed: () => _mix(path),
+                                child: const Text('Mezclar todo', maxLines: 1),
+                              ),
+                              const SizedBox(width: 4),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }, childCount: folders.length),
+                )
+              else
+                SliverList(
+                  delegate: SliverChildBuilderDelegate((
+                    BuildContext context,
+                    int index,
+                  ) {
+                    final File song = songs[index];
+                    return _SongRow(
+                      file: song,
+                      cover: _covers[song.path],
+                      lrc: _lrc.contains(song.path),
+                      onTap: () => _enqueue(song),
+                      onPlayNext: () => widget.onPlayNext(song),
+                    );
+                  }, childCount: songs.length),
+                ),
+              // Espacio para que el aviso "Agregada a la cola" no tape la última
+              // canción.
+              const SliverToBoxAdapter(child: SizedBox(height: 72)),
+            ],
+          ),
+        ),
+      ],
+    ),
     );
   }
 
-  Widget _tabButton(String label, int index) {
+  /// 3.1.25: pestana de 48x48 con icono; el tooltip da el nombre (y la
+  /// semantica) para no robarle ancho al buscador.
+  Widget _tabButton(IconData icon, String label, int index) {
     final bool selected = _tab == index;
-    return TextButton(
-      style: TextButton.styleFrom(
-        foregroundColor: selected ? _text : _muted,
-        minimumSize: const Size(48, 48),
-        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-      ),
+    return IconButton(
+      tooltip: label,
+      isSelected: selected,
       onPressed: () => setState(() => _tab = index),
-      child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      style: IconButton.styleFrom(
+        backgroundColor: selected ? _card : Colors.transparent,
+        minimumSize: const Size(48, 48),
+      ),
+      icon: Icon(icon, color: selected ? _text : _muted),
     );
   }
 }
@@ -729,7 +833,7 @@ class _SongRow extends StatelessWidget {
         onTap: onTap,
         onLongPress: onPlayNext,
         child: SizedBox(
-          height: 64,
+          height: 56,
           child: Row(
             children: <Widget>[
               const SizedBox(width: 12),

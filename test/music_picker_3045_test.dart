@@ -55,7 +55,6 @@ void main() {
               onEnqueue: (File file) => queued.add(file.path),
               onUndo: (File file) => queued.remove(file.path),
               onPlayNext: (File file) => next.add(file.path),
-              onAddFolder: (_) {},
               onMixFolder: (List<File> files) async {
                 mixed.add(files.length);
               },
@@ -64,9 +63,9 @@ void main() {
         );
         await _settle(tester);
         expect(tester.takeException(), isNull);
-        expect(find.text('Buscar'), findsOneWidget);
-        expect(find.text('Carpetas'), findsOneWidget);
-        expect(find.text('Canciones'), findsOneWidget);
+        expect(find.text('Buscar en M\u00fasica'), findsOneWidget);
+        expect(find.byTooltip('Carpetas'), findsOneWidget);
+        expect(find.byTooltip('Canciones'), findsOneWidget);
         expect(find.textContaining('toca para ver'), findsNothing);
         expect(find.text('▶ Mezclar'), findsNothing);
         expect(find.textContaining('_K'), findsNothing);
@@ -87,9 +86,9 @@ void main() {
 
         await tester.tap(find.byIcon(Icons.arrow_back));
         await _settle(tester);
-        expect(find.text('Carpetas'), findsOneWidget);
+        expect(find.byTooltip('Carpetas'), findsOneWidget);
 
-        await tester.tap(find.text('Canciones'));
+        await tester.tap(find.byTooltip('Canciones'));
         await tester.pump();
         // 3.0.48: en la raíz la lista es recursiva y se calcula async.
         await tester.runAsync(
