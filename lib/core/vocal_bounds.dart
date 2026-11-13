@@ -9,12 +9,17 @@ class VocalBounds {
   const VocalBounds(this.cueInMs, this.mixOutMs);
 }
 
+/// Letra de otra versión: la última línea llega o pasa el final real del audio.
+/// Sin medición (exactMs <= 0) no se puede afirmar y devuelve false.
+bool lyricPastAudio({required int lastLyricMs, required int exactMs}) =>
+    exactMs > 0 && lastLyricMs >= exactMs;
+
 VocalBounds? vocalBounds({
   required int firstMs,
   required int lastMs,
   required int exactMs,
 }) {
-  if (exactMs > 0 && lastMs >= exactMs) return null;
+  if (lyricPastAudio(lastLyricMs: lastMs, exactMs: exactMs)) return null;
   int cueIn = firstMs - 5000;
   if (cueIn < 0) cueIn = 0;
   int mixOut = lastMs + 1000;

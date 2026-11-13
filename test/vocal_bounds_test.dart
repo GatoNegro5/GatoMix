@@ -19,4 +19,9 @@ void main() {
     expect(vocalBounds(firstMs: 3000, lastMs: 100000, exactMs: 160000)!.cueInMs, 0);
     expect(vocalBounds(firstMs: 3000, lastMs: 100000, exactMs: 0)!.mixOutMs, 101000);
   });
+  test('lyricPastAudio: Bacilos sí, Santorini no, sin medición no', () {
+    expect(lyricPastAudio(lastLyricMs: 285380, exactMs: 254783), isTrue);
+    expect(lyricPastAudio(lastLyricMs: 153110, exactMs: 154391), isFalse);
+    expect(lyricPastAudio(lastLyricMs: 153110, exactMs: 0), isFalse);
+  });
 }

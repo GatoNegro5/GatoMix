@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:gatomix/src/rust/api/core_dsp.dart' as rust_dsp;
 
 import '../core/hal/platform_strategy.dart';
+import '../core/vocal_bounds.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/mix_pause.dart';
@@ -880,8 +881,15 @@ class AutomixNotifier extends Notifier<AutomixState> {
           trackPathLower.contains('cumbia') ||
           trackPathLower.contains('merengue');
 
-      if (state.lyrics.isNotEmpty) {
-        final lastLyricMs = state.lyrics.last.timestamp.inMilliseconds;
+      final int lastLyricMs = state.lyrics.isNotEmpty
+          ? state.lyrics.last.timestamp.inMilliseconds
+          : -1;
+      // 3.1.03: letra de otra versión (llega o pasa el final real) -> decide el ADN.
+      if (state.lyrics.isNotEmpty &&
+          !lyricPastAudio(
+            lastLyricMs: lastLyricMs,
+            exactMs: state.duration.inMilliseconds,
+          )) {
         safeMixOutMs = lastLyricMs + 1500;
       } else {
         final int tailMs = TrackTags.peek(state.currentTrackPath)?.tailMs ?? 0;

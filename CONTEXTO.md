@@ -10,7 +10,7 @@ Revisado 4-nov-2026 contra git y código. "(no verificable)" = no se pudo compro
 | Carpeta | `C:\GatoMix` (laptop) · `/workspace/GatoMix` (box) |
 | Integración | Gabriel fusiona a `qa/v20`/`main` y crea los tags. Ningún agente ni bot |
 | Publicada | **v3.0.47+66** · `b522a40` · tag `v3.0.47` (sin prueba en celular; explorador roto) |
-| Local laptop (sin push) | **3.1.02** (pubspec `3.1.2+30102`) · HEAD de `v3029` · sin push ni tag |
+| Local laptop (sin push) | **3.1.03** (pubspec `3.1.3+30103`) · HEAD de `v3029` · sin push ni tag |
 | Rama de trabajo | `cursor/v3029-bpm-duracion-radio` (todo el trabajo desde 3.0.29) |
 | main | `origin/main` en `6ca12f4`, **93 commits atrás**; `qa/v20` sin fusiones |
 | Ramas viejas (7) | `cursor/contexto-lecciones`, `cursor/masterizar-dispositivo-0119`, `cursor/music-library-discovery-734a`, `cursor/pull-release-assets-a1da`, `cursor/radio-lista-3025-3b35`, `fix/dup-3022`, `qa/v20` — limpiar solo con OK de Gabriel |
@@ -88,7 +88,7 @@ Android/iOS: orientación forzada a horizontal y wakelock activo (`lib/main.dart
 5. Fusionar la rama a `qa/v20`/`main` y limpiar las 7 ramas viejas (decide Gabriel).
 6. Bajón de volumen en la primera mezcla de Live DJ (no verificable). ¿MP3 320 kbps en móvil? (no verificable).
 7. Re-auditar BPM de 80s Inglés tras 3.0.31 (meta ±0,05); umbrales 0,05 (onset) y 60 ms (residuo); archivos >26 MB y megamixes >15 min.
-8. `automix_provider.dart:884`: validar que `lastMs + 1500` no supere `exactDurationMs` cuando un `.lrc` viene desfasado (caso Bacilos). Probar en celular: LAME Android, EQ adaptativa, duración exacta.
+8. Probar en celular: LAME Android, EQ adaptativa, duración exacta.
 9. Lote de karaoke `_K` en la laptop: estado desconocido.
 
 ## Notas de entorno (box)
@@ -149,5 +149,7 @@ Riesgo: 1920px / Mac 13" / móvil / audible
   Se elimina: NADA
 - 3.1.01 (pubspec `3.1.1+30101`, `7c0e261`): nuevo versionado 3.X.YY sin +N (Ley 5); `AppVersionLabel.format()` muestra `3.1.01 (sha)`.
   Se conserva: firma de `format()`, estilo 11 px white38, entradas 3.0.xx+N. Se elimina: NADA (solo el texto "build N" visible)
-- 3.1.02 (pubspec `3.1.2+30102`): cues automáticos de la letra con la duración exacta en ms (sin redondeo a segundos); reglas en `lib/core/vocal_bounds.dart` (+ test con datos reales). Letra con última línea >= duración real (otra versión) no escribe cues en Isar. Rama <3 s: `exactMs - 4000` (antes `totalRound - 4000`).
+- 3.1.02 (pubspec `3.1.2+30102`, `85ab67e`): cues automáticos de la letra con la duración exacta en ms (sin redondeo a segundos); reglas en `lib/core/vocal_bounds.dart` (+ test con datos reales). Letra con última línea >= duración real (otra versión) no escribe cues en Isar. Rama <3 s: `exactMs - 4000` (antes `totalRound - 4000`).
   Se conserva: ramas >15 s y normal, salida con cues manuales, `isManualCue: false`, `_getLocalDurationSec` para matching de letra, exact_mix/Automix/Live DJ. Se elimina: NADA
+- 3.1.03 (pubspec `3.1.3+30103`): Automix ignora la última línea de la letra si llega o pasa la duración exacta (`lyricPastAudio` en `vocal_bounds.dart`) y decide el ADN; antes el mixOut quedaba tras el final (Bacilos 286880 vs 254783) y sin plan no había crossfade.
+  Se conserva: `lastLyricMs + 1500` en letras sanas, rama ADN, SET IN/OUT, plan del outro (clamp 1040), disparos 1790/1852. Se elimina: NADA
