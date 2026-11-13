@@ -354,6 +354,7 @@ struct Biquad {
 }
 
 impl Biquad {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn run(&mut self, input: &[f32]) -> Vec<f64> {
         let mut out = Vec::with_capacity(input.len());
         for &s in input {
@@ -383,6 +384,7 @@ impl Biquad {
 }
 
 /// Filtro K (ITU-R BS.1770): shelf de agudos + pasa-altos, para cualquier fs.
+#[cfg_attr(not(test), allow(dead_code))]
 fn k_weight(input: &[f32], fs: f64) -> Vec<f64> {
     let pi = std::f64::consts::PI;
     // Etapa 1: high shelf
@@ -431,6 +433,7 @@ fn k_weight(input: &[f32], fs: f64) -> Vec<f64> {
 }
 
 /// Sonoridad integrada (LUFS) con compuertas absoluta y relativa (BS.1770-4).
+#[cfg_attr(not(test), allow(dead_code))]
 fn integrated_lufs(d: &Decoded) -> f64 {
     let fs = d.rate as f64;
     let weighted: Vec<Vec<f64>> = d.ch.iter().map(|c| k_weight(c, fs)).collect();
@@ -452,6 +455,11 @@ fn integrated_lufs(d: &Decoded) -> f64 {
         zs.push(z);
         start += step;
     }
+    lufs_from_blocks(&zs)
+}
+
+/// Compuertas absoluta (-70) y relativa (-10) sobre los bloques de 400 ms.
+fn lufs_from_blocks(zs: &[f64]) -> f64 {
     let lk = |z: f64| -0.691 + 10.0 * z.max(1e-12).log10();
     let abs_gated: Vec<f64> = zs.iter().copied().filter(|z| lk(*z) > -70.0).collect();
     if abs_gated.is_empty() {
@@ -467,6 +475,7 @@ fn integrated_lufs(d: &Decoded) -> f64 {
 }
 
 /// Silencio inicial y final (ms) con ventanas de 10 ms y umbral de -50 dBFS.
+#[cfg_attr(not(test), allow(dead_code))]
 fn edge_silence_ms(mono: &[f32], rate: u32) -> (u64, u64) {
     let win = (rate as usize / 100).max(1);
     let thr = 10f64.powf(-50.0 / 20.0);
@@ -938,8 +947,20 @@ fn estimate_tempo_in(
     display_lo: f64,
     display_hi: f64,
 ) -> Option<crate::bpm_exact::TempoGrid> {
+    let odf = complex_odf(mono, rate)?;
+    estimate_tempo_envs(odf, onset_envelope(mono, rate), rate, display_lo, display_hi)
+}
+
+/// 3.1.09: el mismo estimador sobre envolventes ya calculadas (lote o streaming).
+fn estimate_tempo_envs(
+    odf_in: (Vec<f64>, f64),
+    fine_in: Option<(Vec<f64>, f64)>,
+    rate: u32,
+    display_lo: f64,
+    display_hi: f64,
+) -> Option<crate::bpm_exact::TempoGrid> {
     let debug = std::env::var_os("GMX_BPM_DEBUG").is_some();
-    let (odf, env_rate) = complex_odf(mono, rate)?;
+    let (odf, env_rate) = odf_in;
     // Inducción más ancha que la visualización, para que el peine vea el tactus
     // y sus armónicos. El plegado a 60–180 es aparte y solo usa ×2 / ÷2.
     let min_lag = (env_rate * 60.0 / 240.0).round().max(2.0) as usize;
@@ -1037,7 +1058,7 @@ fn estimate_tempo_in(
     if !(coarse.is_finite() && coarse > 0.0) {
         return None;
     }
-    let (fine, fine_rate) = onset_envelope(mono, rate).unwrap_or((odf.clone(), env_rate));
+    let (fine, fine_rate) = fine_in.unwrap_or((odf.clone(), env_rate));
     // ×2, ×1/2, ×4/3 y ×3/4 solo si superan al peine por más de 1,5×.
     // Por debajo de 75, ×1,5 (6/8, 12/8). No hay ×2 ahí: rompe 60,25 y 62.
     // Por encima de 150, el doble del peine solo se queda si la evidencia
@@ -1170,6 +1191,8 @@ struct Analysis {
     lead_ms: u64,
     tail_ms: u64,
     grid: Option<crate::bpm_exact::TempoGrid>,
+    /// 3.1.09: "FULL" o "INTRO" (rejilla medida sobre un recorte inicial).
+    grid_scope: &'static str,
 }
 
 fn analyze_file(input_path: &str) -> Result<Analysis, String> {
@@ -1180,6 +1203,13 @@ fn analyze_file(input_path: &str) -> Result<Analysis, String> {
     let _prio = PriorityGuard::enter();
     let _watch = CancelWatch::enter();
     cancel_now()?;
+    // 3.1.09: por paquetes, sin tope de 900 s y sin guardar el PCM.
+    analyze_stream(input_path, true)
+}
+
+/// Analisis en lote (el de antes de 3.1.09), solo para la prueba de equivalencia.
+#[cfg(test)]
+fn analyze_batch(input_path: &str) -> Result<Analysis, String> {
     let d = decode_channels(input_path, 0, MAX_ANALYZE_SECS, 2)?;
     let mut peak = 0.0f64;
     for c in &d.ch {
@@ -1200,7 +1230,375 @@ fn analyze_file(input_path: &str) -> Result<Analysis, String> {
         lead_ms,
         tail_ms,
         grid,
+        grid_scope: "FULL",
     })
+}
+
+/// 3.1.09: envolvente de onsets por paquetes. Mismo calculo que
+/// `complex_odf_hop`, cuadro a cuadro, con solo `n_fft` muestras en memoria.
+struct OdfStream {
+    rate: u32,
+    n_fft: usize,
+    hop: usize,
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    hann: Vec<f32>,
+    pending: Vec<f32>,
+    mag1: Vec<f32>,
+    mag2: Vec<f32>,
+    ph1: Vec<f32>,
+    ph2: Vec<f32>,
+    buf: Vec<rustfft::num_complex::Complex32>,
+    odf: Vec<f64>,
+    total: usize,
+    cancelled: bool,
+}
+
+impl OdfStream {
+    fn new(rate: u32, hop_at_44100: f64) -> Self {
+        let (n_fft, hop) = odf_stft_hop(rate, hop_at_44100);
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(n_fft);
+        let hann: Vec<f32> = (0..n_fft)
+            .map(|i| {
+                let x = 2.0 * std::f32::consts::PI * i as f32 / n_fft as f32;
+                0.5 - 0.5 * x.cos()
+            })
+            .collect();
+        let half = n_fft / 2;
+        OdfStream {
+            rate,
+            n_fft,
+            hop,
+            fft,
+            hann,
+            pending: Vec::with_capacity(n_fft),
+            mag1: vec![0f32; half + 1],
+            mag2: vec![0f32; half + 1],
+            ph1: vec![0f32; half + 1],
+            ph2: vec![0f32; half + 1],
+            buf: vec![rustfft::num_complex::Complex32::new(0.0, 0.0); n_fft],
+            odf: Vec::new(),
+            total: 0,
+            cancelled: false,
+        }
+    }
+
+    fn push(&mut self, v: f32) {
+        self.total += 1;
+        if self.cancelled || self.rate < 8000 || self.hop == 0 {
+            return;
+        }
+        self.pending.push(v);
+        if self.pending.len() < self.n_fft {
+            return;
+        }
+        let frame = self.odf.len();
+        // 32 cuadros de STFT quedan muy por debajo de 50 ms de trabajo.
+        if frame % 32 == 0 && cancel_now().is_err() {
+            self.cancelled = true;
+            return;
+        }
+        for i in 0..self.n_fft {
+            self.buf[i] =
+                rustfft::num_complex::Complex32::new(self.pending[i] * self.hann[i], 0.0);
+        }
+        self.fft.process(&mut self.buf);
+        let half = self.n_fft / 2;
+        let mut eta = 0.0f64;
+        for k in 1..=half {
+            let re = self.buf[k].re;
+            let im = self.buf[k].im;
+            let mag = re.hypot(im);
+            let ph = im.atan2(re);
+            if frame >= 2 {
+                let pred_ph = 2.0 * self.ph1[k] - self.ph2[k];
+                let pred_re = self.mag1[k] * pred_ph.cos();
+                let pred_im = self.mag1[k] * pred_ph.sin();
+                eta += (re - pred_re).hypot(im - pred_im) as f64;
+            }
+            self.mag2[k] = self.mag1[k];
+            self.ph2[k] = self.ph1[k];
+            self.mag1[k] = mag;
+            self.ph1[k] = ph;
+        }
+        self.odf.push(if eta.is_finite() { eta } else { 0.0 });
+        self.pending.drain(..self.hop);
+    }
+
+    /// Mismas condiciones y cantidad de cuadros que `complex_odf_hop`.
+    fn finish(mut self) -> Option<(Vec<f64>, f64)> {
+        if self.cancelled
+            || self.rate < 8000
+            || self.total < self.n_fft.saturating_mul(4)
+            || self.hop == 0
+        {
+            return None;
+        }
+        let frames = (self.total - self.n_fft) / self.hop;
+        if frames < 64 {
+            return None;
+        }
+        self.odf.truncate(frames);
+        Some((self.odf, self.rate as f64 / self.hop as f64))
+    }
+}
+
+struct KChan {
+    s1: Biquad,
+    s2: Biquad,
+    ring: Vec<f64>,
+}
+
+/// 3.1.09: acumulador por paquetes de `analyze_file` y de la rejilla FULL.
+/// Mismos numeros que el lote (pico, LUFS BS.1770, silencios de 10 ms y las
+/// dos envolventes de onsets) sin guardar el PCM: RAM fija + envolventes.
+struct StreamAnalysis {
+    rate: u32,
+    levels: bool,
+    peak: f64,
+    kch: Vec<KChan>,
+    block: usize,
+    step: usize,
+    n: usize,
+    zs: Vec<f64>,
+    win: usize,
+    thr: f64,
+    wacc: f64,
+    wcnt: usize,
+    widx: usize,
+    first: Option<usize>,
+    last: Option<usize>,
+    odf: OdfStream,
+    fine: OdfStream,
+}
+
+impl StreamAnalysis {
+    fn new(rate: u32, nch: usize, levels: bool) -> Self {
+        let fs = rate as f64;
+        let block = (fs * 0.400) as usize;
+        let kch = if levels {
+            (0..nch)
+                .map(|_| {
+                    let (s1, s2) = k_stages(fs);
+                    KChan {
+                        s1,
+                        s2,
+                        ring: vec![0.0; block.max(1)],
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        StreamAnalysis {
+            rate,
+            levels,
+            peak: 0.0,
+            kch,
+            block,
+            step: (fs * 0.100) as usize,
+            n: 0,
+            zs: Vec::new(),
+            win: (rate as usize / 100).max(1),
+            thr: 10f64.powf(-50.0 / 20.0),
+            wacc: 0.0,
+            wcnt: 0,
+            widx: 0,
+            first: None,
+            last: None,
+            odf: OdfStream::new(rate, 512.0),
+            fine: OdfStream::new(rate, 256.0),
+        }
+    }
+
+    /// Un cuadro (1 o 2 canales, sin mezclar).
+    fn push(&mut self, frame: &[f32]) {
+        if self.levels {
+            for &v in frame {
+                let a = (v as f64).abs();
+                if a > self.peak {
+                    self.peak = a;
+                }
+            }
+            if self.block > 0 {
+                let pos = self.n % self.block;
+                for (ch, &v) in self.kch.iter_mut().zip(frame) {
+                    ch.ring[pos] = ch.s2.tick(ch.s1.tick(v as f64));
+                }
+            }
+        }
+        self.n += 1;
+        let k = frame.len() as f32;
+        let m = frame.iter().copied().sum::<f32>() / k;
+        if self.levels {
+            // Bloque de 400 ms cada 100 ms, sumado en el mismo orden que el lote.
+            if self.block > 0
+                && self.step > 0
+                && self.n >= self.block
+                && (self.n - self.block) % self.step == 0
+            {
+                let head = self.n % self.block;
+                let mut z = 0.0;
+                for ch in &self.kch {
+                    let ms: f64 = ch.ring[head..]
+                        .iter()
+                        .chain(ch.ring[..head].iter())
+                        .map(|v| v * v)
+                        .sum::<f64>()
+                        / self.block as f64;
+                    z += ms;
+                }
+                self.zs.push(z);
+            }
+            self.wacc += (m as f64) * (m as f64);
+            self.wcnt += 1;
+            if self.wcnt == self.win {
+                let rms = (self.wacc / self.win as f64).sqrt();
+                if rms > self.thr {
+                    if self.first.is_none() {
+                        self.first = Some(self.widx);
+                    }
+                    self.last = Some(self.widx);
+                }
+                self.widx += 1;
+                self.wacc = 0.0;
+                self.wcnt = 0;
+            }
+        }
+        self.odf.push(m);
+        self.fine.push(m);
+    }
+
+    fn finish(self) -> Analysis {
+        let lufs = if self.n < self.block || self.step == 0 || self.zs.is_empty() {
+            -70.0
+        } else {
+            lufs_from_blocks(&self.zs)
+        };
+        let (lead_ms, tail_ms) = match (self.first, self.last) {
+            (Some(f), Some(l)) if self.widx >= 10 => {
+                ((f as u64) * 10, ((self.widx - 1 - l) as u64) * 10)
+            }
+            _ => (0, 0),
+        };
+        let peak = self.peak;
+        let rate = self.rate;
+        let cut_odf = (self.odf.total, self.odf.n_fft, self.odf.hop);
+        let cut_fine = (self.fine.total, self.fine.n_fft, self.fine.hop);
+        let long = cut_odf.0 > MAX_ANALYZE_SECS as usize * rate as usize;
+        let fine = self.fine.finish();
+        let odf = self.odf.finish();
+        let est = |o: (Vec<f64>, f64), f: Option<(Vec<f64>, f64)>| {
+            estimate_tempo_envs(o, f, rate, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI)
+        };
+        let mut grid_scope = "FULL";
+        let grid = match odf {
+            None => None,
+            Some(o) if !long => est(o, fine),
+            Some(o) => {
+                // 3.1.09 (Gabriel): un megamix largo puede no pasar
+                // tempo_rejected entero. Cascada sobre las mismas envolventes,
+                // sin volver a decodificar: primeros 900 s, luego 60 s
+                // (intro de la primera cancion). Un recorte se sella INTRO.
+                let mut g = est(o.clone(), fine.clone());
+                if g.is_none() {
+                    for secs in [MAX_ANALYZE_SECS, 60] {
+                        let samples = secs as usize * rate as usize;
+                        let Some(oc) = cut_env(&o, samples, cut_odf.1, cut_odf.2) else {
+                            continue;
+                        };
+                        let fc = fine
+                            .as_ref()
+                            .and_then(|f| cut_env(f, samples, cut_fine.1, cut_fine.2));
+                        g = est(oc, fc);
+                        if g.is_some() {
+                            grid_scope = "INTRO";
+                            break;
+                        }
+                    }
+                }
+                g
+            }
+        };
+        Analysis {
+            lufs,
+            peak,
+            lead_ms,
+            tail_ms,
+            grid,
+            grid_scope,
+        }
+    }
+}
+
+/// 3.1.09: primeros `samples` de una envolvente: los mismos cuadros que el
+/// lote daria decodificando solo ese tramo ((samples - n_fft) / hop).
+fn cut_env(env: &(Vec<f64>, f64), samples: usize, n_fft: usize, hop: usize) -> Option<(Vec<f64>, f64)> {
+    if hop == 0 || samples < n_fft.saturating_mul(4) {
+        return None;
+    }
+    let frames = ((samples - n_fft) / hop).min(env.0.len());
+    if frames < 64 {
+        return None;
+    }
+    Some((env.0[..frames].to_vec(), env.1))
+}
+
+/// 3.1.09: decodifica paquete a paquete (todo el archivo) y alimenta el
+/// acumulador. `levels` = false solo mide la rejilla.
+fn analyze_stream(input_path: &str, levels: bool) -> Result<Analysis, String> {
+    let (mut format, track_id, params) = open_format(input_path)?;
+    let rate = params.sample_rate.ok_or("Sin frecuencia de muestreo")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .map_err(|e| e.to_string())?;
+    let mut acc: Option<StreamAnalysis> = None;
+    let mut keep = 0usize;
+    let mut fr = [0f32; 2];
+    let mut since_check = 0usize;
+    loop {
+        cancel_now()?;
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let spec = *decoded.spec();
+                let n_ch = spec.channels.count().max(1);
+                if acc.is_none() {
+                    keep = n_ch.min(2);
+                    acc = Some(StreamAnalysis::new(rate, keep, levels));
+                }
+                let a = match acc.as_mut() {
+                    Some(a) => a,
+                    None => break,
+                };
+                let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+                buf.copy_interleaved_ref(decoded);
+                for frame in buf.samples().chunks(n_ch) {
+                    for c in 0..keep {
+                        fr[c] = frame[c.min(frame.len() - 1)];
+                    }
+                    a.push(&fr[..keep]);
+                    since_check += 1;
+                    if since_check >= CANCEL_BLOCK {
+                        since_check = 0;
+                        cancel_now()?;
+                    }
+                }
+            }
+            Err(SymError::DecodeError(_)) => continue,
+            Err(_) => break,
+        }
+    }
+    match acc {
+        Some(a) if a.n > 0 => Ok(a.finish()),
+        _ => Err("Sin audio decodificable".to_string()),
+    }
 }
 
 // ------------------------------------------------------------------ etiquetas
@@ -1471,16 +1869,19 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
     set_ext(&mut tag, KEY_LUFS, format!("{:.2}", a.lufs));
     set_ext(&mut tag, KEY_LEAD, a.lead_ms.to_string());
     set_ext(&mut tag, KEY_TAIL, a.tail_ms.to_string());
+    let audio = decoded_duration_ms(input_path).ok();
     if let Some(grid) = &a.grid {
         let old = stored_bpm(input_path, &tag).map(|s| s.value).unwrap_or(0.0);
-        stamp_grid(&mut tag, grid, "FULL");
+        stamp_grid(&mut tag, grid, a.grid_scope);
+        let bpm = entry_tbpm(grid, audio.unwrap_or(0));
+        tag.set_text("TBPM", format_tbpm(bpm));
         let name = Path::new(input_path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(input_path);
-        eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
+        eprintln!("BPM_FIX {name} {old:.2}->{bpm:.2}");
     }
-    if let Ok(audio) = decoded_duration_ms(input_path) {
+    if let Some(audio) = audio {
         write_measured_duration(&mut tag, audio);
     }
     set_ext(&mut tag, KEY_V, MASTER_VERSION.to_string());
@@ -1492,9 +1893,9 @@ fn analyze_and_tag(input_path: &str, force: bool) -> Result<bool, String> {
 /// Masterizado de una pista: volumen + silencios + BPM, sin recodificar.
 /// (Mismo nombre y firma que antes; ya no usa FFmpeg.)
 pub async fn process_full_pipeline(input_path: String, is_megamix: bool) -> Result<bool, String> {
-    if is_megamix {
-        return Ok(true);
-    }
+    // 3.1.09: los megamixes ya se analizan completos (streaming); sin el atajo
+    // que dejaba la marca de masterizado sin medir.
+    let _ = is_megamix;
     analyze_and_tag(&input_path, false)
 }
 
@@ -2581,6 +2982,26 @@ fn audio_mastered(tag: &Tag) -> bool {
     ext_text(tag, KEY_TRIM).is_some() && ext_text(tag, KEY_LUFS_DONE).as_deref() == Some("-14")
 }
 
+/// 3.1.09 (decision de Gabriel): en un megamix (>= 15 min de audio) TBPM es el
+/// BPM del primer tramo de la rejilla FULL, la entrada que usan Live DJ y
+/// Automix; GMX_GRID guarda todos los tramos. Debajo de 15 min, grid.bpm.
+fn entry_tbpm(grid: &crate::bpm_exact::TempoGrid, audio_ms: u64) -> f64 {
+    if audio_ms < MAX_ANALYZE_SECS as u64 * 1000 {
+        return grid.bpm;
+    }
+    match grid.segments.first() {
+        Some(seg) if seg.period_ms.is_finite() && seg.period_ms > 0.0 => {
+            let b = fold_display_bpm(60000.0 / seg.period_ms, TEMPO_DISPLAY_LO, TEMPO_DISPLAY_HI);
+            if b.is_finite() && b > 0.0 {
+                (b * 100.0).round() / 100.0
+            } else {
+                grid.bpm
+            }
+        }
+        _ => grid.bpm,
+    }
+}
+
 fn stamp_grid(tag: &mut Tag, grid: &crate::bpm_exact::TempoGrid, scope: &str) {
     tag.set_text("TBPM", format_tbpm(grid.bpm));
     set_ext(tag, KEY_GRID, crate::bpm_exact::encode_grid(grid));
@@ -2623,8 +3044,10 @@ fn refresh_analysis_tags(path: &str) -> Result<f64, String> {
         return Ok(old);
     }
     let audio = decoded_duration_ms(path)?;
-    let grid = measure_path_grid(path, false).ok_or("Sin periodicidad".to_string())?;
-    stamp_grid(&mut tag, &grid, "FULL");
+    let (grid, scope) = measure_path_grid_scoped(path).ok_or("Sin periodicidad".to_string())?;
+    stamp_grid(&mut tag, &grid, scope);
+    let bpm = entry_tbpm(&grid, audio);
+    tag.set_text("TBPM", format_tbpm(bpm));
     write_measured_duration(&mut tag, audio);
     tag.write_to_path(path, Version::Id3v24)
         .map_err(|e| format!("Fallo I/O al guardar etiquetas: {e}"))?;
@@ -2632,11 +3055,22 @@ fn refresh_analysis_tags(path: &str) -> Result<f64, String> {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
-    eprintln!("BPM_FIX {name} {old:.2}->{:.2}", grid.bpm);
-    Ok(grid.bpm)
+    eprintln!("BPM_FIX {name} {old:.2}->{bpm:.2}");
+    Ok(bpm)
+}
+
+/// 3.1.09: rejilla por paquetes con su alcance ("FULL" o "INTRO" si vino de recorte).
+fn measure_path_grid_scoped(path: &str) -> Option<(crate::bpm_exact::TempoGrid, &'static str)> {
+    let a = analyze_stream(path, false).ok()?;
+    let scope = a.grid_scope;
+    a.grid.map(|g| (g, scope))
 }
 
 fn measure_path_grid(path: &str, intro: bool) -> Option<crate::bpm_exact::TempoGrid> {
+    if !intro {
+        // 3.1.09: rejilla por paquetes, sin tope de 900 s (megamixes incluidos).
+        return measure_path_grid_scoped(path).map(|(g, _)| g);
+    }
     let span = if intro { 60u32 } else { MAX_ANALYZE_SECS };
     let d = decode_channels(path, 0, span, 2).ok()?;
     measure_tempo_grid(&to_mono(&d), d.rate)
@@ -4456,13 +4890,19 @@ pub fn master_rewrite(
     // Con paquetes rotos el PCM está incompleto: no se inventa un BPM.
     // Con audio sano se mide siempre, aunque ya hubiera TBPM.
     let t_bpm = std::time::Instant::now();
+    let mut grid_scope = if intro_bpm { "INTRO" } else { "FULL" };
     let grid = if blocked {
         None
     } else if let Some(m) = &measured {
         let _ = (samples_for_bpm, rate_for_bpm, &bpm_path);
         grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm)
+    } else if intro_bpm {
+        measure_path_grid(&bpm_path, true)
     } else {
-        measure_path_grid(&bpm_path, intro_bpm)
+        measure_path_grid_scoped(&bpm_path).map(|(g, s)| {
+            grid_scope = s;
+            g
+        })
     };
     let bpm_ms = t_bpm.elapsed().as_millis();
     if let Err(e) = cancel_now() {
@@ -4494,7 +4934,7 @@ pub fn master_rewrite(
         );
     }
     if let Some(g) = &grid {
-        stamp_grid(&mut tag, g, if intro_bpm { "INTRO" } else { "FULL" });
+        stamp_grid(&mut tag, g, grid_scope);
         let dur_path = if rewritten {
             bpm_path.as_str()
         } else {
@@ -6596,5 +7036,198 @@ mod master_probe {
                 Err(e) => println!("{}: ERR {e}", p.file_name().unwrap().to_string_lossy()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_3109_tests {
+    use super::*;
+
+    fn same(tag: &str, s: &Analysis, b: &Analysis) {
+        assert_eq!(s.lufs.to_bits(), b.lufs.to_bits(), "{tag} lufs {} vs {}", s.lufs, b.lufs);
+        assert_eq!(s.peak.to_bits(), b.peak.to_bits(), "{tag} peak");
+        assert_eq!((s.lead_ms, s.tail_ms), (b.lead_ms, b.tail_ms), "{tag} silencios");
+        match (&s.grid, &b.grid) {
+            (None, None) => {}
+            (Some(x), Some(y)) => {
+                assert_eq!(x.bpm.to_bits(), y.bpm.to_bits(), "{tag} bpm {} vs {}", x.bpm, y.bpm);
+                assert_eq!(x.anchor_ms.to_bits(), y.anchor_ms.to_bits(), "{tag} anchor");
+                assert_eq!(x.period_ms.to_bits(), y.period_ms.to_bits(), "{tag} period");
+                assert_eq!(x.segments.len(), y.segments.len(), "{tag} tramos");
+                for (p, q) in x.segments.iter().zip(&y.segments) {
+                    assert_eq!(p.start_ms.to_bits(), q.start_ms.to_bits(), "{tag} tramo start");
+                    assert_eq!(p.anchor_ms.to_bits(), q.anchor_ms.to_bits(), "{tag} tramo anchor");
+                    assert_eq!(p.period_ms.to_bits(), q.period_ms.to_bits(), "{tag} tramo period");
+                }
+            }
+            _ => panic!("{tag}: rejilla en un lado y no en el otro"),
+        }
+    }
+
+    /// 40 s estereo: 1 s de silencio, golpes a 120 BPM con ruido y tono,
+    /// 1,5 s de silencio. Streaming y lote deben dar los mismos bits.
+    #[test]
+    fn streaming_igual_al_lote_en_sintetico() {
+        let rate = 44100u32;
+        let n = rate as usize * 40;
+        let beat = rate as usize / 2;
+        let mut pcm = vec![0f32; n * 2];
+        let mut seed: u32 = 0x1234_5678;
+        for i in rate as usize..(n - rate as usize * 3 / 2) {
+            let t = i - rate as usize;
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+            let env = (-((t % beat) as f32) / (0.03 * rate as f32)).exp();
+            let tone = (std::f32::consts::TAU * 220.0 * t as f32 / rate as f32).sin();
+            let s = 0.6 * env * noise + 0.1 * tone;
+            pcm[2 * i] = s;
+            pcm[2 * i + 1] = 0.8 * s;
+        }
+        let dir = std::env::temp_dir().join(format!("gmx_stream3109_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clicks.mp3");
+        let path_s = path.to_string_lossy().to_string();
+        let mut sink = Mp3Sink::new(&path_s, rate, true, 320).unwrap();
+        sink.push(&pcm, 2).unwrap();
+        sink.finish().unwrap();
+
+        let b = analyze_batch(&path_s).unwrap();
+        let s = analyze_stream(&path_s, true).unwrap();
+        same("sintetico", &s, &b);
+        assert!(b.grid.is_some(), "el sintetico debe tener rejilla");
+        assert!(b.lead_ms >= 900 && b.tail_ms >= 1400, "silencios {} {}", b.lead_ms, b.tail_ms);
+        let g = analyze_stream(&path_s, false).unwrap();
+        assert_eq!(
+            g.grid.map(|x| x.bpm.to_bits()),
+            b.grid.map(|x| x.bpm.to_bits()),
+            "rejilla sin niveles"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Archivos reales < 15 min (GMX_EQ_FILES=ruta1;ruta2). Sin la variable no corre nada.
+    #[test]
+    fn streaming_igual_al_lote_en_reales() {
+        let Some(list) = std::env::var_os("GMX_EQ_FILES") else {
+            return;
+        };
+        for p in list.to_string_lossy().split(';').filter(|p| !p.trim().is_empty()) {
+            let b = analyze_batch(p).unwrap();
+            let s = analyze_stream(p, true).unwrap();
+            same(p, &s, &b);
+            eprintln!(
+                "EQ_OK {p} lufs {:.4} peak {:.6} lead {} tail {} bpm {:?}",
+                s.lufs,
+                s.peak,
+                s.lead_ms,
+                s.tail_ms,
+                s.grid.as_ref().map(|g| g.bpm)
+            );
+        }
+    }
+
+    /// Pico de memoria del proceso (Windows, PeakWorkingSetSize). Solo pruebas.
+    #[cfg(windows)]
+    fn peak_ws_mb() -> f64 {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Pmc {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn K32GetProcessMemoryInfo(h: isize, p: *mut Pmc, cb: u32) -> i32;
+        }
+        let mut p = Pmc {
+            cb: std::mem::size_of::<Pmc>() as u32,
+            ..Default::default()
+        };
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut p, p.cb) };
+        assert!(ok != 0, "K32GetProcessMemoryInfo");
+        p.peak_working_set_size as f64 / (1024.0 * 1024.0)
+    }
+
+    /// Mix de 62 min, SOLO LECTURA (no escribe tags ni toca el archivo):
+    /// GMX_MIX62=ruta cargo test --release --lib mix62 -- --nocapture
+    #[cfg(windows)]
+    #[test]
+    fn mix62_streaming_bajo_200_mb() {
+        let Some(p) = std::env::var_os("GMX_MIX62") else {
+            return;
+        };
+        let p = p.to_string_lossy().to_string();
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let base = peak_ws_mb();
+        let t0 = std::time::Instant::now();
+        let full = analyze_stream(&p, true).unwrap();
+        let t_full = t0.elapsed();
+        let peak_full = peak_ws_mb();
+        let t1 = std::time::Instant::now();
+        let grid_only = analyze_stream(&p, false).unwrap();
+        let t_grid = t1.elapsed();
+        let peak = peak_ws_mb();
+        let audio = decoded_duration_ms(&p).unwrap();
+        let g = full.grid.as_ref().expect("rejilla del mix");
+        eprintln!(
+            "MIX62 audio {audio} ms | completo {:.1} s pico {peak_full:.1} MB | rejilla {:.1} s pico {peak:.1} MB | base {base:.1} MB",
+            t_full.as_secs_f64(),
+            t_grid.as_secs_f64()
+        );
+        eprintln!(
+            "MIX62 lufs {:.2} peak {:.6} lead {} tail {} bpm {:.2} tramos {} TBPM(primer tramo) {:.2}",
+            full.lufs,
+            full.peak,
+            full.lead_ms,
+            full.tail_ms,
+            g.bpm,
+            g.segments.len(),
+            entry_tbpm(g, audio)
+        );
+        assert_eq!(
+            grid_only.grid.as_ref().map(|x| x.bpm.to_bits()),
+            Some(g.bpm.to_bits())
+        );
+        assert!(full.lufs.is_finite() && full.lufs > -70.0);
+        assert!(peak < 200.0, "pico {peak:.1} MB");
+        assert_eq!(full.grid_scope, grid_only.grid_scope);
+        // Despues de medir el pico: el recorte debe dar lo mismo que el lote
+        // de ese tramo (900 s como la 3.1.08, o la intro de 60 s).
+        let lote = analyze_batch(&p).unwrap().grid.or_else(|| measure_path_grid(&p, true));
+        eprintln!(
+            "MIX62 alcance {} | lote {:?}",
+            full.grid_scope,
+            lote.as_ref().map(|x| x.bpm)
+        );
+        if full.grid_scope == "INTRO" {
+            assert_eq!(lote.map(|x| x.bpm.to_bits()), Some(g.bpm.to_bits()));
+        }
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), before, "solo lectura");
+    }
+    #[test]
+    fn tbpm_de_megamix_es_el_primer_tramo() {
+        use crate::bpm_exact::{GridSeg, TempoGrid};
+        let g = TempoGrid {
+            bpm: 128.0,
+            anchor_ms: 0.0,
+            period_ms: 60000.0 / 128.0,
+            segments: vec![
+                GridSeg { start_ms: 0.0, anchor_ms: 0.0, period_ms: 60000.0 / 95.0 },
+                GridSeg { start_ms: 600000.0, anchor_ms: 600000.0, period_ms: 60000.0 / 128.0 },
+            ],
+        };
+        assert_eq!(entry_tbpm(&g, 899_999), 128.0);
+        assert_eq!(entry_tbpm(&g, 900_000), 95.0);
+        assert_eq!(entry_tbpm(&g, 3_715_000), 95.0);
+        let vacia = TempoGrid { segments: Vec::new(), ..g.clone() };
+        assert_eq!(entry_tbpm(&vacia, 3_715_000), 128.0);
     }
 }

@@ -150,16 +150,22 @@ class DspWorker {
       }
       if (ref.read(pipelineProvider).isAborted) break;
 
-      if (!timestamps.containsKey(absolutePath) ||
-          timestamps[absolutePath] != modified) {
+      // 3.1.09: tambien vuelve a medir si el cache no tiene BPM (megamixes
+      // que 3.1.04 dejo con timestamp y sin medir).
+      if (needsBpmScan(
+        storedTimestamp: timestamps[absolutePath],
+        modified: modified,
+        hasCachedBpm: cacheData.containsKey(absolutePath) ||
+            cacheData.containsKey(filename),
+      )) {
         // 3.1.04: ventana por duracion exacta (Rust), no por tamano.
         int durMs = 0;
         try {
           durMs = (await rust_dsp.exactDurationMs(inputPath: absolutePath)).toInt();
         } catch (_) {}
-        if (!fitsAnalysisWindow(durMs)) {
+        if (!canAnalyzeFull(durMs)) {
           debugPrint(
-            "[DSP Cache] Megamix >=15 min (${durMs ~/ 1000} s): sin BPM medido: $filename",
+            "[DSP Cache] Duracion desconocida: sin BPM medido: $filename",
           );
           timestamps[absolutePath] = modified;
           hasChanges = true;
@@ -188,7 +194,7 @@ class DspWorker {
             final double oldBpm = readTbpmSync(absolutePath);
             final detectedBpm = await rust_dsp
                 .autoDetectAndInjectBpm(inputPath: absolutePath)
-                .timeout(const Duration(seconds: 45));
+                .timeout(analysisTimeout(durMs, const Duration(seconds: 45)));
             final double? fixedDetected = fixBpmRange(detectedBpm);
             cacheData[absolutePath] = fixedDetected ?? 0.0;
             if (fixedDetected != null) cacheData[filename] = fixedDetected;
@@ -413,20 +419,18 @@ class DspWorker {
         try {
           durMs = (await rust_dsp.exactDurationMs(inputPath: file.path)).toInt();
         } catch (_) {}
-        if (!fitsAnalysisWindow(durMs)) {
-          debugPrint(
-            "[DSP] Megamix >=15 min sin medir (pendiente streaming): $filename",
-          );
-          pipe.updateProgress(i + 1, total, filename, "Omitido: >= 15 min");
+        if (!canAnalyzeFull(durMs)) {
+          debugPrint("[DSP] Duracion desconocida, sin medir: $filename");
+          pipe.updateProgress(i + 1, total, filename, "Omitido: duracion desconocida");
           continue;
         }
 
         final int thermalDelay = sysCores <= 4 ? 1500 : 50;
         await Future.delayed(Duration(milliseconds: thermalDelay));
 
-        // Pistas dentro de la ventana de analisis (< 15 min)
+        // 3.1.09: toda pista medible; 90 s por cada 15 min de audio.
         final success = await rustTask(file.path, isMegamix: false).timeout(
-          const Duration(seconds: 90),
+          analysisTimeout(durMs, const Duration(seconds: 90)),
           onTimeout: () {
             pipe.updateProgress(i + 1, total, filename, "⚠️ Saltado: Timeout");
             return false;
@@ -452,16 +456,17 @@ class DspWorker {
     try {
       final file = File(filePath);
       if (!file.existsSync()) return false;
-      // 3.1.04: megamix (>= 15 min o duracion desconocida): no se mide ni se marca.
+      // 3.1.09: streaming en Rust: toda pista con duracion conocida se mide,
+      // megamixes incluidos; timeout de 120 s por cada 15 min de audio.
       final int durMs =
           (await rust_dsp.exactDurationMs(inputPath: filePath)).toInt();
-      if (!fitsAnalysisWindow(durMs)) {
-        debugPrint("[DSP] Megamix >=15 min sin medir (pendiente streaming): $filePath");
+      if (!canAnalyzeFull(durMs)) {
+        debugPrint("[DSP] Duracion desconocida, sin medir: $filePath");
         return false;
       }
       return await rust_dsp
           .processFullPipeline(inputPath: filePath, isMegamix: false)
-          .timeout(const Duration(seconds: 120));
+          .timeout(analysisTimeout(durMs, const Duration(seconds: 120)));
     } catch (e) {
       debugPrint('🔴 [DSP analyzeTrack] $filePath: $e');
       return false;
