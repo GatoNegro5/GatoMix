@@ -2668,6 +2668,87 @@ fn consider_peak(hist: &mut [f32; 4], sample: f32, peak: &mut f32) {
 /// Cabeza: delay del tag LAME + 528 + 1 (retardo del decodificador MPEG-1
 /// Layer III). Cola: padding del mismo tag. Sin tag, no se salta nada.
 fn lame_player_skip(path: &str) -> (u64, u32) {
+    match lame_scan(path) {
+        Some((delay, padding)) => (delay as u64 + 528 + 1, padding),
+        None => (0, 0),
+    }
+}
+
+/// 3.1.12: mismo resultado que `read_lame_delay_padding(&fs::read(path))`
+/// (el PRIMER "LAME" del archivo) sin cargar el archivo: primero el prefijo
+/// (ID3v2 + 16 KB) y, si ahi no aparece, se sigue leyendo en bloques de
+/// 64 KB. Los MP3 con cabecera Info de FFmpeg ("Lavc") no traen "LAME" en el
+/// primer frame y el primero aparece mas adelante (relleno de frames).
+fn lame_scan(path: &str) -> Option<(u32, u32)> {
+    use std::io::Read;
+    const CHUNK: u64 = 64 * 1024;
+    let f = File::open(path).ok()?;
+    let mut buf = lame_probe_prefix(&f)?;
+    let mut eof = false;
+    loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"LAME") {
+            while buf.len() < pos + 24 && !eof {
+                let before = buf.len();
+                (&f).take(CHUNK).read_to_end(&mut buf).ok()?;
+                eof = buf.len() == before;
+            }
+            return read_lame_delay_padding(&buf[pos..]);
+        }
+        if eof {
+            return None;
+        }
+        // Quedan 3 bytes por si "LAME" cruza el borde del bloque.
+        let drop = buf.len().saturating_sub(3);
+        buf.drain(..drop);
+        let before = buf.len();
+        (&f).take(CHUNK).read_to_end(&mut buf).ok()?;
+        eof = buf.len() == before;
+    }
+}
+
+/// 3.1.12: bytes que se leen despues del ID3v2 para hallar el tag LAME (va
+/// en el primer frame de audio).
+const LAME_PROBE_BYTES: u64 = 16 * 1024;
+
+/// 3.1.12: solo el ID3v2 (tamano syncsafe + cabecera + pie si lo hay) y 16 KB
+/// mas. Antes se leia el archivo entero (141,9 MB en el mix de 62 min) solo
+/// para buscar el primer "LAME".
+fn lame_probe_prefix(f: &File) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let len = f.metadata().ok()?.len();
+    let mut data: Vec<u8> = Vec::with_capacity(10);
+    f.take(10).read_to_end(&mut data).ok()?;
+    let id3 = if data.len() == 10 && &data[0..3] == b"ID3" {
+        let mut n = 10 + syncsafe_u32(&data[6..10]) as u64;
+        if data[5] & 0x10 != 0 {
+            n += 10;
+        }
+        n
+    } else {
+        0
+    };
+    let want = len.min(id3.saturating_add(LAME_PROBE_BYTES));
+    let more = want.saturating_sub(data.len() as u64);
+    f.take(more).read_to_end(&mut data).ok()?;
+    Some(data)
+}
+
+/// Solo el prefijo ID3v2 + 16 KB, sin seguir leyendo (solo pruebas: cuenta
+/// los archivos cuyo primer "LAME" queda fuera del prefijo).
+#[cfg(test)]
+fn lame_player_skip_prefix_only(path: &str) -> (u64, u32) {
+    let Some(data) = File::open(path).ok().and_then(|f| lame_probe_prefix(&f)) else {
+        return (0, 0);
+    };
+    match read_lame_delay_padding(&data) {
+        Some((delay, padding)) => (delay as u64 + 528 + 1, padding),
+        None => (0, 0),
+    }
+}
+
+/// Lectura completa de la 3.1.11 (solo pruebas: referencia del prefijo).
+#[cfg(test)]
+fn lame_player_skip_full(path: &str) -> (u64, u32) {
     let Ok(data) = std::fs::read(path) else {
         return (0, 0);
     };
@@ -3105,6 +3186,8 @@ fn measure_path_grid(path: &str, intro: bool) -> Option<crate::bpm_exact::TempoG
 }
 
 /// BPM del PCM ya decodificado, en el tramo que se conserva (sin reabrir el archivo).
+// 3.1.12: referencia en RAM solo para pruebas (master_rewrite usa GridFeed).
+#[cfg(test)]
 fn grid_from_pcm(
     pcm: &[f32],
     channels: usize,
@@ -3144,6 +3227,8 @@ fn grid_from_pcm(
 /// 3.1.11: rejilla por paquetes (acumulador 3.1.09, cascada FULL -> 900 s ->
 /// 60 s) sobre el PCM ya decodificado, solo el tramo que se conserva
 /// [head..frames-tail]: el ms 0 de la rejilla es el ms 0 del master recortado.
+// 3.1.12: referencia en RAM solo para pruebas (master_rewrite usa GridFeed).
+#[cfg(test)]
 fn stream_grid_from_pcm(
     pcm: &[f32],
     channels: usize,
@@ -3860,6 +3945,537 @@ fn encode_master_span(
             render_limited_span(pcm, rate_hint, channels, samples, head, tail, gain, ceiling)?;
         frames = (limited.len() / ch_out) as u64;
         times.reencode_ms += tfix.elapsed().as_millis();
+    }
+    Ok((residual, times))
+}
+
+/// 3.1.12: sentinela para cortar la decodificacion al pasar el tramo util
+/// (no es un error: el llamador lo convierte en fin normal).
+const STOP_DECODE: &str = "\u{1}gmx_stop_3112";
+
+/// 3.1.12: rejilla alimentada con las muestras CRUDAS del tramo
+/// [head..samples-tail) en la primera pasada del render, sin guardar el PCM.
+/// `Batch` = mismo mono, mismo tope y misma medicion por lote que
+/// `grid_from_pcm`; `Stream` = mismo acumulador y cascada FULL -> 900 s ->
+/// 60 s que `stream_grid_from_pcm` (megamix > 900 s).
+enum GridFeed {
+    Empty,
+    Batch {
+        mono: Vec<f32>,
+        nch: usize,
+        start: u64,
+        stop: u64,
+        rate: u32,
+    },
+    Stream {
+        acc: StreamAnalysis,
+        keep: usize,
+        start: u64,
+        end: u64,
+    },
+}
+
+impl GridFeed {
+    fn new(
+        rate: u32,
+        channels: usize,
+        samples: u64,
+        head: u64,
+        tail: u64,
+        intro: bool,
+        mega: bool,
+    ) -> Self {
+        let nch = channels.max(1);
+        if rate == 0 || samples == 0 {
+            return GridFeed::Empty;
+        }
+        let end = samples.saturating_sub(tail);
+        let start = head.min(end);
+        if mega {
+            if end <= start {
+                return GridFeed::Empty;
+            }
+            let keep = nch.min(2);
+            return GridFeed::Stream {
+                acc: StreamAnalysis::new(rate, keep, false),
+                keep,
+                start,
+                end,
+            };
+        }
+        let cap = if intro {
+            rate as u64 * 60
+        } else {
+            rate as u64 * MAX_ANALYZE_SECS as u64
+        };
+        let stop = end.min(start.saturating_add(cap));
+        if stop <= start {
+            return GridFeed::Empty;
+        }
+        GridFeed::Batch {
+            mono: Vec::with_capacity((stop - start) as usize),
+            nch,
+            start,
+            stop,
+            rate,
+        }
+    }
+
+    /// Cuadro `idx` del PCM decodificado (todos sus canales, sin ganancia).
+    fn push(&mut self, idx: u64, frame: &[f32]) {
+        match self {
+            GridFeed::Empty => {}
+            GridFeed::Batch {
+                mono,
+                nch,
+                start,
+                stop,
+                ..
+            } => {
+                if idx >= *start && idx < *stop {
+                    let mut s = 0.0f32;
+                    for c in 0..*nch {
+                        s += frame.get(c).copied().unwrap_or(0.0);
+                    }
+                    mono.push(s / *nch as f32);
+                }
+            }
+            GridFeed::Stream {
+                acc,
+                keep,
+                start,
+                end,
+            } => {
+                if idx >= *start && idx < *end {
+                    acc.push(&frame[..*keep]);
+                }
+            }
+        }
+    }
+
+    /// Ya no necesita cuadros desde `idx` en adelante.
+    fn past(&self, idx: u64) -> bool {
+        match self {
+            GridFeed::Empty => true,
+            GridFeed::Batch { stop, .. } => idx >= *stop,
+            GridFeed::Stream { end, .. } => idx >= *end,
+        }
+    }
+
+    /// Rejilla y alcance (`None` = el alcance por defecto de `master_rewrite`).
+    fn finish(self) -> Option<(crate::bpm_exact::TempoGrid, Option<&'static str>)> {
+        match self {
+            GridFeed::Empty => None,
+            GridFeed::Batch { mono, rate, .. } => measure_tempo_grid(&mono, rate).map(|g| (g, None)),
+            GridFeed::Stream { acc, .. } => {
+                let a = acc.finish();
+                let scope = a.grid_scope;
+                a.grid.map(|g| (g, Some(scope)))
+            }
+        }
+    }
+}
+
+/// 3.1.12: pasada solo de rejilla por paquetes (sin recodificar).
+fn grid_pass(
+    path: &str,
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    intro: bool,
+    mega: bool,
+) -> Result<GridFeed, String> {
+    let mut feed = GridFeed::new(rate, channels, samples, head, tail, intro, mega);
+    if matches!(feed, GridFeed::Empty) {
+        return Ok(feed);
+    }
+    let nch = channels.max(1);
+    let mut idx = 0u64;
+    let res = decode_frames(path, true, |_r, n_ch, inter| {
+        if n_ch.max(1) != nch {
+            return Err(PCM_MISMATCH.to_string());
+        }
+        for frame in inter.chunks(nch) {
+            if feed.past(idx) {
+                return Err(STOP_DECODE.to_string());
+            }
+            feed.push(idx, frame);
+            idx += 1;
+        }
+        Ok(())
+    });
+    match res {
+        Ok(_) => {}
+        Err(e) if e == STOP_DECODE => {}
+        Err(e) => return Err(e),
+    }
+    Ok(feed)
+}
+
+/// Referencia en RAM de la 3.1.11 (solo pruebas): misma decision que hacia
+/// `master_rewrite` sobre el PCM completo.
+#[cfg(test)]
+fn ram_ref_grid(
+    pcm: &[f32],
+    channels: usize,
+    rate: u32,
+    head: u64,
+    tail: u64,
+    intro: bool,
+    mega: bool,
+) -> Option<(crate::bpm_exact::TempoGrid, Option<&'static str>)> {
+    if mega {
+        stream_grid_from_pcm(pcm, channels, rate, head, tail).map(|(g, s)| (g, Some(s)))
+    } else {
+        grid_from_pcm(pcm, channels, rate, head, tail, intro).map(|g| (g, None))
+    }
+}
+
+const PCM_MISMATCH: &str = "El PCM no coincide con el conteo de muestras.";
+
+/// Destino del render por paquetes (3.1.12).
+trait RenderSink {
+    fn put(&mut self, l: f32, r: f32) -> Result<(), String>;
+}
+
+/// K-weighting con la misma acumulacion que `pcm_lufs` (ventanas de 10 ms,
+/// mismo orden de suma); `lufs_of` al final. Sin LAME.
+struct KAcc {
+    s1l: Biquad,
+    s2l: Biquad,
+    s1r: Biquad,
+    s2r: Biquad,
+    stereo: bool,
+    win: usize,
+    acc_k: f64,
+    acc_n: usize,
+    k_ms: Vec<f64>,
+}
+
+impl KAcc {
+    fn new(rate: u32, stereo: bool) -> Self {
+        let (s1l, s2l) = k_stages(rate as f64);
+        let (s1r, s2r) = k_stages(rate as f64);
+        KAcc {
+            s1l,
+            s2l,
+            s1r,
+            s2r,
+            stereo,
+            win: (rate as usize / 100).max(1),
+            acc_k: 0.0,
+            acc_n: 0,
+            k_ms: Vec::new(),
+        }
+    }
+}
+
+impl RenderSink for KAcc {
+    fn put(&mut self, l: f32, r: f32) -> Result<(), String> {
+        let kl = k_one(&mut self.s1l, &mut self.s2l, l);
+        let kr = if self.stereo {
+            k_one(&mut self.s1r, &mut self.s2r, r)
+        } else {
+            kl
+        };
+        self.acc_k += kl * kl + kr * kr;
+        self.acc_n += 1;
+        if self.acc_n >= self.win {
+            self.k_ms.push(self.acc_k / self.acc_n as f64);
+            self.acc_k = 0.0;
+            self.acc_n = 0;
+        }
+        Ok(())
+    }
+}
+
+/// Lotes de 8192 hacia LAME, igual que `push_pair` de `encode_span`.
+struct Mp3Batch {
+    sink: Mp3Sink,
+    batch: Vec<f32>,
+    ch_out: usize,
+}
+
+impl RenderSink for Mp3Batch {
+    fn put(&mut self, l: f32, r: f32) -> Result<(), String> {
+        self.batch.push(l);
+        if self.ch_out == 2 {
+            self.batch.push(r);
+        }
+        if self.batch.len() >= 8192 {
+            self.sink.push(&self.batch, self.ch_out)?;
+            self.batch.clear();
+        }
+        Ok(())
+    }
+}
+
+/// 3.1.12: ganancia, fade de cola y (con `limit`) LookLim por paquetes desde
+/// la decodificacion gapless (los mismos cuadros que `read_audio`). Misma
+/// aritmetica que `render_limited_span` / `encode_span`. `grid` recibe las
+/// muestras crudas de cada cuadro antes de la ganancia. Devuelve los cuadros
+/// entregados a `out`.
+fn render_stream<S: RenderSink>(
+    path: &str,
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    gain: f32,
+    limit: bool,
+    ceiling: f32,
+    out: &mut S,
+    mut grid: Option<&mut GridFeed>,
+) -> Result<u64, String> {
+    let nch = channels.max(1);
+    let end = samples.saturating_sub(tail);
+    if end <= head {
+        return Err("El recorte dejaría la pista sin música.".to_string());
+    }
+    let kept = end - head;
+    let fade_n = if tail > 0 {
+        ms_to_samples(TAIL_FADE_MS, rate).min(kept / 4).max(1)
+    } else {
+        0
+    };
+    let mut lim = LookLim::new(rate, ceiling);
+    let mut idx = 0u64;
+    let mut since_check = 0usize;
+    let mut emitted = 0u64;
+    let res = decode_frames(path, true, |_r, n_ch, inter| {
+        if n_ch.max(1) != nch {
+            return Err(PCM_MISMATCH.to_string());
+        }
+        for frame in inter.chunks(nch) {
+            let i = idx;
+            idx += 1;
+            if let Some(g) = grid.as_deref_mut() {
+                g.push(i, frame);
+            }
+            if i < head {
+                continue;
+            }
+            if i >= end {
+                return Err(STOP_DECODE.to_string());
+            }
+            since_check += 1;
+            if since_check >= CANCEL_BLOCK {
+                since_check = 0;
+                cancel_now()?;
+            }
+            let mut l = frame[0] * gain;
+            let mut r = (if nch > 1 {
+                frame.get(1).copied().unwrap_or(frame[0])
+            } else {
+                frame[0]
+            }) * gain;
+            if fade_n > 0 {
+                let pos = i - head;
+                if pos + fade_n >= kept {
+                    let g = ((kept - pos) as f32 / fade_n as f32).clamp(0.0, 1.0);
+                    l *= g;
+                    r *= g;
+                }
+            }
+            if limit {
+                if let Some((ol, orr)) = lim.push(l, r) {
+                    out.put(ol, orr)?;
+                    emitted += 1;
+                }
+            } else {
+                out.put(l, r)?;
+                emitted += 1;
+            }
+        }
+        Ok(())
+    });
+    match res {
+        Ok(_) => {}
+        Err(e) if e == STOP_DECODE => {}
+        Err(e) => return Err(e),
+    }
+    if idx < end {
+        return Err(PCM_MISMATCH.to_string());
+    }
+    if limit {
+        for (ol, orr) in lim.flush() {
+            out.put(ol, orr)?;
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+/// LUFS del tramo limitado (LookLim + K), sin LAME. Igual que
+/// `pcm_lufs(render_limited_span(..))`. Devuelve (LUFS, cuadros).
+fn stream_measure(
+    path: &str,
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    gain: f32,
+    ceiling: f32,
+    grid: Option<&mut GridFeed>,
+) -> Result<(f64, u64), String> {
+    let stereo = channels.max(1) > 1;
+    let mut k = KAcc::new(rate, stereo);
+    let frames = render_stream(
+        path, rate, channels, samples, head, tail, gain, true, ceiling, &mut k, grid,
+    )?;
+    Ok((lufs_of(&k.k_ms), frames))
+}
+
+/// Codifica el tramo directo desde la decodificacion: con `limit` es el
+/// mismo MP3 que `encode_span(render_limited_span(..), .., 1.0, false)`; sin
+/// `limit`, el mismo que `encode_span(pcm, .., gain, false)`.
+fn stream_encode(
+    path: &str,
+    tmp: &str,
+    rate: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    gain: f32,
+    limit: bool,
+    kbps: u32,
+    ceiling: f32,
+    grid: Option<&mut GridFeed>,
+) -> Result<u32, String> {
+    let nch = channels.max(1);
+    if samples.saturating_sub(tail) <= head {
+        return Err("El recorte dejaría la pista sin música.".to_string());
+    }
+    let ch_out = if nch > 1 { 2 } else { 1 };
+    let mut out = Mp3Batch {
+        sink: Mp3Sink::new_no_upsample(tmp, rate, nch > 1, kbps)?,
+        batch: Vec::with_capacity(8192),
+        ch_out,
+    };
+    render_stream(
+        path, rate, channels, samples, head, tail, gain, limit, ceiling, &mut out, grid,
+    )?;
+    let Mp3Batch {
+        mut sink,
+        batch,
+        ch_out,
+    } = out;
+    if !batch.is_empty() {
+        sink.push(&batch, ch_out)?;
+    }
+    let gap = sink.finish()?;
+    Ok(gap.residual_ms)
+}
+
+/// 3.1.12: `encode_master_span` sin PCM en RAM (< 200 MB en el mix de 62 min).
+/// Misma secuencia de decisiones: el ajuste de ganancia mide solo LookLim + K
+/// por paquetes (sin LAME); LAME codifica al `.gmxpart` solo con la ganancia
+/// ya convergida; despues `measure_stream`, `verify_measured` y como mucho un
+/// reintento con los mismos ajustes de ganancia y techo. `grid` se alimenta en
+/// la primera pasada.
+fn encode_master_stream(
+    path: &str,
+    tmp: &str,
+    rate_hint: u32,
+    channels: usize,
+    samples: u64,
+    head: u64,
+    tail: u64,
+    mut gain: f32,
+    limit: bool,
+    kbps: u32,
+    mut grid: Option<&mut GridFeed>,
+) -> Result<(u32, EncodeTimes), String> {
+    let mut times = EncodeTimes {
+        limit_ms: 0,
+        encode_ms: 0,
+        verify_ms: 0,
+        reencode_ms: 0,
+        encodes: 0,
+        out_lufs: 0.0,
+    };
+    if !limit {
+        let t = std::time::Instant::now();
+        let residual = stream_encode(
+            path, tmp, rate_hint, channels, samples, head, tail, gain, false, kbps, TP_LIMIT,
+            grid.take(),
+        )?;
+        times.encode_ms = t.elapsed().as_millis();
+        times.encodes = 1;
+        let t = std::time::Instant::now();
+        let measured = measure_stream(tmp)?;
+        times.verify_ms = t.elapsed().as_millis();
+        times.out_lufs = verify_measured(tmp, &measured)?;
+        return Ok((residual, times));
+    }
+    let gain0 = gain;
+    let mut ceiling = TP_LIMIT;
+    let tlim = std::time::Instant::now();
+    // tune_limited_pcm por paquetes: el ultimo ajuste no se mide (igual que
+    // antes, el PCM final no se volvia a medir antes de codificar).
+    let (mut lufs, frames) = stream_measure(
+        path, rate_hint, channels, samples, head, tail, gain, ceiling, grid.take(),
+    )?;
+    for it in 0..2 {
+        if lufs <= -50.0 {
+            break;
+        }
+        let db = TARGET_LUFS - lufs;
+        if db.abs() <= 0.05 {
+            break;
+        }
+        gain = (gain * 10f32.powf((db.clamp(-12.0, 12.0) / 20.0) as f32))
+            .clamp(gain0 * 0.25, gain0 * 4.0);
+        if it == 1 {
+            break;
+        }
+        lufs = stream_measure(
+            path, rate_hint, channels, samples, head, tail, gain, ceiling, None,
+        )?
+        .0;
+    }
+    times.limit_ms = tlim.elapsed().as_millis();
+    if frames == 0 {
+        return Err("El recorte dejaría la pista sin música.".to_string());
+    }
+    let mut residual = 0u32;
+    for attempt in 0..2 {
+        cancel_now()?;
+        let t = std::time::Instant::now();
+        residual = stream_encode(
+            path, tmp, rate_hint, channels, samples, head, tail, gain, true, kbps, ceiling, None,
+        )?;
+        let took = t.elapsed().as_millis();
+        if attempt == 0 {
+            times.encode_ms = took;
+        } else {
+            times.reencode_ms += took;
+        }
+        times.encodes += 1;
+        let t = std::time::Instant::now();
+        let measured = measure_stream(tmp)?;
+        times.verify_ms += t.elapsed().as_millis();
+        let out_lufs = verify_measured(tmp, &measured)?;
+        times.out_lufs = out_lufs;
+        let tp_ok = measured.true_peak <= TP_CEILING;
+        let miss = (out_lufs - TARGET_LUFS).abs();
+        let lufs_ok = out_lufs > -50.0 && miss <= LUFS_TOL;
+        if (tp_ok && lufs_ok) || attempt == 1 {
+            return Ok((residual, times));
+        }
+        let _ = std::fs::remove_file(tmp);
+        if !lufs_ok && out_lufs > -50.0 {
+            let db = (TARGET_LUFS - out_lufs).clamp(-3.0, 3.0);
+            gain = (gain * 10f32.powf((db / 20.0) as f32)).clamp(gain0 * 0.5, gain0 * 2.0);
+        }
+        if !tp_ok {
+            ceiling = (ceiling * 10f32.powf(-1.0 / 20.0)).max(TP_LIMIT_FLOOR);
+        }
     }
     Ok((residual, times))
 }
@@ -4708,15 +5324,39 @@ pub fn master_rewrite(
     force_head_ms: i32,
     force_tail_ms: i32,
 ) -> Result<MasterRewrite, String> {
+    master_rewrite_core(
+        input_path,
+        do_trim,
+        do_lufs,
+        intro_bpm,
+        force_head_ms,
+        force_tail_ms,
+        false,
+    )
+}
+
+/// 3.1.12: nucleo de `master_rewrite` en streaming de 2 pasadas (sin PCM en
+/// RAM). `ram_ref` solo lo usan las pruebas (referencia en RAM de la 3.1.11);
+/// en produccion siempre es `false`.
+fn master_rewrite_core(
+    input_path: String,
+    do_trim: bool,
+    do_lufs: bool,
+    intro_bpm: bool,
+    force_head_ms: i32,
+    force_tail_ms: i32,
+    ram_ref: bool,
+) -> Result<MasterRewrite, String> {
     if !on_worker_thread() {
         return run_on_master_worker(move || {
-            master_rewrite(
+            master_rewrite_core(
                 input_path,
                 do_trim,
                 do_lufs,
                 intro_bpm,
                 force_head_ms,
                 force_tail_ms,
+                ram_ref,
             )
         });
     }
@@ -4763,11 +5403,17 @@ pub fn master_rewrite(
 
     let need_audio = do_trim || do_lufs;
     let mut decode_ms: u128 = 0;
-    let mut pcm: Vec<f32> = Vec::new();
+    // 3.1.12: la pasada 1 solo mide (sin guardar el PCM). El audio se vuelve
+    // a decodificar por paquetes al codificar (`encode_master_stream`).
+    #[cfg(test)]
+    let mut ref_pcm: Vec<f32> = Vec::new();
     let t_decode = std::time::Instant::now();
     let mut measured = if need_audio {
-        let take = read_audio(&input_path, true)?;
-        pcm = take.pcm;
+        let take = read_audio(&input_path, ram_ref)?;
+        #[cfg(test)]
+        {
+            ref_pcm = take.pcm;
+        }
         Some(take.measure)
     } else {
         None
@@ -4782,9 +5428,12 @@ pub fn master_rewrite(
         if let Some((note, _m2)) = try_lossless_repair(&input_path, broken)? {
             tag = Tag::read_from_path(&input_path).unwrap_or_else(|_| Tag::new());
             let t_decode = std::time::Instant::now();
-            let take = read_audio(&input_path, true)?;
+            let take = read_audio(&input_path, ram_ref)?;
             decode_ms += t_decode.elapsed().as_millis();
-            pcm = take.pcm;
+            #[cfg(test)]
+            {
+                ref_pcm = take.pcm;
+            }
             measured = Some(take.measure);
             rescue_note = Some(note);
         } else {
@@ -4882,6 +5531,7 @@ pub fn master_rewrite(
         out_lufs: 0.0,
     };
     let bpm_path: String;
+    let mut grid_feed: Option<GridFeed> = None;
     let (bpm_head, bpm_tail) = if let Some(m) = &measured {
         let head_s = if cut_head_ms >= 50 {
             ms_to_samples(cut_head_ms, m.rate)
@@ -4896,19 +5546,54 @@ pub fn master_rewrite(
         let audio_change = head_s > 0 || tail_s > 0 || lufs_encode;
         if audio_change {
             let tmp = format!("{input_path}.gmxpart");
-            let (residual, times) = encode_master_span(
-                &pcm,
-                &tmp,
-                m.rate,
-                m.channels,
-                m.samples,
-                head_s,
-                tail_s,
-                gain,
-                lufs_encode,
-                kbps,
-            )
-            .map_err(|e| {
+            // 3.1.12: sin PCM en RAM. La rejilla se alimenta en la primera
+            // pasada del render con las muestras crudas de [head..end).
+            let mega = intro_bpm
+                && m.rate > 0
+                && m.samples.saturating_sub(head_s).saturating_sub(tail_s)
+                    > m.rate as u64 * MAX_ANALYZE_SECS as u64;
+            let mut feed = if blocked || ram_ref {
+                None
+            } else {
+                Some(GridFeed::new(
+                    m.rate, m.channels, m.samples, head_s, tail_s, intro_bpm, mega,
+                ))
+            };
+            #[cfg(test)]
+            let ram_res = ram_ref.then(|| {
+                encode_master_span(
+                    &ref_pcm,
+                    &tmp,
+                    m.rate,
+                    m.channels,
+                    m.samples,
+                    head_s,
+                    tail_s,
+                    gain,
+                    lufs_encode,
+                    kbps,
+                )
+            });
+            #[cfg(not(test))]
+            let ram_res: Option<Result<(u32, EncodeTimes), String>> = None;
+            let res = match ram_res {
+                Some(r) => r,
+                None => encode_master_stream(
+                    &input_path,
+                    &tmp,
+                    m.rate,
+                    m.channels,
+                    m.samples,
+                    head_s,
+                    tail_s,
+                    gain,
+                    lufs_encode,
+                    kbps,
+                    feed.as_mut(),
+                ),
+            };
+            grid_feed = feed;
+            let (residual, times) = res.map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
                 e
             })?;
@@ -4956,17 +5641,43 @@ pub fn master_rewrite(
     } else if let Some(m) = &measured {
         let _ = (samples_for_bpm, rate_for_bpm, &bpm_path);
         let kept = m.samples.saturating_sub(bpm_head).saturating_sub(bpm_tail);
-        if intro_bpm && m.rate > 0 && kept > m.rate as u64 * MAX_ANALYZE_SECS as u64 {
+        let mega = intro_bpm && m.rate > 0 && kept > m.rate as u64 * MAX_ANALYZE_SECS as u64;
+        if mega {
             // 3.1.11: megamix > 900 s. Rejilla FULL/cascada por paquetes sobre
-            // el tramo ya recortado en RAM (sin reabrir el MP3, ms 0 = master).
+            // el tramo ya recortado (ms 0 = master).
             bpm_audio_ms = kept * 1000 / m.rate as u64;
-            stream_grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail).map(|(g, s)| {
-                grid_scope = s;
-                g
-            })
-        } else {
-            grid_from_pcm(&pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm)
         }
+        // 3.1.12: la rejilla ya se alimento en la primera pasada del render
+        // (muestras crudas de [head..end), sin PCM en RAM). Si no se recodifico,
+        // una pasada solo de rejilla por paquetes sobre el original.
+        let fed = match grid_feed.take() {
+            Some(f) => Some(f),
+            None if ram_ref => None,
+            None => grid_pass(
+                &input_path,
+                m.rate,
+                m.channels,
+                m.samples,
+                bpm_head,
+                bpm_tail,
+                intro_bpm,
+                mega,
+            )
+            .ok(),
+        };
+        let res = fed.and_then(GridFeed::finish);
+        #[cfg(test)]
+        let res = if ram_ref {
+            ram_ref_grid(&ref_pcm, m.channels, m.rate, bpm_head, bpm_tail, intro_bpm, mega)
+        } else {
+            res
+        };
+        res.map(|(g, s)| {
+            if let Some(s) = s {
+                grid_scope = s;
+            }
+            g
+        })
     } else if intro_bpm {
         measure_path_grid(&bpm_path, true)
     } else {
@@ -7370,5 +8081,523 @@ mod stream_3109_tests {
         assert_eq!(entry_tbpm(&g, 3_715_000), 95.0);
         let vacia = TempoGrid { segments: Vec::new(), ..g.clone() };
         assert_eq!(entry_tbpm(&vacia, 3_715_000), 128.0);
+    }
+}
+
+#[cfg(test)]
+mod master_3112_tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gmx_3112_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Borra el directorio temporal aunque la prueba falle.
+    struct DirGuard(std::path::PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// ~33,5 s: 1,5 s de silencio, 30 s de golpes a 120 BPM (ruido + tono)
+    /// y 2 s de silencio. `amp` fija el nivel.
+    fn synth(path: &str, stereo: bool, amp: f32) {
+        let rate = 44100usize;
+        let lead = rate * 3 / 2;
+        let body = rate * 30;
+        let n = lead + body + rate * 2;
+        let beat = rate / 2;
+        let ch = if stereo { 2 } else { 1 };
+        let mut pcm = vec![0f32; n * ch];
+        let mut seed: u32 = 0x2468_ace1;
+        for i in lead..lead + body {
+            let t = i - lead;
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+            let env = (-((t % beat) as f32) / (0.03 * rate as f32)).exp();
+            let tone = (std::f32::consts::TAU * 220.0 * t as f32 / rate as f32).sin();
+            let s = amp * (0.8 * env * noise + 0.2 * tone);
+            if stereo {
+                pcm[2 * i] = s;
+                pcm[2 * i + 1] = 0.85 * s;
+            } else {
+                pcm[i] = s;
+            }
+        }
+        let mut sink = Mp3Sink::new(path, rate as u32, stereo, 192).unwrap();
+        sink.push(&pcm, ch).unwrap();
+        sink.finish().unwrap();
+    }
+
+    /// Solo el audio MP3 (sin ID3v2 al inicio ni ID3v1 al final).
+    fn audio_only(p: &str) -> Vec<u8> {
+        let data = std::fs::read(p).unwrap();
+        let start = id3v2_prefix_len(&data);
+        let mut end = data.len();
+        if end >= start + 128 && &data[end - 128..end - 125] == b"TAG" {
+            end -= 128;
+        }
+        data[start..end].to_vec()
+    }
+
+    fn frames_of(p: &str) -> Vec<String> {
+        let t = Tag::read_from_path(p).unwrap();
+        let mut v: Vec<String> = t.frames().map(|f| format!("{f:?}")).collect();
+        v.sort();
+        v
+    }
+
+    fn fields(r: &MasterRewrite) -> String {
+        format!(
+            "trim_head_ms={} trim_tail_ms={} lead_ms={} tail_ms={} bpm={:?} lufs={:?} lufs_applied={} kbps={} rewritten={} residual_ms={}",
+            r.trim_head_ms,
+            r.trim_tail_ms,
+            r.lead_ms,
+            r.tail_ms,
+            r.bpm,
+            r.lufs,
+            r.lufs_applied,
+            r.bitrate_kbps,
+            r.rewritten,
+            r.residual_ms
+        )
+    }
+
+    /// Paridad: referencia en RAM de la 3.1.11 (`ram_ref`) contra el
+    /// streaming de 2 pasadas, sobre 2 copias del mismo sintetico.
+    fn parity(
+        name: &str,
+        stereo: bool,
+        amp: f32,
+        do_trim: bool,
+        do_lufs: bool,
+        intro: bool,
+        fh: i32,
+        ft: i32,
+    ) {
+        let d = tmp_dir(name);
+        let _g = DirGuard(d.clone());
+        let src = d.join("src.mp3").to_string_lossy().to_string();
+        synth(&src, stereo, amp);
+        let a = d.join("ram.mp3").to_string_lossy().to_string();
+        let b = d.join("stream.mp3").to_string_lossy().to_string();
+        std::fs::copy(&src, &a).unwrap();
+        std::fs::copy(&src, &b).unwrap();
+        let ra = master_rewrite_core(a.clone(), do_trim, do_lufs, intro, fh, ft, true).unwrap();
+        let rb = master_rewrite_core(b.clone(), do_trim, do_lufs, intro, fh, ft, false).unwrap();
+        let (fa, fb) = (fields(&ra), fields(&rb));
+        let (aa, ab) = (audio_only(&a), audio_only(&b));
+        let (ta, tb) = (frames_of(&a), frames_of(&b));
+        let tag_b = Tag::read_from_path(&b).unwrap();
+        eprintln!(
+            "T1 {name}: audio_bytes {} igual={} | campos igual={} | tags igual={} ({} frames) | {fb} | TBPM {:?} | GMX_GRID {:?}",
+            ab.len(),
+            aa == ab,
+            fa == fb,
+            ta == tb,
+            tb.len(),
+            tag_b.get("TBPM").and_then(|f| f.content().text()).map(|s| s.to_string()),
+            ext_text(&tag_b, KEY_GRID)
+        );
+        assert_eq!(fa, fb, "{name}: campos");
+        assert!(aa == ab, "{name}: audio MP3 distinto ({} vs {} bytes)", aa.len(), ab.len());
+        assert_eq!(ta, tb, "{name}: tags");
+    }
+
+    #[test]
+    fn paridad_3112_sin_limitador_estereo() {
+        // Solo corte (sin -14): encode_span directo, sin LookLim.
+        parity("sinlim", true, 0.5, true, false, false, -1, -1);
+    }
+
+    #[test]
+    fn paridad_3112_con_limitador_estereo_alto() {
+        // Nivel alto: -14 con LookLim + ajuste de ganancia.
+        parity("conlim_alto", true, 1.0, true, true, false, -1, -1);
+    }
+
+    #[test]
+    fn paridad_3112_con_limitador_mono_bajo_intro() {
+        // Nivel bajo: la ganancia sube y el limitador corta picos (mono, intro 60 s).
+        parity("conlim_bajo", false, 0.3, true, true, true, -1, -1);
+    }
+
+    #[test]
+    fn paridad_3112_solo_rejilla() {
+        // Corte forzado a 0 y sin -14: no se recodifica; rejilla por paquetes.
+        parity("solo_rejilla", true, 0.5, true, false, false, 0, 0);
+    }
+
+    /// Nucleo: GridFeed (lote y cascada megamix forzada) contra las
+    /// referencias en RAM, y LookLim+K por paquetes contra pcm_lufs.
+    #[test]
+    fn nucleo_3112_rejilla_y_lufs_por_paquetes() {
+        let d = tmp_dir("nucleo");
+        let _g = DirGuard(d.clone());
+        for stereo in [true, false] {
+            let p = d.join(format!("n_{stereo}.mp3")).to_string_lossy().to_string();
+            synth(&p, stereo, 0.6);
+            let take = read_audio(&p, true).unwrap();
+            let m = &take.measure;
+            for (head, tail) in [(0u64, 0u64), (44_100, 88_200)] {
+                for (intro, mega) in [(false, false), (true, false), (true, true), (false, true)] {
+                    let want = ram_ref_grid(&take.pcm, m.channels, m.rate, head, tail, intro, mega);
+                    let got = grid_pass(&p, m.rate, m.channels, m.samples, head, tail, intro, mega)
+                        .unwrap()
+                        .finish();
+                    let enc = |x: &Option<(crate::bpm_exact::TempoGrid, Option<&'static str>)>| {
+                        x.as_ref().map(|(g, s)| (crate::bpm_exact::encode_grid(g), *s))
+                    };
+                    assert_eq!(enc(&got), enc(&want), "rejilla st={stereo} h={head} t={tail} intro={intro} mega={mega}");
+                    assert!(want.is_some(), "el sintetico debe tener rejilla");
+                }
+                for gain in [0.5f32, 2.5] {
+                    let lim = render_limited_span(
+                        &take.pcm, m.rate, m.channels, m.samples, head, tail, gain, TP_LIMIT,
+                    )
+                    .unwrap();
+                    let ch_out = if m.channels > 1 { 2 } else { 1 };
+                    let want = pcm_lufs(&lim, m.rate, ch_out);
+                    let (got, frames) = stream_measure(
+                        &p, m.rate, m.channels, m.samples, head, tail, gain, TP_LIMIT, None,
+                    )
+                    .unwrap();
+                    assert_eq!(got.to_bits(), want.to_bits(), "lufs st={stereo} g={gain}");
+                    assert_eq!(frames as usize, lim.len() / ch_out, "cuadros");
+                }
+            }
+        }
+    }
+
+    fn mtime(p: &std::path::Path) -> std::time::SystemTime {
+        std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    fn mp3s(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                mp3s(&p, out);
+            } else if ft.is_file()
+                && p.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("mp3"))
+                    .unwrap_or(false)
+            {
+                out.push(p);
+            }
+        }
+    }
+
+    /// T2: prefijo ID3v2 + 16 KB contra la lectura completa de la 3.1.11.
+    /// Sinteticos (con ID3 de 300 KB de portada falsa y sin ID3) y, con
+    /// GMX_REGENIAL, todos los .mp3 de esa carpeta en SOLO LECTURA.
+    #[test]
+    fn lame_skip_prefijo_3112() {
+        let d = tmp_dir("lame");
+        let _g = DirGuard(d.clone());
+        let plain = d.join("plain.mp3").to_string_lossy().to_string();
+        synth(&plain, true, 0.5);
+        let big = d.join("portada.mp3").to_string_lossy().to_string();
+        std::fs::copy(&plain, &big).unwrap();
+        let mut tag = Tag::new();
+        tag.add_frame(id3::frame::Picture {
+            mime_type: "image/jpeg".to_string(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: String::new(),
+            data: vec![0x5a; 300 * 1024],
+        });
+        tag.set_text("TBPM", "120");
+        tag.write_to_path(&big, Version::Id3v24).unwrap();
+        let id3_len = id3v2_prefix_len(&std::fs::read(&big).unwrap());
+        assert!(id3_len > 300 * 1024, "ID3 de {id3_len} bytes");
+        // Sin ID3 y sin "LAME" en el prefijo: el primero aparece a 40 KB.
+        let late = d.join("tardio.mp3").to_string_lossy().to_string();
+        {
+            let mut raw = vec![0u8; 64 * 1024];
+            raw[40_000..40_004].copy_from_slice(b"LAME");
+            raw[40_021..40_024].copy_from_slice(&[0x24, 0x02, 0xe1]);
+            std::fs::write(&late, &raw).unwrap();
+        }
+        // "LAME" cruzando el borde de un bloque de 64 KB despues del prefijo.
+        let edge = d.join("borde.mp3").to_string_lossy().to_string();
+        {
+            let mut raw = vec![0u8; 200 * 1024];
+            let at = 16 * 1024 + 64 * 1024 - 2;
+            raw[at..at + 4].copy_from_slice(b"LAME");
+            raw[at + 21..at + 24].copy_from_slice(&[0x10, 0x01, 0x20]);
+            std::fs::write(&edge, &raw).unwrap();
+        }
+        for p in [&late, &edge] {
+            assert_eq!(lame_player_skip(p), lame_player_skip_full(p), "{p}");
+            assert!(lame_player_skip(p).0 > 0, "{p}");
+            assert_eq!(lame_player_skip_prefix_only(p), (0, 0), "{p}");
+        }
+        for p in [&plain, &big] {
+            let full = lame_player_skip_full(p);
+            let pre = lame_player_skip(p);
+            assert_eq!(pre, full, "{p}");
+            assert!(full.0 > 0, "{p}: sin tag LAME");
+        }
+        eprintln!("T2 sinteticos OK (ID3 {id3_len} bytes y sin ID3)");
+
+        let Some(root) = std::env::var_os("GMX_REGENIAL") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let mut files = Vec::new();
+        mp3s(&root, &mut files);
+        let mut diffs = 0usize;
+        let mut beyond_prefix = 0usize;
+        let mut with_tag = 0usize;
+        let mut mtime_changed = 0usize;
+        for f in &files {
+            let before = mtime(f);
+            let s = f.to_string_lossy().to_string();
+            let full = lame_player_skip_full(&s);
+            let pre = lame_player_skip(&s);
+            if full != pre {
+                diffs += 1;
+                eprintln!("T2 DIFF {s}: completo {full:?} prefijo {pre:?}");
+            }
+            if lame_player_skip_prefix_only(&s) != full {
+                beyond_prefix += 1;
+            }
+            if full.0 > 0 {
+                with_tag += 1;
+            }
+            if mtime(f) != before {
+                mtime_changed += 1;
+            }
+        }
+        eprintln!(
+            "T2 ReGenial: {} archivos, {with_tag} con tag LAME, {diffs} diferencias, {beyond_prefix} con el primer LAME fuera del prefijo ID3+16 KB, {mtime_changed} mtime cambiados",
+            files.len()
+        );
+        assert!(!files.is_empty());
+        assert_eq!(diffs, 0);
+        assert_eq!(mtime_changed, 0);
+    }
+
+    /// Pico de memoria del proceso (Windows, PeakWorkingSetSize). Solo pruebas.
+    #[cfg(windows)]
+    fn peak_ws_mb() -> f64 {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Pmc {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn K32GetProcessMemoryInfo(h: isize, p: *mut Pmc, cb: u32) -> i32;
+        }
+        let mut p = Pmc {
+            cb: std::mem::size_of::<Pmc>() as u32,
+            ..Default::default()
+        };
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut p, p.cb) };
+        assert!(ok != 0, "K32GetProcessMemoryInfo");
+        p.peak_working_set_size as f64 / (1024.0 * 1024.0)
+    }
+
+    /// Renombra en la COPIA (mismo largo, sin reescribir el archivo) las marcas
+    /// de corte y de -14 para que master_rewrite tome la ruta de audio.
+    fn unmark_copy(p: &str) -> usize {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(p).unwrap();
+        let mut hdr = [0u8; 10];
+        f.read_exact(&mut hdr).unwrap();
+        if &hdr[0..3] != b"ID3" {
+            return 0;
+        }
+        let n = 10 + syncsafe_u32(&hdr[6..10]);
+        let mut buf = vec![0u8; n];
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_exact(&mut buf).unwrap();
+        let mut hits = 0usize;
+        for (from, to) in [(&b"GMX_TRIM"[..], &b"GMX_XRIM"[..]), (&b"GMX_LUFS_DONE"[..], &b"GMX_XUFS_DONE"[..])] {
+            let mut i = 0usize;
+            while i + from.len() <= buf.len() {
+                if &buf[i..i + from.len()] == from {
+                    buf[i..i + from.len()].copy_from_slice(to);
+                    hits += 1;
+                    i += from.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&buf).unwrap();
+        f.flush().unwrap();
+        hits
+    }
+
+    /// T3: master_rewrite del mix de 62 min sobre una COPIA en %TEMP%
+    /// (GMX_MIX62=ruta; el original no se toca). Mismos flags que Dart para
+    /// un megamix: trim y -14 pendientes, introBpm true, force -1.
+    #[cfg(windows)]
+    #[test]
+    fn mix62_master_streaming_bajo_200_mb() {
+        let Some(p) = std::env::var_os("GMX_MIX62") else {
+            return;
+        };
+        let orig = std::path::PathBuf::from(p);
+        let before = mtime(&orig);
+        let d = tmp_dir("mix62m");
+        let _g = DirGuard(d.clone());
+        let copy = d.join("mix62.mp3");
+        std::fs::copy(&orig, &copy).unwrap();
+        let copy_s = copy.to_string_lossy().to_string();
+        let hits = unmark_copy(&copy_s);
+        {
+            let t = Tag::read_from_path(&copy_s).unwrap_or_else(|_| Tag::new());
+            assert!(!audio_mastered(&t), "la copia sigue marcada");
+        }
+        let base = peak_ws_mb();
+        let t0 = std::time::Instant::now();
+        let r = master_rewrite(copy_s.clone(), true, true, true, -1, -1).unwrap();
+        let secs = t0.elapsed().as_secs_f64();
+        let peak = peak_ws_mb();
+        let tag = Tag::read_from_path(&copy_s).unwrap();
+        let tbpm = tag.get("TBPM").and_then(|f| f.content().text()).map(|s| s.to_string());
+        let grid = ext_text(&tag, KEY_GRID).unwrap_or_default();
+        eprintln!(
+            "MIX62M pico {peak:.1} MB tiempo {secs:.1} s bpm {:.2} TBPM {:?} lufs {:.2} lufs_applied {} trim {}/{} ms lead {} tail {} rewritten {} residual {} kbps {} | base {base:.1} MB | marcas renombradas en la copia {hits} | alcance {:?} | grid {} chars",
+            r.bpm,
+            tbpm,
+            r.lufs,
+            r.lufs_applied,
+            r.trim_head_ms,
+            r.trim_tail_ms,
+            r.lead_ms,
+            r.tail_ms,
+            r.rewritten,
+            r.residual_ms,
+            r.bitrate_kbps,
+            ext_text(&tag, KEY_BPM_SCOPE),
+            grid.len()
+        );
+        assert!(peak < 200.0, "pico {peak:.1} MB");
+        assert!(r.bpm > 0.0);
+        assert_eq!(mtime(&orig), before, "el original no se toca");
+    }
+
+    /// T3b: mismo mix (COPIA) con corte de cabeza forzado a 100 ms: obliga la
+    /// ruta de recodificacion completa de master_rewrite (corte sin -14 si el
+    /// mix ya esta en -14) con la rejilla megamix alimentada en el render.
+    #[cfg(windows)]
+    #[test]
+    fn mix62_master_forzado_corte_3112() {
+        let Some(p) = std::env::var_os("GMX_MIX62") else {
+            return;
+        };
+        let orig = std::path::PathBuf::from(p);
+        let before = mtime(&orig);
+        let d = tmp_dir("mix62c");
+        let _g = DirGuard(d.clone());
+        let copy = d.join("mix62.mp3");
+        std::fs::copy(&orig, &copy).unwrap();
+        let copy_s = copy.to_string_lossy().to_string();
+        let hits = unmark_copy(&copy_s);
+        let base = peak_ws_mb();
+        let t0 = std::time::Instant::now();
+        let r = master_rewrite(copy_s.clone(), true, true, true, 100, -1).unwrap();
+        let secs = t0.elapsed().as_secs_f64();
+        let peak = peak_ws_mb();
+        let tag = Tag::read_from_path(&copy_s).unwrap();
+        let tbpm = tag.get("TBPM").and_then(|f| f.content().text()).map(|s| s.to_string());
+        eprintln!(
+            "MIX62C pico {peak:.1} MB tiempo {secs:.1} s bpm {:.2} TBPM {:?} lufs {:.2} lufs_applied {} trim {}/{} ms rewritten {} residual {} kbps {} | base {base:.1} MB | marcas renombradas {hits} | alcance {:?}",
+            r.bpm,
+            tbpm,
+            r.lufs,
+            r.lufs_applied,
+            r.trim_head_ms,
+            r.trim_tail_ms,
+            r.rewritten,
+            r.residual_ms,
+            r.bitrate_kbps,
+            ext_text(&tag, KEY_BPM_SCOPE)
+        );
+        assert!(r.rewritten, "debia recodificar");
+        assert!(peak < 200.0, "pico {peak:.1} MB");
+        assert_eq!(mtime(&orig), before, "el original no se toca");
+    }
+
+    /// T3c: nucleo del -14 con limitador (`encode_master_stream`, la ruta que
+    /// antes pedia 2.735,8 MB en `render_limited_span`) sobre la COPIA del mix,
+    /// con la misma medicion, ganancia y rejilla que master_rewrite.
+    #[cfg(windows)]
+    #[test]
+    fn mix62_limitador_streaming_3112() {
+        let Some(p) = std::env::var_os("GMX_MIX62") else {
+            return;
+        };
+        let orig = std::path::PathBuf::from(p);
+        let before = mtime(&orig);
+        let d = tmp_dir("mix62l");
+        let _g = DirGuard(d.clone());
+        let copy = d.join("mix62.mp3");
+        std::fs::copy(&orig, &copy).unwrap();
+        let copy_s = copy.to_string_lossy().to_string();
+        let tmp = d.join("mix62.mp3.gmxpart").to_string_lossy().to_string();
+        let base = peak_ws_mb();
+        let t0 = std::time::Instant::now();
+        let m = read_audio(&copy_s, false).unwrap().measure;
+        let t_measure = t0.elapsed().as_secs_f64();
+        let lufs = lufs_of(&m.k_ms);
+        let kbps = average_kbps(&copy_s, m.samples, m.rate);
+        let mut feed = GridFeed::new(m.rate, m.channels, m.samples, 0, 0, true, true);
+        let t1 = std::time::Instant::now();
+        let (residual, times) = encode_master_stream(
+            &copy_s,
+            &tmp,
+            m.rate,
+            m.channels,
+            m.samples,
+            0,
+            0,
+            gain_for(lufs, true),
+            true,
+            kbps,
+            Some(&mut feed),
+        )
+        .unwrap();
+        let t_enc = t1.elapsed().as_secs_f64();
+        let grid = feed.finish();
+        let peak = peak_ws_mb();
+        eprintln!(
+            "MIX62L pico {peak:.1} MB medir {t_measure:.1} s limitar+codificar {t_enc:.1} s (limit_ms {} encode_ms {} verify_ms {} reencode_ms {} encodes {}) lufs_in {lufs:.2} out_lufs {:.2} kbps {kbps} residual {residual} | base {base:.1} MB | rejilla {:?}",
+            times.limit_ms,
+            times.encode_ms,
+            times.verify_ms,
+            times.reencode_ms,
+            times.encodes,
+            times.out_lufs,
+            grid.as_ref().map(|(g, s)| (g.bpm, *s, g.segments.len()))
+        );
+        assert!((times.out_lufs - TARGET_LUFS).abs() <= LUFS_TOL);
+        assert!(peak < 200.0, "pico {peak:.1} MB");
+        assert_eq!(mtime(&orig), before, "el original no se toca");
     }
 }
