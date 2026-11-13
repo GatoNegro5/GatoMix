@@ -15,6 +15,9 @@ String lanBaseName(String path) {
 /// Temporal de un envio cortado: nunca se lista ni viaja.
 bool lanIsPart(String name) => name.toLowerCase().endsWith(lanPartSuffix);
 
+/// 3.1.15: pista karaoke `<base>_K.mp3` (sus `.lrc`/`.txt` viajan siempre).
+bool lanIsKaraokeMp3(String name) => lanBaseName(name).toLowerCase().endsWith('_k.mp3');
+
 /// Lo que LAN Sync lista y envia: `.mp3`, `.lrc`, `.txt`; nunca `.part`.
 bool lanSyncable(String name) {
   final String n = name.toLowerCase();
@@ -34,7 +37,12 @@ bool lanIsWlanName(String name) {
 /// Hermanos de [mp3Name] en [siblings] (misma carpeta): `.lrc`, `.txt`,
 /// `_K.mp3`, `_K.lrc`, `_K.txt` y, si se eligio el `_K`, la pista normal.
 /// Sin distinguir mayusculas; nunca `.part`; devuelve el nombre real en disco.
-List<String> lanCompanions(String mp3Name, Iterable<String> siblings) {
+/// 3.1.15: con [withKaraoke] en false no agrega el `_K.mp3` hermano.
+List<String> lanCompanions(
+  String mp3Name,
+  Iterable<String> siblings, {
+  bool withKaraoke = true,
+}) {
   final String lower = mp3Name.toLowerCase();
   if (!lower.endsWith('.mp3') || lanIsPart(lower)) return const <String>[];
   String base = lower.substring(0, lower.length - 4);
@@ -51,6 +59,7 @@ List<String> lanCompanions(String mp3Name, Iterable<String> siblings) {
   for (final String s in siblings) {
     final String sl = s.toLowerCase();
     if (sl == lower || lanIsPart(sl)) continue;
+    if (!withKaraoke && lanIsKaraokeMp3(sl)) continue;
     if (want.contains(sl)) out.add(s);
   }
   return out;

@@ -244,6 +244,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   bool _cancelRequested = false;
   bool _overwriteExisting = false;
   bool _isPushMode = true;
+  bool _sendKaraoke = true; // 3.1.15: enviar/extraer tambien los _K.mp3
   double _transferProgress = 0.0;
   String _currentLog = "Iniciando protocolos de seguridad y red...";
   int _totalFiles = 0;
@@ -489,7 +490,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       final entities = dir.listSync(recursive: false, followLinks: false);
       for (var e in entities) {
         if (e is File) {
-          if (lanSyncable(e.path)) {
+          if (lanSyncable(e.path) && (_sendKaraoke || !lanIsKaraokeMp3(e.path))) {
             result.add(e);
           }
         } else if (e is Directory) {
@@ -1504,6 +1505,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               for (final String name in lanCompanions(
                 lanBaseName(path),
                 dirNames[parent.path]!,
+                withKaraoke: _sendKaraoke,
               )) {
                 pushQueue.add('${parent.path}${Platform.pathSeparator}$name');
               }
@@ -1679,7 +1681,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               for (final String name in onlyPull)
                 <String, dynamic>{'name': name},
             ]
-          : _currentRemoteFiles;
+          : _remoteToPull();
       setState(() => _totalFiles = files.length);
 
       final localDir = Directory(_selectedLocalPath!);
@@ -1845,6 +1847,11 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     }
   }
 
+  /// 3.1.15: lo que se extrae del remoto, con o sin los _K.mp3.
+  List<dynamic> _remoteToPull() => _currentRemoteFiles
+      .where((dynamic r) => _sendKaraoke || !lanIsKaraokeMp3('${r['name']}'))
+      .toList();
+
   void _retryFailed() {
     final List<File> push = List<File>.from(_retryPush);
     final List<String> pull = List<String>.from(_retryPull);
@@ -1867,7 +1874,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         ? (isDirectoryClone
               ? _getFilesRecursively(Directory(_selectedLocalPath!)).length
               : _selectedFilesToTransfer.length)
-        : _currentRemoteFiles.length;
+        : _remoteToPull().length;
 
     if (targetFilesCount == 0) return;
 
@@ -2688,6 +2695,22 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                         ),
                         selected: !_isPushMode,
                         onSelected: (v) => setState(() => _isPushMode = false),
+                      ),
+                      const SizedBox(width: 10),
+                      // 3.1.15: transferir con o sin las pistas karaoke (_K.mp3).
+                      FilterChip(
+                        selectedColor: const Color(
+                          0xFFFF00FF,
+                        ).withValues(alpha: 0.2),
+                        backgroundColor: Colors.black,
+                        label: const Text(
+                          "CON _K",
+                          style: TextStyle(color: Colors.white, fontSize: 11),
+                        ),
+                        selected: _sendKaraoke,
+                        onSelected: _isTransferring
+                            ? null
+                            : (v) => setState(() => _sendKaraoke = v),
                       ),
                       const SizedBox(width: 25),
                       // 🛠️ BOTÓN DE WIPE RÁPIDO
