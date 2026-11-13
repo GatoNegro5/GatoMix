@@ -137,6 +137,7 @@ class AudioEqualizerService {
   /// Llamar tras `open()` en un deck: mide la canción, fija su sonoridad y
   /// aplica su curva.
   void adapt(Player player, String path) {
+    AdaptiveEq.holdAf(player, null); // 3.1.21: pista nueva, sin corte heredado
     AdaptiveEq.attach(
       player,
       path,
@@ -147,7 +148,11 @@ class AudioEqualizerService {
           toDb: AdaptiveEq.levelFor(player),
           applyAf: () {
             try {
-              (player.platform as dynamic)?.setProperty('af', filterFor(player));
+              // 3.1.21: respeta el corte de graves del cruce en curso.
+              (player.platform as dynamic)?.setProperty(
+                'af',
+                AdaptiveEq.withHold(player, filterFor(player)),
+              );
             } catch (_) {}
           },
         );

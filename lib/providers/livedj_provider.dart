@@ -3173,10 +3173,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       final dynamic platform = incoming.platform;
       platform?.setProperty('audio-pitch-correction', 'yes');
-      platform?.setProperty(
-        'af',
-        afOverride ?? (mode == LiveDjMixMode.activeSync ? lowCut : base),
+      final String chain =
+          afOverride ?? (mode == LiveDjMixMode.activeSync ? lowCut : base);
+      // 3.1.21: lo que el cruce agrega a la base queda registrado para que un
+      // onReady tardio de AdaptiveEq no suelte los graves antes del swap.
+      final String clean = AfCaps.sanitize(base);
+      AdaptiveEq.holdAf(
+        incoming,
+        chain.startsWith(clean)
+            ? chain.substring(clean.length).replaceFirst(RegExp(r'^,'), '')
+            : (chain.contains('g=-24') ? _bassKillFilter : null),
       );
+      platform?.setProperty('af', chain);
     } catch (_) {}
   }
 
@@ -3306,6 +3314,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
                         .join(','),
                   ),
           );
+          AdaptiveEq.holdAf(incomingPlayer, null); // 3.1.21: swap hecho
           platformIn?.setProperty('af', inBase());
         } else if (dnaOutMid != null && !bassSwapped && progress >= 0.5) {
           bassSwapped = true;
@@ -3340,6 +3349,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
       try {
         await AdaptiveEq.setDeckVolume(incomingPlayer, 100.0);
+        AdaptiveEq.holdAf(incomingPlayer, null); // 3.1.21: fin del cruce
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
         await AdaptiveEq.setDeckVolume(fadingPlayer, 0.0);

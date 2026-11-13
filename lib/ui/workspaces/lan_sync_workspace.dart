@@ -80,6 +80,18 @@ String lanFinalLog({
 bool lanFinalIsRed({required bool mobile, required int failed}) =>
     mobile && failed > 0;
 
+/// 3.1.21 (Pendiente 22d): el barrido pasivo de 254 IP solo corre con la
+/// pestana LAN Sync visible (`TickerMode`), montada y sin cierre pedido. En
+/// movil ademas necesita el servidor arriba. El servidor sigue escuchando.
+bool lanPassiveSweepAllowed({
+  required bool mounted,
+  required bool sweeping,
+  required bool visible,
+  required bool mobile,
+  required bool serverUp,
+}) =>
+    mounted && sweeping && visible && (!mobile || serverUp);
+
 int lanUploadHttpStatus({
   required bool mobile,
   required bool denied,
@@ -284,6 +296,27 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   final Map<String, int> _currentVotes = {'🔥': 0, '💩': 0, '👏': 0};
 
   late AnimationController _radarController;
+
+  // 3.1.21: visibilidad de la pestana (TickerStack) y un solo bucle pasivo.
+  bool _lanVisible = false;
+  bool _sweeperRunning = false;
+
+  bool get _passiveOk => lanPassiveSweepAllowed(
+    mounted: mounted,
+    sweeping: _isSweeping,
+    visible: _lanVisible,
+    mobile: _lanMobile,
+    serverUp: _server != null,
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final bool v = TickerMode.valuesOf(context).enabled;
+    if (v == _lanVisible) return;
+    _lanVisible = v;
+    if (v) _startNetworkSweeper(); // al volver a la pestana
+  }
 
   @override
   void initState() {
@@ -1158,11 +1191,20 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   }
 
   Future<void> _startNetworkSweeper() async {
+    if (_sweeperRunning || !_passiveOk) return;
     final subnetParts = _localIp.split('.');
     if (subnetParts.length != 4) return;
     final subnet = '${subnetParts[0]}.${subnetParts[1]}.${subnetParts[2]}';
+    _sweeperRunning = true;
+    try {
+      await _passiveSweepLoop(subnet);
+    } finally {
+      _sweeperRunning = false;
+    }
+  }
 
-    while (mounted && _isSweeping) {
+  Future<void> _passiveSweepLoop(String subnet) async {
+    while (_passiveOk) {
       _radarSpin(true);
         // 3.1.05: primero el ultimo equipo que respondio (400 ms).
         final String? lastPeer = _lanLastPeerIp;
@@ -1173,7 +1215,7 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
           );
         }
       for (int i = 1; i <= 254; i += 50) {
-        if (!mounted) break;
+        if (!_passiveOk) break; // 3.1.21: salir de la pestana corta el barrido
         List<Future<void>> batch = [];
 
         for (int j = 0; j < 50; j++) {

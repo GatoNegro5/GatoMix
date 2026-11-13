@@ -241,6 +241,24 @@ class AdaptiveEq {
   static final Expando<double> _applied = Expando<double>('gmxLevelApplied');
   static final Expando<double> _base = Expando<double>('gmxDeckBase');
 
+  // 3.1.21: corte del cruce (graves) que el deck lleva en su `af`. Un onReady
+  // tardio lo respeta: nunca entran los graves antes del bass swap.
+  static final Expando<String> _afHold = Expando<String>('gmxAfHold');
+
+  /// Fija (o borra con null/vacio) el corte activo del cruce del [deck].
+  static void holdAf(Object deck, String? extra) =>
+      _afHold[deck] = (extra == null || extra.isEmpty) ? null : extra;
+
+  /// Corte activo del [deck] (null si no hay).
+  static String? afHoldFor(Object deck) => _afHold[deck];
+
+  /// Cadena [base] mas el corte activo del [deck].
+  static String withHold(Object deck, String base) {
+    final String? h = _afHold[deck];
+    if (h == null) return base;
+    return <String>[base, h].where((String s) => s.isNotEmpty).join(',');
+  }
+
   /// Recorte lineal (<= 1) de la rampa en curso del [player]; 1 sin rampa.
   static double trimFor(Player player) => _trim[player] ?? 1.0;
 

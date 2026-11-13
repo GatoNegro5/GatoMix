@@ -7921,6 +7921,37 @@ mod master_guard_tests {
         assert!((g.period_ms - 500.0).abs() < 1e-9);
     }
 
+    /// 3.1.21 (Pendiente 21, Mix Salsa Romantica): TBPM 96 frente a 177,44
+    /// medido (1,848, sin relacion armonica) -> TBPM queda 96 y GMX_GRID con
+    /// los golpes reales a 177,44 (rejilla intacta, veto 3.1.10). En memoria.
+    #[test]
+    fn tbpm_3121_salsa_romantica_96_manda_y_la_rejilla_sigue_el_audio() {
+        let p = 60_000.0 / 177.44;
+        let mk = || crate::bpm_exact::TempoGrid {
+            bpm: 177.44,
+            anchor_ms: 812.0,
+            period_ms: p,
+            segments: vec![
+                crate::bpm_exact::GridSeg { start_ms: 0.0, anchor_ms: 812.0, period_ms: 60_000.0 / 177.53 },
+                crate::bpm_exact::GridSeg { start_ms: 900_000.0, anchor_ms: 900_120.0, period_ms: p },
+            ],
+        };
+        for audio_ms in [3_720_000u64, 600_000] {
+            let mut g = mk();
+            let before = crate::bpm_exact::encode_grid(&g);
+            let out = reconcile_tbpm(96.0, &mut g, audio_ms);
+            assert!((out - 96.0).abs() < 1e-9, "audio {audio_ms}: TBPM quedo {out}");
+            assert_eq!(crate::bpm_exact::encode_grid(&g), before, "la rejilla no debe escalarse");
+            let mut tag = Tag::new();
+            stamp_grid(&mut tag, &g, "FULL");
+            tag.set_text("TBPM", format_tbpm(out));
+            let tbpm = tag.get("TBPM").and_then(|f| f.content().text()).unwrap_or("").to_string();
+            assert_eq!(tbpm.parse::<f64>().unwrap_or(0.0), 96.0, "TBPM escrito {tbpm}");
+            assert_eq!(ext_text(&tag, KEY_GRID).unwrap(), before);
+            println!("3121 audio {audio_ms}: TBPM {tbpm} | GMX_GRID {before}");
+        }
+    }
+
     /// 3.1.11: la rejilla por paquetes del tramo recortado arranca en el ms 0
     /// del master (mismo ancla que el lote sobre el audio ya cortado).
     #[test]
