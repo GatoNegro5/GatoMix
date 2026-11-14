@@ -39,6 +39,7 @@ import '../ui/widgets/approx_lyric_icon.dart' show approxLyricRevision;
 import 'db_provider.dart';
 import 'nlp_provider.dart';
 import 'equalizer_provider.dart';
+import 'mix_formula.dart' show seamGain, seamVolume, snapCueToBeat;
 
 // 🛡️ FIX: Dependencia para dspWorkerProvider
 
@@ -1707,9 +1708,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
         final progress = (fadeClock.elapsedMilliseconds / actualDuration)
             .clamp(0.0, 1.0);
 
-        // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final smoothRateIn = dawnCrossfadeGain(progress);
-        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
+        // 3.1.32: costura de seda (seamGain) con ley cubica de mpv (seamVolume).
+        final double smoothRateIn = seamGain(progress);
+        final double smoothRateOut = seamGain(1.0 - progress);
 
         // 🔀 PERMUTA DE GRAVES en el cruce, donde ambas rondan el 0.9: la
         // saliente cede el bajo y la entrante lo recupera. Una única
@@ -1721,10 +1722,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
           platformIn?.setProperty('af', inBase());
         }
 
-        await incomingPlayer.setVolume(
-          (smoothRateIn * 100.0).clamp(0.0, 100.0),
-        );
-        await fadingPlayer.setVolume((smoothRateOut * 100.0).clamp(0.0, 100.0));
+        await incomingPlayer.setVolume(seamVolume(smoothRateIn));
+        await fadingPlayer.setVolume(seamVolume(smoothRateOut));
 
         await _mix.slice(32, fadeClock);
       }
@@ -1798,6 +1797,27 @@ class AutomixNotifier extends Notifier<AutomixState> {
       await incoming.play();
       return;
     }
+    // 3.1.32: entrada en el golpe de la rejilla de la entrante. Set In manual:
+    // golpe mas cercano (nunca mas de medio golpe); automatica: siguiente.
+    final int cue0 = cueMs < 0 ? 0 : cueMs;
+    bool manualCue = false;
+    try {
+      final meta = await ref.read(dbServiceProvider).getTrackMetadata(inPath);
+      manualCue = meta != null && meta.isManualCue && meta.cueInMs == cue0;
+    } catch (_) {}
+    final int startMs = snapCueToBeat(
+      cueMs: cue0,
+      beatMs: gridIn.beatMs,
+      bpm: gridIn.bpm,
+      manual: manualCue,
+    );
+    if (startMs != cue0) {
+      try {
+        await incoming.seek(Duration(milliseconds: startMs));
+        await Future.delayed(const Duration(milliseconds: 150));
+      } catch (_) {}
+    }
+    djTrace('AUTOMIX GOLPE cue=$cue0 start=$startMs manual=$manualCue');
     final double liveOut = fading.state.rate;
     _phaseLock = await engageBeatLock(
       outgoing: fading,
@@ -1807,10 +1827,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
       outRate: liveOut > 0 ? liveOut : 1,
       inBeatMs: gridIn.beatMs,
       inBpm: gridIn.bpm,
-      cueMs: (cueMs < 0 ? 0 : cueMs).toDouble(),
+      cueMs: startMs.toDouble(),
       inRate: rampRate > 0 ? rampRate : 1,
       rampRate: rampRate > 0 ? rampRate : 1,
-      incomingOnBeat: false,
+      incomingOnBeat: true,
       hold: _mix,
     );
   }

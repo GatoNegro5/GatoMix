@@ -2,6 +2,7 @@ import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/audio_path.dart';
+import '../core/phrase_grid.dart' show PhrasePhrase;
 
 /// DNA 60–80 % · Phrase 8 · Stealth (entra 5–10 %, cruza ~60 % sin voz).
 /// Prohibido: fade suelto, corte seco, cambio al final de la pista.
@@ -181,12 +182,118 @@ int _gridDown(int ms, int g0, int step) {
   return g0 + ((ms - g0) ~/ step) * step;
 }
 
+/// Punto elegido: posicion, origen ('hueco' sin voz, 'frase' con voz del
+/// perfil, 'golpe' por rejilla) y voz maxima del tramo (-1 sin perfil).
+class ActivePick {
+  final int ms;
+  final String origin;
+  final double voice;
+
+  const ActivePick({required this.ms, required this.origin, this.voice = -1});
+}
+
+int _q2(double v) => (v * 100).round();
+
+/// 3.1.32: entre las frases del perfil que empiezan en [lo, hi] elige la de
+/// tramo [inicio, inicio + fadeMs] 1) sin voz (ninguna frase vocalOn), 2) con
+/// menor voz maxima (`vocal`, a 2 decimales) y 3) mas cercana a [preferMs].
+/// Las frases ya son downbeats de frase. null si ninguna cae en la ventana.
+ActivePick? activeVocalPick({
+  required List<PhrasePhrase> phrases,
+  required int lo,
+  required int hi,
+  required int fadeMs,
+  required int preferMs,
+}) {
+  if (phrases.isEmpty || hi < lo) return null;
+  ActivePick? best;
+  var bestQuiet = false;
+  var bestVoice = 0;
+  var bestDist = 0;
+  final int span = fadeMs < 0 ? 0 : fadeMs;
+  for (var i = 0; i < phrases.length; i++) {
+    final int start = phrases[i].startMs;
+    if (start < lo || start > hi) continue;
+    var quiet = true;
+    var voice = 0.0;
+    for (var j = i; j < phrases.length; j++) {
+      final PhrasePhrase q = phrases[j];
+      if (j > i && q.startMs >= start + span) break;
+      if (q.vocalOn) quiet = false;
+      if (q.vocal > voice) voice = q.vocal;
+    }
+    final int v = _q2(voice);
+    final int dist = (start - preferMs).abs();
+    final bool better = best == null ||
+        (quiet && !bestQuiet) ||
+        (quiet == bestQuiet &&
+            (v < bestVoice || (v == bestVoice && dist < bestDist)));
+    if (better) {
+      best = ActivePick(
+        ms: start,
+        origin: quiet ? 'hueco' : 'frase',
+        voice: voice,
+      );
+      bestQuiet = quiet;
+      bestVoice = v;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
 /// Entrada adelantada: nunca antes de [activeCueMinMs] ni despues del 20 %
-/// (salvo un lead mayor). Cuantiza hacia arriba a frase (8 compases), si no
-/// cabe a compas y si no a golpe, sobre la rejilla [gridMs] + k * golpe.
-/// [preferMs] (la entrada que ya eligio la formula: intro, frase, hueco) manda
-/// si cae dentro de la ventana. [bypass] (Mix largo) y D <= 0 devuelven 0;
-/// D < 20 s devuelve el lead (o 0).
+/// (salvo un lead mayor). 3.1.32: con perfil de frases ([phrases]) elige la
+/// frase con menos voz en [cueMin, cueMax] (tramo de [fadeMs]); sin perfil,
+/// [preferMs] (la entrada de la formula) manda si cae dentro y si no se
+/// cuantiza hacia arriba a frase, compas o golpe sobre [gridMs] + k * golpe.
+/// [bypass] (Mix largo) y D <= 0 devuelven 0; D < 20 s devuelve el lead.
+ActivePick activeCuePick({
+  required int durationMs,
+  int leadMs = 0,
+  double bpm = 0,
+  int gridMs = 0,
+  int? preferMs,
+  bool bypass = false,
+  List<PhrasePhrase>? phrases,
+  int fadeMs = 0,
+}) {
+  if (bypass || durationMs <= 0) return const ActivePick(ms: 0, origin: 'golpe');
+  if (durationMs < 20000) {
+    return ActivePick(
+      ms: leadMs > 0 && leadMs < durationMs ~/ 3 ? leadMs : 0,
+      origin: 'golpe',
+    );
+  }
+  final int cueMin = activeCueMinMs(durationMs: durationMs, leadMs: leadMs);
+  final int cueMax = max(cueMin, (durationMs * 0.20).round());
+  final int? prefer = preferMs;
+  if (phrases != null && phrases.isNotEmpty) {
+    final ActivePick? pick = activeVocalPick(
+      phrases: phrases,
+      lo: cueMin,
+      hi: cueMax,
+      fadeMs: fadeMs,
+      preferMs: prefer ?? cueMin,
+    );
+    if (pick != null) return pick;
+  }
+  if (prefer != null && prefer >= cueMin && prefer <= cueMax) {
+    return ActivePick(ms: prefer, origin: 'frase');
+  }
+  final int beat = activeBeatMs(bpm);
+  if (beat <= 0) return ActivePick(ms: cueMin, origin: 'golpe');
+  final int g0 = gridMs < 0 ? 0 : gridMs;
+  for (final int step in <int>[beat * 32, beat * 4, beat]) {
+    final int c = _gridUp(cueMin, g0, step);
+    if (c >= cueMin && c <= cueMax) {
+      return ActivePick(ms: c, origin: step == beat * 32 ? 'frase' : 'golpe');
+    }
+  }
+  return ActivePick(ms: cueMin, origin: 'golpe');
+}
+
+/// Atajo: solo la posicion de [activeCuePick].
 int activeCueInMs({
   required int durationMs,
   int leadMs = 0,
@@ -194,24 +301,19 @@ int activeCueInMs({
   int gridMs = 0,
   int? preferMs,
   bool bypass = false,
-}) {
-  if (bypass || durationMs <= 0) return 0;
-  if (durationMs < 20000) {
-    return leadMs > 0 && leadMs < durationMs ~/ 3 ? leadMs : 0;
-  }
-  final int cueMin = activeCueMinMs(durationMs: durationMs, leadMs: leadMs);
-  final int cueMax = max(cueMin, (durationMs * 0.20).round());
-  final int? prefer = preferMs;
-  if (prefer != null && prefer >= cueMin && prefer <= cueMax) return prefer;
-  final int beat = activeBeatMs(bpm);
-  if (beat <= 0) return cueMin;
-  final int g0 = gridMs < 0 ? 0 : gridMs;
-  for (final int step in <int>[beat * 32, beat * 4, beat]) {
-    final int c = _gridUp(cueMin, g0, step);
-    if (c >= cueMin && c <= cueMax) return c;
-  }
-  return cueMin;
-}
+  List<PhrasePhrase>? phrases,
+  int fadeMs = 0,
+}) =>
+    activeCuePick(
+      durationMs: durationMs,
+      leadMs: leadMs,
+      bpm: bpm,
+      gridMs: gridMs,
+      preferMs: preferMs,
+      bypass: bypass,
+      phrases: phrases,
+      fadeMs: fadeMs,
+    ).ms;
 
 /// Entrada, salida y fundido de la ventana activa.
 class ActiveWindow {
@@ -219,19 +321,30 @@ class ActiveWindow {
   final int mixOutMs;
   final int fadeMs;
 
+  /// 'hueco' | 'frase' | 'golpe' (ver [ActivePick]).
+  final String origin;
+
+  /// Voz maxima del tramo de salida; -1 sin perfil.
+  final double voice;
+
   const ActiveWindow({
     required this.cueInMs,
     required this.mixOutMs,
     required this.fadeMs,
+    this.origin = 'golpe',
+    this.voice = -1,
   });
 }
 
-/// Salida con el tramo `mixOut - cueIn` entre el 60 % y el 80 % de D y el
-/// fundido completo antes del final: [lo, hi] con lo = cue + 0,60 D y
-/// hi = min(cue + 0,80 D, D - fade). El candidato de la formula se recorta a
-/// [lo, hi] y se cuantiza hacia abajo a frase, compas o golpe. Si no cabe,
-/// primero se acorta el fundido (hasta 2 s) y luego la entrada baja hasta
-/// [cueMinMs]. [bypass] (Mix largo) y D <= 0 dejan el candidato.
+/// Tramo minimo reproducido antes de salir (40 % de D).
+const double activeMinPlayFraction = 0.40;
+
+/// 3.1.32 (opcion b): salida por POSICION entre el 60 % y el 80 % de D:
+/// lo = max(0,60 D, cueIn + 0,40 D), hi = min(0,80 D, D - fade). Con perfil
+/// ([phrases]) se elige la frase con menos voz en [lo, hi] (tramo del
+/// fundido); sin perfil, el candidato de la formula se recorta a [lo, hi] y
+/// se cuantiza hacia abajo a frase, compas o golpe. Si el fundido no cabe se
+/// acorta hasta D - lo. [bypass] (Mix largo) y D <= 0 dejan el candidato.
 ActiveWindow activeWindow({
   required int durationMs,
   required int cueInMs,
@@ -241,6 +354,7 @@ ActiveWindow activeWindow({
   int gridMs = 0,
   int cueMinMs = 0,
   bool bypass = false,
+  List<PhrasePhrase>? phrases,
 }) {
   final int wanted = fadeMs < 0 ? 0 : fadeMs;
   if (bypass || durationMs <= 0) {
@@ -251,46 +365,69 @@ ActiveWindow activeWindow({
     );
   }
   final int d = durationMs;
-  final int span60 = (d * 0.60).round();
-  final int span80 = (d * 0.80).round();
+  final int lo60 = (d * 0.60).round();
+  final int hi80 = (d * 0.80).round();
+  final int minPlay = (d * activeMinPlayFraction).round();
   var cue = cueInMs < 0 ? 0 : cueInMs;
-  var fade = wanted;
-  if (cue + span60 + fade > d) {
-    fade = max(0, d - cue - span60);
-    final int minFade = min(wanted, 2000);
-    if (fade < minFade) {
-      final int floor = cueMinMs < 0 ? 0 : min(cueMinMs, cue);
-      cue = max(floor, min(cue, d - span60 - minFade));
-      fade = max(0, min(wanted, d - cue - span60));
-    }
+  if (cue + minPlay > hi80) {
+    // Lead enorme: la entrada baja hasta dejar el tramo minimo.
+    final int floor = cueMinMs < 0 ? 0 : min(cueMinMs, cue);
+    cue = max(floor, hi80 - minPlay);
   }
-  final int lo = cue + span60;
-  var hi = min(cue + span80, d - fade);
+  final int lo = min(hi80, max(lo60, cue + minPlay));
+  var fade = wanted;
+  if (d - fade < lo) fade = max(0, d - lo);
+  var hi = min(hi80, d - fade);
   if (hi < lo) hi = lo;
   final int cand = candidateMs.clamp(lo, hi);
-  final int beat = activeBeatMs(bpm);
-  final int g0 = gridMs < 0 ? 0 : gridMs;
   var mixOut = cand;
-  if (beat > 0) {
-    var found = false;
-    for (final int step in <int>[beat * 32, beat * 4, beat]) {
-      var s = _gridDown(cand, g0, step);
-      if (s < lo) s = _gridUp(lo, g0, step);
-      if (s >= lo && s <= hi) {
-        mixOut = s;
-        found = true;
-        break;
+  var origin = 'golpe';
+  var voice = -1.0;
+  ActivePick? pick;
+  if (phrases != null && phrases.isNotEmpty) {
+    pick = activeVocalPick(
+      phrases: phrases,
+      lo: lo,
+      hi: hi,
+      fadeMs: fade,
+      preferMs: cand,
+    );
+  }
+  if (pick != null) {
+    mixOut = pick.ms;
+    origin = pick.origin;
+    voice = pick.voice;
+  } else {
+    final int beat = activeBeatMs(bpm);
+    final int g0 = gridMs < 0 ? 0 : gridMs;
+    if (beat > 0) {
+      var found = false;
+      for (final int step in <int>[beat * 32, beat * 4, beat]) {
+        var s = _gridDown(cand, g0, step);
+        if (s < lo) s = _gridUp(lo, g0, step);
+        if (s >= lo && s <= hi) {
+          mixOut = s;
+          origin = step == beat * 32 ? 'frase' : 'golpe';
+          found = true;
+          break;
+        }
       }
-    }
-    if (!found) {
-      // Ventana mas angosta que un golpe: primer golpe desde lo; el fundido
-      // se acorta para no pasar del final.
-      final int s = _gridUp(lo, g0, beat);
-      if (s + min(wanted, 2000) <= d) mixOut = s;
+      if (!found) {
+        // Ventana mas angosta que un golpe: primer golpe desde lo; el
+        // fundido se acorta para no pasar del final.
+        final int s = _gridUp(lo, g0, beat);
+        if (s <= hi80 && s + min(wanted, 2000) <= d) mixOut = s;
+      }
     }
   }
   if (mixOut + fade > d) fade = max(0, d - mixOut);
-  return ActiveWindow(cueInMs: cue, mixOutMs: mixOut, fadeMs: fade);
+  return ActiveWindow(
+    cueInMs: cue,
+    mixOutMs: mixOut,
+    fadeMs: fade,
+    origin: origin,
+    voice: voice,
+  );
 }
 
 /// Atajo: solo el punto de salida de [activeWindow].
@@ -303,6 +440,7 @@ int activeMixOutMs({
   int gridMs = 0,
   int cueMinMs = 0,
   bool bypass = false,
+  List<PhrasePhrase>? phrases,
 }) =>
     activeWindow(
       durationMs: durationMs,
@@ -313,7 +451,29 @@ int activeMixOutMs({
       gridMs: gridMs,
       cueMinMs: cueMinMs,
       bypass: bypass,
+      phrases: phrases,
     ).mixOutMs;
+
+/// 3.1.32 (Automix): lleva la entrada al golpe de la rejilla de la entrante
+/// (primer golpe [beatMs], tempo [bpm]). Set In manual: golpe mas cercano
+/// (nunca mas de medio golpe). Automatica: golpe siguiente (ceil). Sin BPM
+/// fiable devuelve [cueMs] tal cual.
+int snapCueToBeat({
+  required int cueMs,
+  required double beatMs,
+  required double bpm,
+  required bool manual,
+}) {
+  if (!bpm.isFinite || bpm <= 0 || !beatMs.isFinite) return cueMs;
+  final double p = 60000.0 / bpm;
+  final double k = (cueMs - beatMs) / p;
+  final double kk = manual ? k.roundToDouble() : k.ceilToDouble();
+  var s = (beatMs + kk * p).round();
+  while (s < 0) {
+    s = (s + p).round();
+  }
+  return s;
+}
 
 /// Avance del cruce 0..1 con pendiente 0 en los dos extremos.
 /// [edge] 0: smoothstep 3p^2 - 2p^3. 0 < [edge] < 0,5: rampas coseno de ancho

@@ -22,7 +22,7 @@ void main() {
     }
   });
 
-  test('tramo mixOut - cueIn entre 60 % y 80 %, fundido antes del final', () {
+  test('salida por posicion entre 60 % y 80 % (3.1.32), fundido antes del final', () {
     var cases = 0;
     for (final int d in durs) {
       for (final double b in bpms) {
@@ -43,9 +43,13 @@ void main() {
                 cueMinMs: cueMin,
               );
               final String why = 'd=$d b=$b f=$f v=$vocal cand=$cand';
-              final int span = w.mixOutMs - w.cueInMs;
-              expect(span, greaterThanOrEqualTo((d * 0.60).round()), reason: why);
-              expect(span, lessThanOrEqualTo((d * 0.80).round()), reason: why);
+              expect(w.mixOutMs, greaterThanOrEqualTo((d * 0.60).round()), reason: why);
+              expect(w.mixOutMs, lessThanOrEqualTo((d * 0.80).round()), reason: why);
+              expect(
+                w.mixOutMs - w.cueInMs,
+                greaterThanOrEqualTo((d * 0.40).round()),
+                reason: why,
+              );
               expect(w.mixOutMs + w.fadeMs, lessThanOrEqualTo(d), reason: why);
               expect(w.fadeMs, greaterThan(0), reason: why);
               expect(w.cueInMs, greaterThanOrEqualTo(cueMin), reason: why);
@@ -75,7 +79,7 @@ void main() {
       gridMs: 300,
       cueMinMs: 20000,
     );
-    expect(w.mixOutMs, 300 + 10 * 513 * 32); // 164,5 s, en frase
+    expect(w.mixOutMs, 300 + 9 * 513 * 32); // 148,0 s (posicion 60-80 %), en frase
     expect(w.fadeMs, larga.fadeMs);
   });
 

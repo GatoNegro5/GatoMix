@@ -296,8 +296,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   int get publishedFadeMs => _publishedFadeMs;
 
   bool _wantsPhraseProfile() {
-    final MixFormula formula = ref.read(mixFormulaProvider);
-    return formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy;
+    // 3.1.32: los 3 tipos (Corta incluida) eligen el hueco sin voz con el
+    // perfil de frases.
+    return true;
   }
 
   int _phraseFallbackCue(String? path, int durMs) {
@@ -425,14 +426,28 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final int durMs = _exactDurCache[path] ?? 0;
     final PhraseTrack? grid = PhraseGridMemory.peek(path);
     final double gridBpm = grid?.bpm ?? 0;
-    return activeCueInMs(
+    final double bpm = gridBpm >= 60 ? gridBpm : _extractBpm(path);
+    // 3.1.32: con perfil, la frase con menos voz en [cueMin, cueMax] durante
+    // el fundido mas largo del tipo.
+    final ActivePick pick = activeCuePick(
       durationMs: durMs,
       leadMs: TrackTags.peek(path)?.leadMs ?? 0,
-      bpm: gridBpm >= 60 ? gridBpm : _extractBpm(path),
+      bpm: bpm,
       gridMs: grid?.beatMs ?? 0,
       preferMs: raw,
       bypass: durMs > 0 && _isMixTrack(durMs),
+      phrases: grid?.phrases,
+      fadeMs: mixPersonality(
+        ref.read(mixFormulaProvider),
+        bpm,
+        vocal: false,
+      ).fadeMs,
     );
+    _djTrace(
+      'ENTRADA cue=${pick.ms} raw=$raw origen=${pick.origin} '
+      'voz=${pick.voice.toStringAsFixed(2)}',
+    );
+    return pick.ms;
   }
 
   Future<int> _formulaCueIn(String path, Player player) async {
@@ -494,7 +509,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     String key =
         '$durationMs|$path|$formula|'
         '${TrackTags.peek(path)?.tailMs ?? 0}|${TrackTags.peek(path)?.bpm ?? 0}';
-    if (formula == MixFormula.phraseGrid || formula == MixFormula.dnaEnergy) {
+    if (_wantsPhraseProfile()) {
       final String? peer = _phrasePeerPath();
       key =
           '$key|${PhraseGridMemory.stamp(path)}|${PhraseGridMemory.stamp(peer)}|$peer';
@@ -542,13 +557,16 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       bpm: bpm,
       gridMs: g0,
       cueMinMs: activeCueMinMs(durationMs: effDurMs, leadMs: leadMs),
+      phrases: grid?.phrases,
     );
     final String tramo = effDurMs > 0
         ? ((w.mixOutMs - w.cueInMs) * 100 / effDurMs).toStringAsFixed(1)
         : '0';
     _djTrace(
       'VENTANA ${look.label} cue=${w.cueInMs} out=${w.mixOutMs} '
-      'cand=$cand fade=${w.fadeMs} tramo=$tramo%',
+      'cand=$cand fade=${w.fadeMs} tramo=$tramo% '
+      'pos=${effDurMs > 0 ? (w.mixOutMs * 100 / effDurMs).toStringAsFixed(1) : '0'}% '
+      'origen=${w.origin} voz=${w.voice.toStringAsFixed(2)}',
     );
     return w.mixOutMs;
   }
