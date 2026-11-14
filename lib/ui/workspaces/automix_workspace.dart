@@ -9,6 +9,7 @@ import '../../core/audio_path.dart';
 import '../../core/bpm_range.dart';
 import '../../core/brand_paths.dart';
 import '../../core/lab_quarantine.dart';
+import '../../core/track_name_clean.dart';
 import '../../djiphone/iphone_library.dart';
 import '../../providers/directory_provider.dart';
 import '../../providers/automix_provider.dart';
@@ -124,7 +125,9 @@ class AutomixMobileLibrary extends ConsumerWidget {
         final String? current = ref.read(automixProvider).currentTrackPath;
         if (current != null && sameAudioPath(current, file.path)) return;
         final List<String> paths = queueWithPlayNext(
-          <String>[for (final File item in ref.read(automixQueueProvider)) item.path],
+          <String>[
+            for (final File item in ref.read(automixQueueProvider)) item.path,
+          ],
           current,
           file.path,
         );
@@ -373,6 +376,10 @@ class FolderContentPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final dirState = ref.watch(directoryProvider);
+    // 3.1.40: los `_K` (karaoke, solo TV) no se listan ni se cargan.
+    final folderFiles = dirState.files
+        .where((f) => !isKaraokeAudioPath(f.path))
+        .toList();
     final bpmCache = ref.watch(bpmCacheProvider);
     final bool isMobile = MediaQuery.of(context).size.width < 800;
 
@@ -434,17 +441,17 @@ class FolderContentPanel extends ConsumerWidget {
                 ),
               ),
               ElevatedButton.icon(
-                onPressed: dirState.files.isEmpty
+                onPressed: folderFiles.isEmpty
                     ? null
                     : () {
-                        for (var f in dirState.files) {
+                        for (var f in folderFiles) {
                           ref
                               .read(playedTracksProvider.notifier)
                               .removeTrack(f.path);
                         }
                         ref
                             .read(automixQueueProvider.notifier)
-                            .addAll(dirState.files);
+                            .addAll(folderFiles);
                         onLoaded?.call();
                       },
                 icon: Icon(Icons.playlist_add, size: isMobile ? 14 : 16),
@@ -463,7 +470,7 @@ class FolderContentPanel extends ConsumerWidget {
           ),
         ),
         Expanded(
-          child: dirState.files.isEmpty
+          child: folderFiles.isEmpty
               ? const Center(
                   child: Text(
                     "Carpeta vacía o sin MP3.",
@@ -471,9 +478,9 @@ class FolderContentPanel extends ConsumerWidget {
                   ),
                 )
               : ListView.builder(
-                  itemCount: dirState.files.length,
+                  itemCount: folderFiles.length,
                   itemBuilder: (context, index) {
-                    final file = dirState.files[index];
+                    final file = folderFiles[index];
                     final fileName = file.uri.pathSegments.last;
                     final bpm = getTrackBpm(fileName);
 
@@ -499,7 +506,7 @@ class FolderContentPanel extends ConsumerWidget {
                           ),
                         ),
                         title: Text(
-                          fileName,
+                          formatTrackTitle(file.path, bpm: bpm),
                           style: const TextStyle(
                             color: Colors.white70,
                             fontSize: 12,
@@ -875,198 +882,201 @@ class AutomixPanel extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Row(
-            children: [
-              // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
-              if (automixIsMobile()) ...<Widget>[
-                // Flexible: en anchos chicos se recorta con elipsis.
-                Flexible(
-                  child: MusicPickerAddButton(
-                    onPressed: () {
-                      showMusicPickerPanel(
-                        context,
-                        child: (VoidCallback close) =>
-                            AutomixMobileLibrary(onClose: close),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(width: 4),
-              ],
-              Icon(
-                Icons.shuffle,
-                color: const Color(0xFFFF007F),
-                size: isMobile ? 14 : 18,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  "AUTOMIX (${displayFiles.length})",
-                  style: TextStyle(
+                children: [
+                  // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
+                  if (automixIsMobile()) ...<Widget>[
+                    // Flexible: en anchos chicos se recorta con elipsis.
+                    Flexible(
+                      child: MusicPickerAddButton(
+                        onPressed: () {
+                          showMusicPickerPanel(
+                            context,
+                            child: (VoidCallback close) =>
+                                AutomixMobileLibrary(onClose: close),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  Icon(
+                    Icons.shuffle,
                     color: const Color(0xFFFF007F),
-                    fontWeight: FontWeight.bold,
-                    fontSize: isMobile ? 11 : 13,
-                    letterSpacing: 1,
+                    size: isMobile ? 14 : 18,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: 4),
-              Flexible(
-                flex: 2,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerRight,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: displayFiles.isEmpty || isBusy
-                            ? null
-                            : () {
-                                final allPaths = displayFiles
-                                    .map((f) => f.path)
-                                    .toList();
-                                _playLocalTrack(ref, allPaths, 0);
-                              },
-                        icon: Icon(Icons.play_arrow, size: isMobile ? 13 : 16),
-                        label: Text(
-                          "PLAY",
-                          style: TextStyle(
-                            fontSize: isMobile ? 9 : 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF007F),
-                          foregroundColor: Colors.white,
-                          padding: EdgeInsets.symmetric(
-                            horizontal: isMobile ? 6 : 8,
-                          ),
-                          minimumSize: Size(0, isMobile ? 22 : 30),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          visualDensity: VisualDensity.compact,
-                        ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      "AUTOMIX (${displayFiles.length})",
+                      style: TextStyle(
+                        color: const Color(0xFFFF007F),
+                        fontWeight: FontWeight.bold,
+                        fontSize: isMobile ? 11 : 13,
+                        letterSpacing: 1,
                       ),
-                      if (automixQueue.isNotEmpty) ...[
-                        IconButton(
-                          icon: Icon(
-                            Icons.delete_sweep,
-                            color: Colors.redAccent,
-                            size: isMobile ? 16 : 18,
-                          ),
-                          onPressed: () => ref
-                              .read(automixQueueProvider.notifier)
-                              .clearQueue(),
-                          tooltip: "Limpiar Cola",
-                          constraints: const BoxConstraints.tightFor(
-                            width: 28,
-                            height: 28,
-                          ),
-                          padding: EdgeInsets.zero,
-                          visualDensity: VisualDensity.compact,
-                          style: IconButton.styleFrom(
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            Icons.save,
-                            color: const Color(0xFF00FFFF),
-                            size: isMobile ? 16 : 18,
-                          ),
-                          onPressed: () =>
-                              _saveAutomixQueue(context, automixQueue),
-                          tooltip: "Guardar Lista en Disco",
-                          constraints: const BoxConstraints.tightFor(
-                            width: 28,
-                            height: 28,
-                          ),
-                          padding: EdgeInsets.zero,
-                          visualDensity: VisualDensity.compact,
-                          style: IconButton.styleFrom(
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                      ],
-                      IconButton(
-                        icon: Icon(
-                          Icons.folder_open,
-                          color: const Color(0xFF39FF14),
-                          size: isMobile ? 16 : 18,
-                        ),
-                        onPressed: () => _loadAutomixQueue(context, ref),
-                        tooltip: "Cargar Lista",
-                        constraints: const BoxConstraints.tightFor(
-                          width: 28,
-                          height: 28,
-                        ),
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                      PopupMenuButton<TrackSortMode>(
-                        initialValue: sortMode,
-                        padding: EdgeInsets.zero,
-                        iconSize: isMobile ? 16 : 20,
-                        constraints: const BoxConstraints.tightFor(
-                          width: 28,
-                          height: 28,
-                        ),
-                        icon: Icon(
-                          Icons.sort,
-                          color: Colors.white70,
-                          size: isMobile ? 16 : 20,
-                        ),
-                        color: GatoMixTheme.bgDark,
-                        shape: RoundedRectangleBorder(
-                          side: const BorderSide(color: Color(0xFFFF007F)),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        tooltip: "Ordenar Automix",
-                        onSelected: (mode) => ref
-                            .read(trackSortProvider.notifier)
-                            .updateMode(mode),
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
-                            value: TrackSortMode.alphabetical,
-                            child: Text(
-                              "Alfabético (A-Z)",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    flex: 2,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: displayFiles.isEmpty || isBusy
+                                ? null
+                                : () {
+                                    final allPaths = displayFiles
+                                        .map((f) => f.path)
+                                        .toList();
+                                    _playLocalTrack(ref, allPaths, 0);
+                                  },
+                            icon: Icon(
+                              Icons.play_arrow,
+                              size: isMobile ? 13 : 16,
+                            ),
+                            label: Text(
+                              "PLAY",
                               style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
+                                fontSize: isMobile ? 9 : 11,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ),
-                          PopupMenuItem(
-                            value: TrackSortMode.bpmDesc,
-                            child: Text(
-                              "BPM (Mayor a Menor)",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFFF007F),
+                              foregroundColor: Colors.white,
+                              padding: EdgeInsets.symmetric(
+                                horizontal: isMobile ? 6 : 8,
                               ),
+                              minimumSize: Size(0, isMobile ? 22 : 30),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: VisualDensity.compact,
                             ),
                           ),
-                          PopupMenuItem(
-                            value: TrackSortMode.bpmAsc,
-                            child: Text(
-                              "BPM (Menor a Mayor)",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
+                          if (automixQueue.isNotEmpty) ...[
+                            IconButton(
+                              icon: Icon(
+                                Icons.delete_sweep,
+                                color: Colors.redAccent,
+                                size: isMobile ? 16 : 18,
+                              ),
+                              onPressed: () => ref
+                                  .read(automixQueueProvider.notifier)
+                                  .clearQueue(),
+                              tooltip: "Limpiar Cola",
+                              constraints: const BoxConstraints.tightFor(
+                                width: 28,
+                                height: 28,
+                              ),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              style: IconButton.styleFrom(
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                               ),
                             ),
+                            IconButton(
+                              icon: Icon(
+                                Icons.save,
+                                color: const Color(0xFF00FFFF),
+                                size: isMobile ? 16 : 18,
+                              ),
+                              onPressed: () =>
+                                  _saveAutomixQueue(context, automixQueue),
+                              tooltip: "Guardar Lista en Disco",
+                              constraints: const BoxConstraints.tightFor(
+                                width: 28,
+                                height: 28,
+                              ),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              style: IconButton.styleFrom(
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ),
+                          ],
+                          IconButton(
+                            icon: Icon(
+                              Icons.folder_open,
+                              color: const Color(0xFF39FF14),
+                              size: isMobile ? 16 : 18,
+                            ),
+                            onPressed: () => _loadAutomixQueue(context, ref),
+                            tooltip: "Cargar Lista",
+                            constraints: const BoxConstraints.tightFor(
+                              width: 28,
+                              height: 28,
+                            ),
+                            padding: EdgeInsets.zero,
+                            visualDensity: VisualDensity.compact,
+                            style: IconButton.styleFrom(
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                          ),
+                          PopupMenuButton<TrackSortMode>(
+                            initialValue: sortMode,
+                            padding: EdgeInsets.zero,
+                            iconSize: isMobile ? 16 : 20,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 28,
+                              height: 28,
+                            ),
+                            icon: Icon(
+                              Icons.sort,
+                              color: Colors.white70,
+                              size: isMobile ? 16 : 20,
+                            ),
+                            color: GatoMixTheme.bgDark,
+                            shape: RoundedRectangleBorder(
+                              side: const BorderSide(color: Color(0xFFFF007F)),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            tooltip: "Ordenar Automix",
+                            onSelected: (mode) => ref
+                                .read(trackSortProvider.notifier)
+                                .updateMode(mode),
+                            itemBuilder: (context) => const [
+                              PopupMenuItem(
+                                value: TrackSortMode.alphabetical,
+                                child: Text(
+                                  "Alfabético (A-Z)",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: TrackSortMode.bpmDesc,
+                                child: Text(
+                                  "BPM (Mayor a Menor)",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: TrackSortMode.bpmAsc,
+                                child: Text(
+                                  "BPM (Menor a Mayor)",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-              ),
-            ],
+                ],
               ),
             ],
           ),
@@ -1108,7 +1118,7 @@ class AutomixPanel extends ConsumerWidget {
                           size: 18,
                         ),
                         title: Text(
-                          fileName,
+                          formatTrackTitle(file.path, bpm: bpm),
                           style: TextStyle(
                             color: isPlayingThisTrack
                                 ? const Color(0xFFFF007F)
@@ -1331,7 +1341,7 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
 
     String displayTitle = "Esperando pista...";
     if (currentTrackPath != null) {
-      displayTitle = currentTrackPath.replaceAll('\\', '/').split('/').last;
+      displayTitle = formatTrackTitle(currentTrackPath);
     }
 
     String displaySubtitle = isPlaying
@@ -1596,7 +1606,8 @@ class _MixerPanelState extends ConsumerState<MixerPanel> {
                           Expanded(
                             child: SizedBox(
                               // Móvil acostado: letra más baja, cola más alta.
-                              height: MediaQuery.of(context).orientation ==
+                              height:
+                                  MediaQuery.of(context).orientation ==
                                       Orientation.landscape
                                   ? 80
                                   : 100,
@@ -2292,7 +2303,7 @@ class _LyricsSyncPanelState extends ConsumerState<LyricsSyncPanel> {
     final automixState = ref.read(automixProvider);
     final lyrics = automixState.lyrics;
     final displayTitle = automixState.currentTrackPath != null
-        ? automixState.currentTrackPath!.replaceAll('\\', '/').split('/').last
+        ? formatTrackTitle(automixState.currentTrackPath!)
         : "Visor de Letras en Vivo";
 
     showDialog(

@@ -43,12 +43,7 @@ bool musicPickerHasLrc(String path) {
   return File(lrc).existsSync();
 }
 
-String musicPickerTitle(String path) {
-  final String name = path.split(Platform.pathSeparator).last;
-  final int dot = name.lastIndexOf('.');
-  if (dot <= 0) return name;
-  return name.substring(0, dot);
-}
+String musicPickerTitle(String path) => formatTrackTitle(path);
 
 List<String> queueWithPlayNext(
   List<String> queue,

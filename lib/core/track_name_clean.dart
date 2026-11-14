@@ -220,3 +220,38 @@ String ytTitleToStem(String rawTitle) {
   final String out = stem.replaceAll(_fsForbidden, '').trim();
   return out.isEmpty ? 'Pista' : out;
 }
+
+final RegExp _displayExt = RegExp(r'\.[A-Za-z0-9]{2,4}$');
+final RegExp _displayKaraoke = RegExp(r'_[kK]$');
+final RegExp _displayBpm = RegExp(
+  r'\s*\((\d{2,3}(?:[.,]\d+)?)\s*bpm\)',
+  caseSensitive: false,
+);
+
+/// 3.1.40: titulo visible `Cantante (110) - Titulo`. Quita carpeta,
+/// extension, `_K` y ` (N BPM)`. El BPM sale del nombre o de [bpm] (40-250);
+/// sin BPM queda `Cantante - Titulo`. No abre el archivo.
+String formatTrackTitle(String path, {double bpm = 0}) {
+  String name = path.replaceAll('\\', '/');
+  final int slash = name.lastIndexOf('/');
+  if (slash >= 0) name = name.substring(slash + 1);
+  final String raw = name;
+  name = name.replaceFirst(_displayExt, '');
+  name = name.replaceFirst(_displayKaraoke, '');
+  double named = 0;
+  final RegExpMatch? m = _displayBpm.firstMatch(name);
+  if (m != null) {
+    named = double.tryParse(m.group(1)!.replaceAll(',', '.')) ?? 0;
+    name = name.substring(0, m.start) + name.substring(m.end);
+  }
+  name = name.replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+  if (name.isEmpty) return raw;
+  final double value = named >= 40 && named <= 250
+      ? named
+      : (bpm >= 40 && bpm <= 250 ? bpm : 0);
+  if (value <= 0) return name;
+  final String tag = '(${value.round()})';
+  final int sep = name.indexOf(' - ');
+  if (sep <= 0) return '$name $tag';
+  return '${name.substring(0, sep)} $tag${name.substring(sep)}';
+}

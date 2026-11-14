@@ -18,6 +18,7 @@ import 'livedj_folder_playlist.dart';
 import '../../core/audio/cue_preview.dart';
 import '../../core/livedj_next.dart';
 import '../../core/queue_bpm.dart';
+import '../../core/track_name_clean.dart';
 
 /// Texto del buscador de la cola (solo filtra la vista; la cola real no cambia).
 final liveDjQueueSearchProvider = StateProvider<String>((ref) => '');
@@ -194,6 +195,10 @@ class LiveDjFolderPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final dirState = ref.watch(liveDjDirectoryProvider);
+    // 3.1.40: los `_K` (karaoke, solo TV) no se listan en la carpeta.
+    final folderFiles = dirState.files
+        .where((f) => !isKaraokeAudioPath(f.path))
+        .toList();
     final bool isMobile = MediaQuery.of(context).size.width < 800;
 
     return Column(
@@ -224,12 +229,10 @@ class LiveDjFolderPanel extends ConsumerWidget {
                 ),
               ),
               ElevatedButton.icon(
-                onPressed: dirState.files.isEmpty
+                onPressed: folderFiles.isEmpty
                     ? null
                     : () async {
-                        final rawFiles = dirState.files
-                            .whereType<File>()
-                            .toList();
+                        final rawFiles = folderFiles.whereType<File>().toList();
                         final notifier = ref.read(liveDjProvider.notifier);
                         notifier.addAllTracks(rawFiles);
                         if (ref.read(liveDjProvider).currentTrackPath == null) {
@@ -252,7 +255,7 @@ class LiveDjFolderPanel extends ConsumerWidget {
           ),
         ),
         Expanded(
-          child: dirState.files.isEmpty
+          child: folderFiles.isEmpty
               ? const Center(
                   child: Text(
                     "Carpeta vacía o sin MP3.",
@@ -261,10 +264,9 @@ class LiveDjFolderPanel extends ConsumerWidget {
                 )
               : ListView.builder(
                   physics: const BouncingScrollPhysics(),
-                  itemCount: dirState.files.length,
+                  itemCount: folderFiles.length,
                   itemBuilder: (context, index) {
-                    final file = dirState.files[index];
-                    final fileName = file.uri.pathSegments.last;
+                    final file = folderFiles[index];
 
                     return Material(
                       color: Colors.transparent,
@@ -285,7 +287,7 @@ class LiveDjFolderPanel extends ConsumerWidget {
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
-                                fileName,
+                                formatTrackTitle(file.path),
                                 style: const TextStyle(
                                   color: Colors.white70,
                                   fontSize: 12,
@@ -407,8 +409,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                     : GatoMixTheme.syncActive));
 
     final isShuffle = state.mixStrategy == LiveDjMixStrategy.random;
-    final compact =
-        widget.compactOverride ?? liveDjIsMobile();
+    final compact = widget.compactOverride ?? liveDjIsMobile();
     final bool playlistOn = ref.watch(liveDjPlaylistViewProvider);
     final bool menuOpen = compact ? ref.watch(mobileNavOpenProvider) : false;
     final gap = compact ? 4.0 : 10.0;
@@ -562,7 +563,7 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                   ),
                   SizedBox(height: compact ? 2 : 5),
                   Text(
-                    currentName,
+                    formatTrackTitle(currentName),
                     style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
@@ -597,24 +598,24 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
             if (!compact) ...[
               const SizedBox(width: 6),
               if (!compact)
-              Tooltip(
-                message: playlistOn
-                    ? 'Volver a Explorador y Cartridge'
-                    : 'Vista de la carpeta',
-                child: GestureDetector(
-                  onTap: () {
-                    ref.read(liveDjPlaylistViewProvider.notifier).state =
-                        !playlistOn;
-                  },
-                  child: Icon(
-                    Icons.album,
-                    size: 28,
-                    color: playlistOn
-                        ? GatoMixTheme.syncActive
-                        : Colors.white70,
+                Tooltip(
+                  message: playlistOn
+                      ? 'Volver a Explorador y Cartridge'
+                      : 'Vista de la carpeta',
+                  child: GestureDetector(
+                    onTap: () {
+                      ref.read(liveDjPlaylistViewProvider.notifier).state =
+                          !playlistOn;
+                    },
+                    child: Icon(
+                      Icons.album,
+                      size: 28,
+                      color: playlistOn
+                          ? GatoMixTheme.syncActive
+                          : Colors.white70,
+                    ),
                   ),
                 ),
-              ),
             ],
           ],
         ),
@@ -1085,25 +1086,25 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                       !menuOpen,
                 ),
                 if (!compact)
-                Tooltip(
-                  message: playlistOn
-                      ? 'Volver a GatoMix'
-                      : 'Vista de la carpeta',
-                  child: GestureDetector(
-                    onTap: () {
-                      ref.read(liveDjPlaylistViewProvider.notifier).state =
-                          !playlistOn;
-                    },
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
-                      child: Icon(
-                        Icons.album,
-                        size: 26,
-                        color: GatoMixTheme.syncActive,
+                  Tooltip(
+                    message: playlistOn
+                        ? 'Volver a GatoMix'
+                        : 'Vista de la carpeta',
+                    child: GestureDetector(
+                      onTap: () {
+                        ref.read(liveDjPlaylistViewProvider.notifier).state =
+                            !playlistOn;
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Icon(
+                          Icons.album,
+                          size: 26,
+                          color: GatoMixTheme.syncActive,
+                        ),
                       ),
                     ),
                   ),
-                ),
                 Expanded(child: routingBar),
               ],
             ),
@@ -1153,31 +1154,31 @@ class _LiveDjPlayerPanelState extends ConsumerState<LiveDjPlayerPanel> {
                             ),
                           ),
                           if (!compact)
-                          Tooltip(
-                            message: playlistOn
-                                ? 'Volver a Explorador y Cartridge'
-                                : 'Vista de la carpeta',
-                            child: GestureDetector(
-                              onTap: () {
-                                ref
-                                        .read(
-                                          liveDjPlaylistViewProvider.notifier,
-                                        )
-                                        .state =
-                                    !playlistOn;
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.all(6),
-                                child: Icon(
-                                  Icons.album,
-                                  size: 26,
-                                  color: playlistOn
-                                      ? GatoMixTheme.syncActive
-                                      : Colors.white70,
+                            Tooltip(
+                              message: playlistOn
+                                  ? 'Volver a Explorador y Cartridge'
+                                  : 'Vista de la carpeta',
+                              child: GestureDetector(
+                                onTap: () {
+                                  ref
+                                          .read(
+                                            liveDjPlaylistViewProvider.notifier,
+                                          )
+                                          .state =
+                                      !playlistOn;
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.all(6),
+                                  child: Icon(
+                                    Icons.album,
+                                    size: 26,
+                                    color: playlistOn
+                                        ? GatoMixTheme.syncActive
+                                        : Colors.white70,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
                         ],
                       ),
                     ),
@@ -1457,89 +1458,90 @@ class LiveDjCartridgePanel extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Row(
-            children: [
-              // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
-              if (liveDjIsMobile()) ...<Widget>[
-                // Flexible: en anchos chicos se recorta con elipsis.
-                Flexible(
-                  child: MusicPickerAddButton(
-                    onPressed: () {
-                      showMusicPickerPanel(
-                        context,
-                        child: (VoidCallback close) =>
-                            LiveDjMobileLibrary(onClose: close),
-                      );
-                    },
+                children: [
+                  // 3.1.25: "+ Agregar canciones" de 48 px dentro de la fila.
+                  if (liveDjIsMobile()) ...<Widget>[
+                    // Flexible: en anchos chicos se recorta con elipsis.
+                    Flexible(
+                      child: MusicPickerAddButton(
+                        onPressed: () {
+                          showMusicPickerPanel(
+                            context,
+                            child: (VoidCallback close) =>
+                                LiveDjMobileLibrary(onClose: close),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  const Icon(Icons.shuffle, color: Colors.pinkAccent, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "CARTRIDGE (${shown.length})",
+                      style: const TextStyle(
+                        color: Colors.pinkAccent,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                        letterSpacing: 1.5,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 4),
-              ],
-              const Icon(Icons.shuffle, color: Colors.pinkAccent, size: 18),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  "CARTRIDGE (${shown.length})",
-                  style: const TextStyle(
-                    color: Colors.pinkAccent,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                    letterSpacing: 1.5,
+                  IconButton(
+                    icon: const Icon(
+                      Icons.delete_sweep,
+                      color: Colors.redAccent,
+                      size: 18,
+                    ),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 28,
+                      height: 28,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: radioOn || queue.isEmpty
+                        ? null
+                        : () => ref.read(liveDjProvider.notifier).clearQueue(),
+                    tooltip: "Borrar Cola",
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              IconButton(
-                icon: const Icon(
-                  Icons.delete_sweep,
-                  color: Colors.redAccent,
-                  size: 18,
-                ),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 28,
-                  height: 28,
-                ),
-                visualDensity: VisualDensity.compact,
-                onPressed: radioOn || queue.isEmpty
-                    ? null
-                    : () => ref.read(liveDjProvider.notifier).clearQueue(),
-                tooltip: "Borrar Cola",
-              ),
-              IconButton(
-                icon: const Icon(
-                  Icons.save,
-                  color: Colors.cyanAccent,
-                  size: 18,
-                ),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 28,
-                  height: 28,
-                ),
-                visualDensity: VisualDensity.compact,
-                onPressed: queue.isEmpty
-                    ? null
-                    : () => ref.read(liveDjProvider.notifier).savePlaylist(),
-                tooltip: "Guardar Playlist",
-              ),
-              IconButton(
-                icon: const Icon(
-                  Icons.folder_open,
-                  color: Colors.greenAccent,
-                  size: 18,
-                ),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 28,
-                  height: 28,
-                ),
-                visualDensity: VisualDensity.compact,
-                onPressed: () =>
-                    ref.read(liveDjProvider.notifier).loadPlaylist(),
-                tooltip: "Cargar Playlist",
-              ),
-            ],
+                  IconButton(
+                    icon: const Icon(
+                      Icons.save,
+                      color: Colors.cyanAccent,
+                      size: 18,
+                    ),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 28,
+                      height: 28,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: queue.isEmpty
+                        ? null
+                        : () =>
+                              ref.read(liveDjProvider.notifier).savePlaylist(),
+                    tooltip: "Guardar Playlist",
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.folder_open,
+                      color: Colors.greenAccent,
+                      size: 18,
+                    ),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 28,
+                      height: 28,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () =>
+                        ref.read(liveDjProvider.notifier).loadPlaylist(),
+                    tooltip: "Cargar Playlist",
+                  ),
+                ],
               ),
             ],
           ),
@@ -1562,7 +1564,6 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                     final index = visible[vi];
                     final String path = shown[index];
                     final File file = File(path);
-                    final fileName = path.replaceAll('\\', '/').split('/').last;
 
                     return Material(
                       color: Colors.transparent,
@@ -1585,7 +1586,7 @@ class LiveDjCartridgePanel extends ConsumerWidget {
                           ],
                         ),
                         title: Text(
-                          fileName,
+                          formatTrackTitle(path),
                           style: const TextStyle(
                             color: Colors.white70,
                             fontSize: 12,
