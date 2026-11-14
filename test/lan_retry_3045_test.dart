@@ -76,6 +76,48 @@ void main() {
     );
   });
 
+  test(
+    '3.1.37 ORIGEN = raiz de Musica: espejo sin Music/ extra y sin auxiliares',
+    () {
+      const String base = r'C:\Users\ASUS\Music';
+      expect(
+        lanMirrorFolder(
+          musicBase: base,
+          selectedPath: base,
+          filePath: r'C:\Users\ASUS\Music\ReGenial\Salsa\a.mp3',
+        ),
+        'ReGenial/Salsa',
+      );
+      expect(
+        lanMirrorFolder(
+          musicBase: base,
+          selectedPath: base,
+          filePath: r'C:\Users\ASUS\Music\suelta.mp3',
+        ),
+        '',
+      );
+      bool skip(String sel, String f) =>
+          lanSkipOnClone(musicBase: base, selectedPath: sel, filePath: f);
+      expect(skip(base, r'C:\Users\ASUS\Music\Descargas\x.mp3'), isTrue);
+      expect(skip(base, r'C:\Users\ASUS\Music\DjPlaylists\l.txt'), isTrue);
+      expect(skip(base, r'C:\Users\ASUS\Music\GatoMix_LAB\r\m.mp3'), isTrue);
+      expect(skip(base, r'C:\Users\ASUS\Music\djstudio_lab\m.mp3'), isTrue);
+      expect(skip(base, r'C:\Users\ASUS\Music\.cache\m.mp3'), isTrue);
+      expect(skip(base, r'C:\Users\ASUS\Music\ReGenial\Salsa\a.mp3'), isFalse);
+      expect(skip(base, r'C:\Users\ASUS\Music\suelta.mp3'), isFalse);
+      // Una carpeta elegida a proposito no se filtra.
+      expect(
+        skip(
+          r'C:\Users\ASUS\Music\Descargas',
+          r'C:\Users\ASUS\Music\Descargas\x.mp3',
+        ),
+        isFalse,
+      );
+      // WIPE desde la raiz: carpeta vacia, el servidor no borra nada.
+      expect(lanWipeTarget(lanRelUnder(base, base)), isNull);
+    },
+  );
+
   test('3.1.36 blindaje: .., ReGenial y WIPE solo de la carpeta clonada', () {
     expect(lanUnsafeRel('ROOT/../Windows'), isTrue);
     expect(lanUnsafeRel(r'ReGenial\..\..\x'), isTrue);

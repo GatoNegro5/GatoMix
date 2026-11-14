@@ -204,13 +204,29 @@ String lanMirrorFolder({
   final int cut = f.lastIndexOf('/');
   final String parent = cut < 0 ? '' : f.substring(0, cut);
   final String? underMusic = lanRelUnder(musicBase, selectedPath);
-  if (underMusic != null && underMusic.isNotEmpty) {
+  // 3.1.37: tambien con la raiz elegida (underMusic vacio): sin `Music/` extra.
+  if (underMusic != null) {
     return lanRelUnder(musicBase, parent) ?? underMusic;
   }
   final List<String> sel = _lanSegs(selectedPath);
   final String name = sel.isEmpty ? '' : sel.last;
   final String sub = lanRelUnder(selectedPath, parent) ?? '';
   return sub.isEmpty ? name : '$name/$sub';
+}
+
+/// 3.1.37: al clonar la raiz de Musica entera se saltan las carpetas
+/// auxiliares (Descargas, DjPlaylists, LAB) y las ocultas (`.x`).
+bool lanSkipOnClone({
+  required String musicBase,
+  required String selectedPath,
+  required String filePath,
+}) {
+  if (lanRelUnder(musicBase, selectedPath) != '') return false;
+  final String? rel = lanRelUnder(musicBase, filePath);
+  if (rel == null) return false;
+  final List<String> s = _lanSegs(rel);
+  if (s.length < 2) return false;
+  return lanIsHiddenDest(rel) || s.first.startsWith('.');
 }
 
 /// 3.1.36: carpeta que borra WIPE en un receptor movil (`Musica/<clonada>`);

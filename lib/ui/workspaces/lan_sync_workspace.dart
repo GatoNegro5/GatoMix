@@ -1624,10 +1624,17 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       } else {
         Set<String> pushQueue = {};
         if (isDirectoryClone) {
+          final String musicBase = _getBaseMusicPath();
           pushQueue.addAll(
-            _getFilesRecursively(
-              Directory(_selectedLocalPath!),
-            ).map((f) => f.path),
+            _getFilesRecursively(Directory(_selectedLocalPath!))
+                .map((f) => f.path)
+                .where(
+                  (String p) => !lanSkipOnClone(
+                    musicBase: musicBase,
+                    selectedPath: _selectedLocalPath!,
+                    filePath: p,
+                  ),
+                ),
           );
         } else {
           final Map<String, List<String>> dirNames = <String, List<String>>{};
@@ -2183,24 +2190,29 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     );
   }
 
-  Widget _buildLocalTree(List<String> visibleLocalPaths, String basePath) {
+  Widget _buildLocalTree(
+    List<String> visibleLocalPaths,
+    String basePath, {
+    bool showHeader = true,
+  }) {
     return Material(
       color: const Color(0xFF0A0A0A),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            color: Colors.black,
-            child: const Text(
-              "ORIGEN (Local)",
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 11,
+          if (showHeader)
+            Container(
+              padding: const EdgeInsets.all(10),
+              color: Colors.black,
+              child: const Text(
+                "ORIGEN (Local)",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11,
+                ),
               ),
             ),
-          ),
           Expanded(
             child: ListView.builder(
               itemCount: visibleLocalPaths.length,
@@ -2240,7 +2252,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                     size: 18,
                   ),
                   title: Text(
-                    path.split(Platform.pathSeparator).last,
+                    path == basePath
+                        ? lanMusicRootLabel
+                        : path.split(Platform.pathSeparator).last,
                     style: TextStyle(
                       color: isSelected ? Colors.white : Colors.white70,
                       fontSize: 13,
@@ -2687,11 +2701,235 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     );
   }
 
+  /// 3.1.37: LAN Sync en celular: LED + IP/nodos, ORIGEN|DESTINO (por el
+  /// TabController), PUSH/PULL/_K/WIPE y TRANSFERIR en una barra de 44 px;
+  /// las pastillas se desplazan en horizontal si no caben (< 700 dp).
+  Widget _buildCompactLan(
+    List<String> visibleLocalPaths,
+    List<String> visibleRemotePaths,
+    String basePath,
+  ) {
+    final bool canTransfer =
+        _selectedDeviceIp != null &&
+        _selectedRemotePath != null &&
+        _selectedLocalPath != null &&
+        !_isTransferring;
+    final bool canWipe =
+        _selectedDeviceIp != null &&
+        !_isTransferring &&
+        _selectedLocalPath != basePath;
+    final Color modeColor = _isPushMode
+        ? const Color(0xFF39FF14)
+        : const Color(0xFF00FFFF);
+    return DefaultTabController(
+      length: 2,
+      child: Builder(
+        builder: (BuildContext tabContext) {
+          final TabController tabs = DefaultTabController.of(tabContext);
+          return Column(
+            children: [
+              Container(
+                height: 44,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF050505),
+                  border: Border(
+                    bottom: BorderSide(
+                      color: const Color(0xFF00FFFF).withValues(alpha: 0.3),
+                    ),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.circle,
+                      size: 10,
+                      color: _discoveredDevices.isEmpty
+                          ? Colors.white24
+                          : const Color(0xFF39FF14),
+                    ),
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 120),
+                      child: Text(
+                        '$_localIp \u00b7 ${_discoveredDevices.length}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: AnimatedBuilder(
+                          animation: tabs,
+                          builder: (BuildContext context, Widget? _) => Row(
+                            children: [
+                              _lanPill(
+                                'ORIGEN',
+                                tabs.index == 0,
+                                Colors.white,
+                                () => tabs.animateTo(0),
+                              ),
+                              _lanPill(
+                                'DESTINO',
+                                tabs.index == 1,
+                                Colors.white,
+                                () => tabs.animateTo(1),
+                              ),
+                              const SizedBox(width: 8),
+                              _lanPill(
+                                'PUSH',
+                                _isPushMode,
+                                const Color(0xFF39FF14),
+                                () => setState(() => _isPushMode = true),
+                              ),
+                              _lanPill(
+                                'PULL',
+                                !_isPushMode,
+                                const Color(0xFF00FFFF),
+                                () => setState(() => _isPushMode = false),
+                              ),
+                              _lanPill(
+                                '_K',
+                                _sendKaraoke,
+                                const Color(0xFFFF00FF),
+                                _isTransferring
+                                    ? null
+                                    : () => setState(
+                                        () => _sendKaraoke = !_sendKaraoke,
+                                      ),
+                              ),
+                              _lanPill(
+                                'WIPE',
+                                false,
+                                Colors.redAccent,
+                                canWipe ? _promptWipeConfirmation : null,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    SizedBox(
+                      height: 32,
+                      child: ElevatedButton.icon(
+                        onPressed: canTransfer
+                            ? _promptTransferConfirmation
+                            : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: modeColor,
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: Icon(
+                          _isPushMode ? Icons.upload : Icons.download,
+                          size: 16,
+                        ),
+                        label: const Text(
+                          'TRANSFERIR',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildLocalTree(
+                            visibleLocalPaths,
+                            basePath,
+                            showHeader: false,
+                          ),
+                        ),
+                        Expanded(child: _buildLocalFiles()),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Expanded(child: _buildRemoteTree(visibleRemotePaths)),
+                        Expanded(child: _buildRemoteFiles()),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// 3.1.37: pastilla de 28 px de la cabecera compacta (toque en 44 px de alto).
+  Widget _lanPill(
+    String label,
+    bool selected,
+    Color color,
+    VoidCallback? onTap,
+  ) {
+    final bool enabled = onTap != null;
+    return InkWell(
+      onTap: onTap,
+      child: SizedBox(
+        height: 44,
+        child: Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: Center(
+            child: Container(
+              height: 28,
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                color: selected ? color.withValues(alpha: 0.2) : Colors.black,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: selected
+                      ? color
+                      : (enabled
+                            ? color.withValues(alpha: 0.4)
+                            : Colors.white10),
+                ),
+              ),
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: enabled
+                      ? (selected ? Colors.white : Colors.white70)
+                      : Colors.white24,
+                  fontSize: 11,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final basePath = _getBaseMusicPath();
 
-    List<String> visibleLocalPaths = [];
+    // 3.1.37: la raiz de Musica primero en ORIGEN (igual que en DESTINO).
+    List<String> visibleLocalPaths = [basePath];
     for (String path in _localFolderPaths) {
       String rel = path.replaceFirst(basePath, '');
       if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
@@ -2738,6 +2976,15 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     return LayoutBuilder(
       builder: (context, constraints) {
         final bool isMobile = constraints.maxWidth < 850;
+        // 3.1.37: celular (o alto < 500): cabecera unica de 44 px.
+        if (_lanMobile || MediaQuery.sizeOf(context).height < 500) {
+          return Stack(
+            children: [
+              _buildCompactLan(visibleLocalPaths, visibleRemotePaths, basePath),
+              _buildTransferOverlay(),
+            ],
+          );
+        }
         Widget headerTelemetry = Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
@@ -2869,7 +3116,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
                       const SizedBox(width: 25),
                       // 🛠️ BOTÓN DE WIPE RÁPIDO
                       ElevatedButton.icon(
-                        onPressed: _selectedDeviceIp != null && !_isTransferring
+                        onPressed:
+                            _selectedDeviceIp != null &&
+                                !_isTransferring &&
+                                _selectedLocalPath != basePath
                             ? _promptWipeConfirmation
                             : null,
                         style: ElevatedButton.styleFrom(
