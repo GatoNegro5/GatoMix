@@ -184,6 +184,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   // Pista elegida para el relevo, antes de que el deck termine de abrirla.
   // La rampa de tempo la usa; no espera al throttle de la UI.
   String? _driftNextPath;
+  // 3.1.33 (Hueco B): ultima siguiente precalentada en AdaptiveEq.
+  String? _warmedPath;
   int _radioSaveSerial = 0;
   Future<void> _radioSaveChain = Future<void>.value();
   String? _radioRootOverride;
@@ -1644,6 +1646,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           }
         }
 
+        // 3.1.33 (Hueco B): precalienta EQ y sonoridad de la siguiente apenas
+        // se conoce (Normal: cabeza de la cola; Radio: la elegida).
+        final String? warmPeer = _phrasePeerPath();
+        if (warmPeer != null && warmPeer != _warmedPath) {
+          _warmedPath = warmPeer;
+          unawaited(AdaptiveEq.prefetch(warmPeer));
+        }
+
         // No se arma durante un cruce: el deck "standby" es el que aún suena
         // (saliendo); recargarlo mete pistas fantasma y deja el armado huérfano.
         if (!_isStandbyArmed &&
@@ -1864,8 +1874,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         try {
           await _activePlayer.setRate(1.0);
         } catch (_) {}
-        await _activePlayer.open(Media(path), play: true);
+        // 3.1.33 (Hueco C): suena ya nivelada; espera el perfil hasta 300 ms.
+        await _activePlayer.open(Media(path), play: false);
         ref.read(liveDjEqualizerProvider.notifier).adapt(_activePlayer, path);
+        await AdaptiveEq.awaitProfile(path);
+        await _activePlayer.play();
         _attachListeners(_activePlayer);
       } catch (e) {
         debugPrint("🔴 [LIVEDJ OPEN]: $e");

@@ -40,6 +40,7 @@ import 'db_provider.dart';
 import 'nlp_provider.dart';
 import 'equalizer_provider.dart';
 import 'mix_formula.dart' show seamGain, seamVolume, snapCueToBeat;
+import '../services/adaptive_eq.dart' show AdaptiveEq;
 
 // 🛡️ FIX: Dependencia para dspWorkerProvider
 
@@ -981,6 +982,8 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (state.duration.inMilliseconds == 0) return;
     final nextIdx = _calculateNextIndex();
     final nextPath = nextIdx != -1 ? state.playlist[nextIdx] : null;
+    // 3.1.33 (Hueco A): perfil de EQ y sonoridad en cache antes del cruce.
+    if (nextPath != null) unawaited(AdaptiveEq.prefetch(nextPath));
 
     int safeMixOutMs = _mixOutIsManual ? state.customMixOutMs : -1;
     int safeCueInMs = state.customCueInMs;
@@ -1691,7 +1694,9 @@ class AutomixNotifier extends Notifier<AutomixState> {
       platformIn?.setProperty('af', useBassSwap ? lowCutIn : inBase());
       platformOut?.setProperty('af', outBase());
 
-      await incomingPlayer.setVolume(0.0);
+      // 3.1.33 (Hueco F): volumen por setDeckVolume (respeta la rampa de
+      // sonoridad de AdaptiveEq si el perfil llega a mitad del cruce).
+      await AdaptiveEq.setDeckVolume(incomingPlayer, 0.0);
 
       final int mixEpoch = _mix.epoch;
       final MixRunClock fadeClock = _mix.beginFade(mixDurationMs);
@@ -1722,8 +1727,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
           platformIn?.setProperty('af', inBase());
         }
 
-        await incomingPlayer.setVolume(seamVolume(smoothRateIn));
-        await fadingPlayer.setVolume(seamVolume(smoothRateOut));
+        await AdaptiveEq.setDeckVolume(
+          incomingPlayer,
+          seamVolume(smoothRateIn),
+        );
+        await AdaptiveEq.setDeckVolume(
+          fadingPlayer,
+          seamVolume(smoothRateOut),
+        );
 
         await _mix.slice(32, fadeClock);
       }
@@ -1740,10 +1751,10 @@ class AutomixNotifier extends Notifier<AutomixState> {
       if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
 
       try {
-        await incomingPlayer.setVolume(100.0);
+        await AdaptiveEq.setDeckVolume(incomingPlayer, 100.0);
         platformIn?.setProperty('af', inBase());
         platformOut?.setProperty('af', outBase());
-        await fadingPlayer.setVolume(0.0);
+        await AdaptiveEq.setDeckVolume(fadingPlayer, 0.0);
         await fadingPlayer.setRate(1.0);
         await fadingPlayer.stop();
       } catch (_) {}
@@ -2352,8 +2363,11 @@ class AutomixNotifier extends Notifier<AutomixState> {
       await incoming.setRate(1.0);
     } catch (_) {}
     await incoming.setVolume(100.0);
-    await incoming.open(Media(path), play: true);
+    // 3.1.33 (Hueco C): suena ya nivelada; espera el perfil hasta 300 ms.
+    await incoming.open(Media(path), play: false);
     ref.read(automixEqualizerProvider.notifier).adapt(incoming, path);
+    await AdaptiveEq.awaitProfile(path);
+    await incoming.play();
     try {
       await incoming.stream.duration
           .firstWhere((d) => d.inMilliseconds > 0)

@@ -392,6 +392,28 @@ class AdaptiveEq {
         .whenComplete(() => _pending.remove(k));
   }
 
+  /// 3.1.33 (Huecos A/B): mide y guarda el perfil de [path] en segundo plano
+  /// (misma cola, `_mem`/`_pending` y `_adaptive_audio.json`), sin deck.
+  static Future<void> prefetch(String path) async {
+    if (!enabled || path.isEmpty) return;
+    try {
+      await profile(path);
+    } catch (_) {}
+  }
+
+  /// 3.1.33 (Hueco C): espera el perfil de [path] hasta [ms]. En cache
+  /// resuelve al instante; si tarda mas, sigue y la rampa lo aplica despues.
+  static Future<void> awaitProfile(String path, {int ms = 300}) async {
+    if (!enabled || path.isEmpty) return;
+    try {
+      await profile(path).timeout(Duration(milliseconds: ms));
+    } catch (_) {}
+  }
+
+  /// Solo pruebas: deja [p] en la cache de memoria de [path].
+  @visibleForTesting
+  static void debugSeed(String path, AdaptiveProfile? p) => _mem[_key(path)] = p;
+
   static Future<AdaptiveProfile?> _enqueue(
     Future<AdaptiveProfile?> Function() job,
   ) {
@@ -540,6 +562,37 @@ class AdaptiveEq {
   // Nivel típico de música comercial por banda octava (dB, relativo a 1 kHz).
   static const List<double> _target = [-1, 4, 6, 3, 1, 0, -3, -6, -11, -18];
 
+  /// 3.1.33: 16 kHz solo se realza si hay aire real (16-19 kHz frente a
+  /// 11-16 kHz por encima de este umbral). Un MP3 con paso bajo en 16 kHz
+  /// queda debajo: realzarlo subiria artefactos y restaria margen.
+  static const double airMinDb = -20.0;
+
+  /// Correccion (dB) de las 10 bandas desde el nivel medido [lv] de cada una.
+  /// Bandas 0-8 iguales a la 1.0.x; 16 kHz hasta +1,5 solo con [airDb] >
+  /// [airMinDb].
+  @visibleForTesting
+  static List<double> bandCorrection(List<double> lv, {double airDb = -99.0}) {
+    final out = List<double>.filled(10, 0);
+    if (lv.length != 10) return out;
+    double m = 0;
+    for (int i = 2; i <= 7; i++) {
+      m += lv[i] - _target[i];
+    }
+    m /= 6;
+    for (int i = 0; i < 10; i++) {
+      final d = lv[i] - _target[i] - m;
+      double c = -0.5 * d;
+      if ((i >= 8 || i == 0) && d < -12) c = 0; // banda vacia: no se realza
+      double hiLim = 3.0;
+      if (i == 0) hiLim = 1.0;
+      if (i == 8) hiLim = 2.0;
+      if (i == 9) hiLim = airDb > airMinDb ? 1.5 : 0.0;
+      c = c.clamp(-3.0, hiLim).toDouble();
+      out[i] = (c * 10).round() / 10;
+    }
+    return out;
+  }
+
   static AdaptiveProfile? _analyze(Uint8List b, {bool lufsDone = false}) {
     final n = b.length ~/ 2;
     const int fft = 4096;
@@ -646,23 +699,19 @@ class AdaptiveEq {
       e /= frames;
       lv[bI] = 10 * log(e + 1e-12) / ln10;
     }
-    double m = 0;
-    for (int i = 2; i <= 7; i++) {
-      m += lv[i] - _target[i];
+    // 3.1.33: aire real (16-19 kHz frente a 11-16 kHz) para 16 kHz.
+    double airLo = 0, airHi = 0;
+    final int airA = (11314 / binHz).floor().clamp(1, fft ~/ 2 - 1).toInt();
+    final int airB = (16000 / binHz).floor().clamp(airA + 1, fft ~/ 2).toInt();
+    final int airC = (19000 / binHz).ceil().clamp(airB + 1, fft ~/ 2).toInt();
+    for (int i = airA; i < airB; i++) {
+      airLo += acc[i];
     }
-    m /= 6;
-    final out = List<double>.filled(10, 0);
-    for (int i = 0; i < 10; i++) {
-      final d = lv[i] - _target[i] - m;
-      double c = -0.5 * d;
-      if ((i >= 8 || i == 0) && d < -12) c = 0; // banda vacía: no se realza
-      double hiLim = 3.0;
-      if (i == 0) hiLim = 1.0;
-      if (i == 8) hiLim = 2.0;
-      if (i == 9) hiLim = 0.0;
-      c = c.clamp(-3.0, hiLim).toDouble();
-      out[i] = (c * 10).round() / 10;
+    for (int i = airB; i < airC; i++) {
+      airHi += acc[i];
     }
+    final double airDb = 10 * log((airHi + 1e-12) / (airLo + 1e-12)) / ln10;
+    final out = bandCorrection(lv, airDb: airDb);
     return AdaptiveProfile(out, (level * 100).round() / 100);
   }
 
