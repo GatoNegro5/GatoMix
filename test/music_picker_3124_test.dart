@@ -18,8 +18,10 @@ Directory _tree() {
     'gatomix_picker_3124_',
   );
   void put(String rel, List<int> bytes) {
-    File('${root.path}${Platform.pathSeparator}'
-        '${rel.replaceAll('/', Platform.pathSeparator)}')
+    File(
+        '${root.path}${Platform.pathSeparator}'
+        '${rel.replaceAll('/', Platform.pathSeparator)}',
+      )
       ..createSync(recursive: true)
       ..writeAsBytesSync(bytes);
   }
@@ -154,17 +156,14 @@ void main() {
     final Zone real = Zone.root;
     await IOOverrides.runZoned(
       () async {
-        // Re-render, busqueda y cambio de pestana con la carpeta ya cargada.
+        // Re-render y busqueda con la carpeta ya cargada (3.1.38: sin
+        // pestanas).
         tester.element(find.byType(MusicPickerScreen)).markNeedsBuild();
         await tester.pump();
         await tester.enterText(find.byType(TextField), 'sal');
         await tester.pump();
         expect(find.text('A'), findsOneWidget);
         await tester.enterText(find.byType(TextField), '');
-        await tester.pump();
-        await tester.tap(find.byTooltip('Canciones'));
-        await tester.pump();
-        await tester.tap(find.byTooltip('Carpetas'));
         await tester.pump();
         expect(calls, 0);
         probe.value = true;
@@ -193,49 +192,47 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('3124 Mezclar todo: 48 px, pistas de la subcarpeta, sin doble toque', (
-    WidgetTester tester,
-  ) async {
-    _landscape(tester);
-    final Directory root = _tree();
-    addTearDown(() => _cleanup(root));
-    final List<List<String>> mixed = <List<String>>[];
-    final Completer<void> done = Completer<void>();
+  testWidgets(
+    '3124 Mezclar todo: 48 px, pistas de la subcarpeta, sin doble toque',
+    (WidgetTester tester) async {
+      _landscape(tester);
+      final Directory root = _tree();
+      addTearDown(() => _cleanup(root));
+      final List<List<String>> mixed = <List<String>>[];
+      final Completer<void> done = Completer<void>();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: _picker(
-          root,
-          onMix: (List<File> files) {
-            mixed.add(<String>[for (final File f in files) _name(f.path)]);
-            return done.future;
-          },
+      await tester.pumpWidget(
+        MaterialApp(
+          home: _picker(
+            root,
+            onMix: (List<File> files) {
+              mixed.add(<String>[for (final File f in files) _name(f.path)]);
+              return done.future;
+            },
+          ),
         ),
-      ),
-    );
-    await _settle(tester);
-    final Finder salsaMix = find.descendant(
-      of: find.widgetWithText(InkWell, 'Salsa'),
-      matching: find.widgetWithText(TextButton, 'Mezclar todo'),
-    );
-    expect(tester.getSize(salsaMix).height, greaterThanOrEqualTo(48.0));
-    expect(
-      tester.getSize(find.byTooltip('Carpetas')).height,
-      greaterThanOrEqualTo(48.0),
-    );
+      );
+      await _settle(tester);
+      // 3.1.38: Mezclar todo vive en el crate activo de la cinta.
+      await tester.tap(find.text('Salsa'));
+      await _settle(tester);
+      final Finder salsaMix = find.widgetWithText(TextButton, 'Mezclar todo');
+      expect(salsaMix, findsOneWidget);
+      expect(tester.getSize(salsaMix).height, greaterThanOrEqualTo(48.0));
 
-    await tester.tap(salsaMix);
-    await tester.pump();
-    await tester.tap(salsaMix);
-    await tester.pump();
-    expect(mixed, <List<String>>[
-      <String>['A.mp3', 'B.mp3', 'C.m4a'],
-    ]);
-    done.complete();
-    await tester.pump();
-    await tester.tap(salsaMix);
-    await tester.pump();
-    expect(mixed, hasLength(2));
-    expect(tester.takeException(), isNull);
-  });
+      await tester.tap(salsaMix);
+      await tester.pump();
+      await tester.tap(salsaMix);
+      await tester.pump();
+      expect(mixed, <List<String>>[
+        <String>['A.mp3', 'B.mp3', 'C.m4a'],
+      ]);
+      done.complete();
+      await tester.pump();
+      await tester.tap(salsaMix);
+      await tester.pump();
+      expect(mixed, hasLength(2));
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

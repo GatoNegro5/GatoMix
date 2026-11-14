@@ -39,8 +39,16 @@ class _FakeSort extends TrackSortNotifier {
 }
 
 const List<String> _words = <String>[
-  'Alfa', 'Bravo', 'Charlie', 'Delta', 'Eco', 'Foxtrot', 'Golf', 'Hotel',
-  'India', 'Julieta',
+  'Alfa',
+  'Bravo',
+  'Charlie',
+  'Delta',
+  'Eco',
+  'Foxtrot',
+  'Golf',
+  'Hotel',
+  'India',
+  'Julieta',
 ];
 
 final String _longFolder = 'Carpeta${'Larga' * 24}';
@@ -143,9 +151,7 @@ void main() {
         expect(find.byTooltip('Cerrar'), findsOneWidget);
         expect(tester.takeException(), isNull);
 
-        await tester.tap(find.byTooltip('Canciones'));
-        await _settle(tester);
-        // La lista es perezosa: se filtra para que la fila quede a la vista.
+        // 3.1.38: una sola vista; la lista es perezosa: se filtra para que la fila quede a la vista.
         await tester.enterText(find.byType(TextField), 'Tema Alfa');
         await _settle(tester);
         await tester.tap(
@@ -190,44 +196,35 @@ void main() {
       );
       await _settle(tester);
       expect(tester.takeException(), isNull);
+      // 3.1.38: la carpeta larga es un crate de la cinta horizontal.
       await tester.scrollUntilVisible(
         find.text(_longFolder),
         100,
         scrollable: find
             .descendant(
-              of: find.byType(CustomScrollView),
+              of: find.byKey(const ValueKey<String>('crate-strip')),
               matching: find.byType(Scrollable),
             )
             .first,
       );
-      // scrollUntilVisible solo garantiza que este construida (cacheExtent).
-      await tester.ensureVisible(find.text(_longFolder));
       await tester.pump();
       await tester.tap(find.text(_longFolder));
       await _settle(tester);
       expect(tester.takeException(), isNull);
-      await tester.tap(find.byTooltip('Canciones'));
-      await _settle(tester);
       expect(find.text('Interna'), findsOneWidget);
 
-      final double top = tester.getRect(find.byTooltip('Atr\u00e1s')).top;
-      for (final String tip in <String>[
-        'Atr\u00e1s',
-        'Carpetas',
-        'Canciones',
-        'Cerrar',
-      ]) {
-        final Rect r = tester.getRect(find.byTooltip(tip));
-        expect(r.height, moreOrLessEquals(48.0), reason: tip);
-        expect(r.width, moreOrLessEquals(48.0), reason: tip);
-        expect(r.top, moreOrLessEquals(top), reason: tip);
-      }
+      final Rect close = tester.getRect(find.byTooltip('Cerrar'));
+      expect(close.height, moreOrLessEquals(48.0));
+      expect(close.width, moreOrLessEquals(48.0));
+      final double top = close.top;
       final Rect field = tester.getRect(find.byType(TextField));
-      expect(field.width, greaterThanOrEqualTo(w - 8 - 4 * 48 - 0.5));
+      expect(field.width, greaterThanOrEqualTo(w - 8 - 48 - 0.5));
       expect(field.top, greaterThanOrEqualTo(top - 0.5));
       expect(field.bottom, lessThanOrEqualTo(top + 48.5));
-      expect(tester.getRect(find.byTooltip('Cerrar')).right,
-          lessThanOrEqualTo(800.0));
+      expect(
+        tester.getRect(find.byTooltip('Cerrar')).right,
+        lessThanOrEqualTo(800.0),
+      );
     });
   }
 
@@ -248,17 +245,14 @@ void main() {
       ),
     );
     await _settle(tester);
+    // 3.1.38: cinta de 56 px + canciones de 56 dp en la misma vista.
     final Rect view = tester.getRect(find.byType(CustomScrollView));
-    final double folderStep = tester.getRect(find.text('Carpeta Bravo')).top -
-        tester.getRect(find.text('Carpeta Alfa')).top;
-    expect(folderStep, moreOrLessEquals(56.0));
-    expect(view.height / folderStep, greaterThanOrEqualTo(4.5));
-
-    await tester.tap(find.byTooltip('Canciones'));
-    await _settle(tester);
     final Size row = tester.getSize(
       find
-          .ancestor(of: find.text('Pista Alfa'), matching: find.byType(SizedBox))
+          .ancestor(
+            of: find.text('Pista Alfa'),
+            matching: find.byType(SizedBox),
+          )
           .first,
     );
     expect(row.height, moreOrLessEquals(56.0));
@@ -318,11 +312,16 @@ void main() {
           ),
         );
         await tester.pump();
-        final Finder add = find.widgetWithText(TextButton, '+ Agregar canciones');
+        final Finder add = find.widgetWithText(
+          TextButton,
+          '+ Agregar canciones',
+        );
         expect(add, findsOneWidget);
         expect(tester.getSize(add).height, greaterThanOrEqualTo(48.0));
-        expect(tester.getRect(add).bottom,
-            lessThanOrEqualTo(tester.getRect(find.byType(AutomixPanel)).bottom));
+        expect(
+          tester.getRect(add).bottom,
+          lessThanOrEqualTo(tester.getRect(find.byType(AutomixPanel)).bottom),
+        );
         expect(tester.takeException(), isNull);
       },
     );

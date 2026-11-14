@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'package:flutter/material.dart';
 
 import '../../core/audio_path.dart';
+import '../../core/lan_sync_plan.dart';
 import '../../core/track_name_clean.dart';
 import '../../djiphone/iphone_library.dart';
 
@@ -302,6 +303,70 @@ File? musicPickerCover(File audio) {
   return null;
 }
 
+/// 3.1.38: carpetas tecnicas del selector (fuera del total de "Musica").
+/// Mismo conjunto que DESTINO de LAN Sync: Descargas, DjPlaylists y LAB.
+bool musicPickerTechFolder(String path) =>
+    lanHiddenDestFolders.contains(_pickerName(path).toLowerCase());
+
+String _pickerParent(String path) {
+  final int cut = path.lastIndexOf(Platform.pathSeparator);
+  return cut <= 0 ? path : path.substring(0, cut);
+}
+
+/// 3.1.38: crate de primer nivel bajo [root] que contiene [path]; null si
+/// [path] es la raiz o esta fuera.
+String? musicPickerTopCrate(String root, String path, String sep) {
+  if (path == root || !path.startsWith('$root$sep')) return null;
+  final String rel = path.substring(root.length + sep.length);
+  final int cut = rel.indexOf(sep);
+  return '$root$sep${cut < 0 ? rel : rel.substring(0, cut)}';
+}
+
+/// 3.1.38: orden de la cinta: "Musica" (raiz), ReGenial, generos con pistas,
+/// Descargas y al final las tecnicas (DjPlaylists, LAB); sin carpetas con 0
+/// canciones. Las subcarpetas de [parent] van justo despues de el (con
+/// conteo aun sin llegar se muestran; con 0 se ocultan).
+List<String> musicPickerCrates({
+  required String root,
+  required List<String> top,
+  required Map<String, int> counts,
+  String? parent,
+  List<String> subs = const <String>[],
+}) {
+  int rank(String p) {
+    final String n = _pickerName(p).toLowerCase();
+    if (n == 'regenial') return 0;
+    if (n == 'descargas') return 2;
+    if (musicPickerTechFolder(p)) return 3;
+    return 1;
+  }
+
+  final List<String> level =
+      top.where((String p) => (counts[p] ?? 0) > 0).toList()
+        ..sort((String a, String b) {
+          final int r = rank(a).compareTo(rank(b));
+          return r != 0 ? r : _pickerCompare(a, b);
+        });
+  final List<String> out = <String>[root];
+  for (final String p in level) {
+    out.add(p);
+    if (p == parent) {
+      out.addAll(subs.where((String s) => (counts[s] ?? 1) > 0));
+    }
+  }
+  return out;
+}
+
+/// 3.1.38: biblioteca limpia para el crate "Musica" (total y Mezclar todo):
+/// sin pistas dentro de Descargas, DjPlaylists ni LAB.
+List<File> musicPickerCleanLibrary(List<File> all, String root) {
+  final String sep = Platform.pathSeparator;
+  return all.where((File f) {
+    final String? top = musicPickerTopCrate(root, f.path, sep);
+    return top == null || f.path == top || !musicPickerTechFolder(top);
+  }).toList();
+}
+
 /// 3.1.25: ancho del panel lateral (45 % de la pantalla, 340..420 dp).
 double musicPickerPanelWidth(double screenWidth) =>
     (screenWidth * 0.45).clamp(340.0, 420.0).toDouble();
@@ -319,8 +384,7 @@ Future<void> showMusicPickerPanel(
     barrierLabel: 'Cerrar',
     barrierColor: const Color(0x66000000),
     transitionDuration: const Duration(milliseconds: 200),
-    pageBuilder:
-        (BuildContext ctx, Animation<double> _, Animation<double> _) {
+    pageBuilder: (BuildContext ctx, Animation<double> _, Animation<double> _) {
       final double width = musicPickerPanelWidth(MediaQuery.sizeOf(ctx).width);
       return Align(
         alignment: Alignment.centerRight,
@@ -346,14 +410,17 @@ Future<void> showMusicPickerPanel(
           Animation<double> _,
           Widget panel,
         ) {
-      return SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(1, 0),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic)),
-        child: panel,
-      );
-    },
+          return SlideTransition(
+            position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
+                .animate(
+                  CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeOutCubic,
+                  ),
+                ),
+            child: panel,
+          );
+        },
   );
 }
 
@@ -418,9 +485,9 @@ class _PickerFolder {
 }
 
 class _MusicPickerScreenState extends State<MusicPickerScreen> {
+  // 3.1.38: carpeta (crate) activa; la raiz es el crate "Musica".
   late String _current;
   final TextEditingController _search = TextEditingController();
-  int _tab = 0;
 
   // 3.1.24: todo lo que lee disco corre en Isolate y build() solo lee estos
   // mapas en memoria. _loadEpoch descarta respuestas de una carpeta que ya se
@@ -448,11 +515,6 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     super.dispose();
   }
 
-  bool get _atRoot {
-    final String root = widget.rootPath;
-    return _current == root || !_current.startsWith(root);
-  }
-
   void _absorb(Map<String, String?> covers, Set<String> lrc) {
     covers.forEach((String song, String? cover) {
       _covers[song] = cover == null ? null : File(cover);
@@ -460,9 +522,21 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     _lrc.addAll(lrc);
   }
 
+  /// 3.1.38: crate de primer nivel que contiene a [_current] (null en raiz).
+  String? get _parentCrate =>
+      musicPickerTopCrate(widget.rootPath, _current, Platform.pathSeparator);
+
+  /// 3.1.38: carga el crate activo y, si es una subcarpeta, tambien su crate
+  /// padre (para las subcarpetas de la cinta), con el mismo epoch.
   void _load() {
     final int epoch = ++_loadEpoch;
-    final String path = _current;
+    final String? parent = _parentCrate;
+    for (final String path in <String>{widget.rootPath, ?parent, _current}) {
+      _loadPath(path, epoch);
+    }
+  }
+
+  void _loadPath(String path, int epoch) {
     if (!_folders.containsKey(path)) {
       musicPickerReadFolderAsync(path).then(
         (MusicPickerListing data) {
@@ -488,7 +562,9 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
           if (!mounted || epoch != _loadEpoch) return;
           setState(() {
             _scanned.add(path);
-            _deep[path] = <File>[for (final String song in scan.all) File(song)];
+            _deep[path] = <File>[
+              for (final String song in scan.all) File(song),
+            ];
             scan.byFolder.forEach((String folder, List<String> songs) {
               _deep[folder] = <File>[
                 for (final String song in songs) File(song),
@@ -529,14 +605,28 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     );
   }
 
+  /// 3.1.38: pistas de un crate; en "Musica" la biblioteca limpia (sin
+  /// Descargas, DjPlaylists ni LAB). null mientras el escaneo no llega.
+  List<File>? _crateSongs(String path) {
+    final List<File>? deep = _deep[path];
+    if (deep == null) return null;
+    if (path != widget.rootPath) return deep;
+    return musicPickerCleanLibrary(deep, widget.rootPath);
+  }
+
   /// Usa la lista ya leida; si aun no llego, la lee en Isolate. Un segundo
   /// toque mientras resuelve se ignora (sin doble toque).
   Future<void> _mix(String path) async {
     if (_mixing.contains(path)) return;
     setState(() => _mixing.add(path));
     try {
-      final List<File> files =
-          _deep[path] ?? await musicPickerSongsUnderAsync(path);
+      List<File>? files = _crateSongs(path);
+      if (files == null) {
+        final List<File> read = await musicPickerSongsUnderAsync(path);
+        files = path == widget.rootPath
+            ? musicPickerCleanLibrary(read, widget.rootPath)
+            : read;
+      }
       if (!mounted) return;
       await widget.onMixFolder(List<File>.of(files));
     } finally {
@@ -544,81 +634,51 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
     }
   }
 
-  void _up() {
-    final String root = widget.rootPath;
-    String parent = Directory(_current).parent.path;
-    if (parent != root && !parent.startsWith(root)) parent = root;
-    setState(() {
-      _current = parent;
-      _tab = 0;
-    });
+  void _selectCrate(String path) {
+    if (path == _current) return;
+    setState(() => _current = path);
     _load();
   }
 
-  void _openFolder(String path) {
-    setState(() {
-      _current = path;
-      _tab = 1;
-      _search.clear();
-    });
-    _load();
-  }
+  int? _crateCount(String path) =>
+      path == widget.rootPath ? _crateSongs(path)?.length : _counts[path];
 
   @override
   Widget build(BuildContext context) {
+    final String root = widget.rootPath;
     final String query = _search.text.trim().toLowerCase();
-    final _PickerFolder? folder = _folders[_current];
-    final bool readable = folder?.readable ?? true;
-    final List<String> folders = <String>[];
-    final List<File> songs = <File>[];
-    if (folder != null) {
-      for (final String path in folder.folders) {
-        if (query.isEmpty || _pickerName(path).toLowerCase().contains(query)) {
-          folders.add(path);
-        }
-      }
-      for (final File song in folder.songs) {
-        if (query.isEmpty ||
-            _pickerName(song.path).toLowerCase().contains(query)) {
-          songs.add(song);
-        }
-      }
-    }
-
-    final bool showFolders = _tab == 0 && query.isEmpty;
-    bool pending = folder == null;
-    if (readable && (query.isNotEmpty || (_atRoot && _tab == 1))) {
-      final List<File>? deep = _deep[_current];
-      songs.clear();
-      if (deep == null) {
-        pending = true;
-      } else {
-        songs.addAll(musicPickerFilterSongs(deep, _current, query));
-      }
-    }
-    final String here = _atRoot ? 'Música' : _pickerName(_current);
+    final _PickerFolder? rootFolder = _folders[root];
+    final bool readable = rootFolder?.readable ?? true;
+    final String? parent = _parentCrate;
+    final List<String> crates = musicPickerCrates(
+      root: root,
+      top: rootFolder?.folders ?? const <String>[],
+      counts: _counts,
+      parent: parent,
+      subs: parent == null
+          ? const <String>[]
+          : (_folders[parent]?.folders ?? const <String>[]),
+    );
+    final List<File>? crateSongs = _crateSongs(_current);
+    final bool pending = rootFolder == null || crateSongs == null;
+    final List<File> songs = crateSongs == null
+        ? const <File>[]
+        : musicPickerFilterSongs(crateSongs, _current, query);
+    final String here = _current == root
+        ? 'M\u00fasica'
+        : _pickerName(_current);
 
     return Scaffold(
       backgroundColor: _bg,
       body: Column(
         children: <Widget>[
-          // 3.1.25: una sola barra de 48 px (Atras, buscador, pestanas,
-          // Cerrar); la carpeta actual va en el hint del buscador.
+          // 3.1.38: barra de 48 px (buscador y Cerrar); sin pestanas.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: SizedBox(
               height: 48,
               child: Row(
                 children: <Widget>[
-                  if (!_atRoot)
-                    IconButton(
-                      tooltip: 'Atrás',
-                      onPressed: _up,
-                      style: IconButton.styleFrom(
-                        minimumSize: const Size(48, 48),
-                      ),
-                      icon: const Icon(Icons.arrow_back, color: _text),
-                    ),
                   Expanded(
                     child: TextField(
                       controller: _search,
@@ -650,13 +710,9 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
                           vertical: 10,
                         ),
                       ),
-                      onChanged: (String v) => setState(() {
-                        if (v.trim().isNotEmpty) _tab = 1;
-                      }),
+                      onChanged: (String _) => setState(() {}),
                     ),
                   ),
-                  _tabButton(Icons.folder, 'Carpetas', 0),
-                  _tabButton(Icons.music_note, 'Canciones', 1),
                   if (widget.onClose != null)
                     IconButton(
                       tooltip: 'Cerrar',
@@ -670,126 +726,150 @@ class _MusicPickerScreenState extends State<MusicPickerScreen> {
               ),
             ),
           ),
+          // 3.1.38: cinta horizontal de crates (56 px).
+          SizedBox(
+            height: 56,
+            child: ListView.builder(
+              key: const ValueKey<String>('crate-strip'),
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              itemCount: crates.length,
+              itemBuilder: (BuildContext context, int index) =>
+                  _crateChip(crates[index], parent),
+            ),
+          ),
           Expanded(
             child: CustomScrollView(
               controller: widget.scrollController,
               slivers: <Widget>[
-              if (!readable)
-                const SliverFillRemaining(
-                  hasScrollBody: false,
-                  child: Center(
-                    child: Text(
-                      'No se pudo leer la carpeta de música',
-                      style: _metaStyle,
-                    ),
-                  ),
-                )
-              else if (pending)
-                const SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Center(child: CircularProgressIndicator(color: _muted)),
-                  ),
-                )
-              else if (showFolders)
-                SliverList(
-                  delegate: SliverChildBuilderDelegate((
-                    BuildContext context,
-                    int index,
-                  ) {
-                    final String path = folders[index];
-                    final int? n = _counts[path];
-                    final bool mixing = _mixing.contains(path);
-                    // 3.1.25: fila de 56 dp (antes 72 dp).
-                    return Material(
-                      color: _bg,
-                      child: InkWell(
-                        onTap: () => _openFolder(path),
-                        child: SizedBox(
-                          height: 56,
-                          child: Row(
-                            children: <Widget>[
-                              const SizedBox(width: 12),
-                              const Icon(Icons.folder, color: _text, size: 28),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: <Widget>[
-                                    Text(
-                                      _pickerName(path),
-                                      style: _titleStyle,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    Text(
-                                      n == null ? '...' : '$n canciones',
-                                      style: _metaStyle,
-                                      maxLines: 1,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              TextButton(
-                                style: TextButton.styleFrom(
-                                  // Gris mientras resuelve; el boton sigue tomando
-                                  // el toque para que no abra la carpeta por debajo.
-                                  foregroundColor: mixing ? _muted : _text,
-                                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                                  minimumSize: const Size(48, 48),
-                                ),
-                                onPressed: () => _mix(path),
-                                child: const Text('Mezclar todo', maxLines: 1),
-                              ),
-                              const SizedBox(width: 4),
-                            ],
-                          ),
-                        ),
+                if (!readable)
+                  const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
+                      child: Text(
+                        'No se pudo leer la carpeta de m\u00fasica',
+                        style: _metaStyle,
                       ),
-                    );
-                  }, childCount: folders.length),
-                )
-              else
-                SliverList(
-                  delegate: SliverChildBuilderDelegate((
-                    BuildContext context,
-                    int index,
-                  ) {
-                    final File song = songs[index];
-                    return _SongRow(
-                      file: song,
-                      cover: _covers[song.path],
-                      lrc: _lrc.contains(song.path),
-                      onTap: () => _enqueue(song),
-                      onPlayNext: () => widget.onPlayNext(song),
-                    );
-                  }, childCount: songs.length),
-                ),
-              // Espacio para que el aviso "Agregada a la cola" no tape la última
-              // canción.
-              const SliverToBoxAdapter(child: SizedBox(height: 72)),
-            ],
+                    ),
+                  )
+                else if (pending)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(
+                        child: CircularProgressIndicator(color: _muted),
+                      ),
+                    ),
+                  )
+                else
+                  SliverList(
+                    delegate: SliverChildBuilderDelegate((
+                      BuildContext context,
+                      int index,
+                    ) {
+                      final File song = songs[index];
+                      return _SongRow(
+                        file: song,
+                        cover: _covers[song.path],
+                        lrc: _lrc.contains(song.path),
+                        onTap: () => _enqueue(song),
+                        onPlayNext: () => widget.onPlayNext(song),
+                      );
+                    }, childCount: songs.length),
+                  ),
+                // Espacio para que el aviso "Agregada a la cola" no tape la
+                // ultima cancion.
+                const SliverToBoxAdapter(child: SizedBox(height: 72)),
+              ],
+            ),
           ),
-        ),
-      ],
-    ),
+        ],
+      ),
     );
   }
 
-  /// 3.1.25: pestana de 48x48 con icono; el tooltip da el nombre (y la
-  /// semantica) para no robarle ancho al buscador.
-  Widget _tabButton(IconData icon, String label, int index) {
-    final bool selected = _tab == index;
-    return IconButton(
-      tooltip: label,
-      isSelected: selected,
-      onPressed: () => setState(() => _tab = index),
-      style: IconButton.styleFrom(
-        backgroundColor: selected ? _card : Colors.transparent,
-        minimumSize: const Size(48, 48),
+  /// 3.1.38: crate de la cinta: nombre + "N canciones"; el activo trae
+  /// "Mezclar todo" (48 px, toma el toque aunque este resolviendo).
+  Widget _crateChip(String path, String? parent) {
+    final bool active = path == _current;
+    final bool isRoot = path == widget.rootPath;
+    final bool isSub =
+        !isRoot &&
+        parent != null &&
+        path != parent &&
+        _pickerParent(path) == parent;
+    final int? n = _crateCount(path);
+    final bool mixing = _mixing.contains(path);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+      child: Material(
+        color: active ? _card : _bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: active ? _text : const Color(0xFF333333)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _selectCrate(path),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 260),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                const SizedBox(width: 10),
+                Icon(
+                  isRoot
+                      ? Icons.library_music
+                      : (isSub ? Icons.subdirectory_arrow_right : Icons.album),
+                  color: active ? _text : _muted,
+                  size: 18,
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        isRoot ? 'M\u00fasica' : _pickerName(path),
+                        style: TextStyle(
+                          color: active ? _text : _muted,
+                          fontSize: 14,
+                          fontWeight: active
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        n == null ? '...' : '$n canciones',
+                        style: const TextStyle(color: _muted, fontSize: 12),
+                        maxLines: 1,
+                      ),
+                    ],
+                  ),
+                ),
+                if (active)
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      // Gris mientras resuelve; el boton sigue tomando el
+                      // toque para que no cambie de crate por debajo.
+                      foregroundColor: mixing ? _muted : _text,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(48, 48),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () => _mix(path),
+                    child: const Text('Mezclar todo', maxLines: 1),
+                  )
+                else
+                  const SizedBox(width: 10),
+              ],
+            ),
+          ),
+        ),
       ),
-      icon: Icon(icon, color: selected ? _text : _muted),
     );
   }
 }

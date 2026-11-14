@@ -64,8 +64,9 @@ void main() {
         await _settle(tester);
         expect(tester.takeException(), isNull);
         expect(find.text('Buscar en M\u00fasica'), findsOneWidget);
-        expect(find.byTooltip('Carpetas'), findsOneWidget);
-        expect(find.byTooltip('Canciones'), findsOneWidget);
+        // 3.1.38: una sola vista (cinta de crates + canciones), sin pestanas.
+        expect(find.byTooltip('Carpetas'), findsNothing);
+        expect(find.byTooltip('Canciones'), findsNothing);
         expect(find.textContaining('toca para ver'), findsNothing);
         expect(find.text('▶ Mezclar'), findsNothing);
         expect(find.textContaining('_K'), findsNothing);
@@ -75,26 +76,21 @@ void main() {
 
         await tester.tap(find.text('Mezclar todo'));
         await tester.pump();
-        expect(mixed, <int>[1]);
+        expect(mixed, hasLength(1));
         expect(tester.takeException(), isNull);
 
+        await tester.ensureVisible(find.text(folderName));
+        await tester.pump();
         await tester.tap(find.text(folderName));
         await _settle(tester);
-        expect(find.byIcon(Icons.arrow_back), findsOneWidget);
         expect(find.text('Interna'), findsOneWidget);
+        expect(find.text('Cancion'), findsNothing);
         expect(tester.takeException(), isNull);
 
-        await tester.tap(find.byIcon(Icons.arrow_back));
+        await tester.ensureVisible(find.text('M\u00fasica'));
+        await tester.pump();
+        await tester.tap(find.text('M\u00fasica'));
         await _settle(tester);
-        expect(find.byTooltip('Carpetas'), findsOneWidget);
-
-        await tester.tap(find.byTooltip('Canciones'));
-        await tester.pump();
-        // 3.0.48: en la raíz la lista es recursiva y se calcula async.
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 500)),
-        );
-        await tester.pump();
         expect(tester.takeException(), isNull);
         expect(find.textContaining('_K'), findsNothing);
         expect(find.text('🎤'), findsOneWidget);
