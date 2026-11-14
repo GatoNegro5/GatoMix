@@ -137,10 +137,13 @@ jobs:
         env:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/gatomix-release.jks"
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/gatomix-release.jks" >> "$GITHUB_ENV"
+          # 3.1.35: sin llave el APK no se publica (antes salia firmado en debug).
+          if [ -z "$KS_B64" ]; then
+            echo "::error::Falta el secreto ANDROID_KEYSTORE_BASE64: el APK no se firma en debug."
+            exit 1
           fi
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/gatomix-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/gatomix-release.jks" >> "$GITHUB_ENV"
 
       - name: Build Platform
         shell: bash
@@ -152,7 +155,8 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           if [ "${{ matrix.target }}" = "apk" ]; then
-            flutter build apk --release --build-name="${GITHUB_REF_NAME#v}" --build-number=$((100 + ${{ github.run_number }}))
+            # 3.1.35: versionCode = build de pubspec.yaml (M*10000+m*100+p).
+            flutter build apk --release --build-name="${GITHUB_REF_NAME#v}"
           else
             ${{ matrix.build_cmd }} --build-name="${GITHUB_REF_NAME#v}"
           fi
@@ -226,8 +230,25 @@ jobs:
           channel: stable
           flutter-version: '3.47.4'
 
+      # 3.1.35: misma llave fija que la app (actualiza encima sin desinstalar).
+      - name: Prepare Android signing key (TV)
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::Falta el secreto ANDROID_KEYSTORE_BASE64: el APK TV no se firma en debug."
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/gatomix-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/gatomix-release.jks" >> "$GITHUB_ENV"
+
       - name: Build TV APK
         working-directory: gatomix_tv
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           flutter pub get
           flutter build apk --release

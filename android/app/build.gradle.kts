@@ -61,6 +61,11 @@ android {
         !storePassword.isNullOrBlank() &&
         !keyAlias.isNullOrBlank() &&
         !keyPassword.isNullOrBlank()
+    // 3.1.35: en CI (GitHub pone CI=true) nunca se firma en debug: cada runner
+    // trae otro debug.keystore y el celular rechaza la actualizacion.
+    if (!hasReleaseKey && System.getenv("CI") == "true") {
+        throw GradleException("CI sin llave de firma Android (ANDROID_KEYSTORE_*): no se firma en debug.")
+    }
 
     signingConfigs {
         if (hasReleaseKey) {
