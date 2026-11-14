@@ -393,12 +393,14 @@ class AutomixNotifier extends Notifier<AutomixState> {
     _mix.end();
   }
 
-  Future<void> _dropPhase() async {
+  /// 3.1.30: devuelve la base con la que quedo la entrante (o null).
+  Future<double?> _dropPhase() async {
     final PhaseLockSession? phase = _phaseLock;
     _phaseLock = null;
-    if (phase == null) return;
+    if (phase == null) return null;
     await phase.finish();
     phase.logLater(djTrace);
+    return phase.matchedRate;
   }
 
   bool _deckPlaying(Player Function() read) {
@@ -1729,9 +1731,12 @@ class AutomixNotifier extends Notifier<AutomixState> {
     } catch (e) {
       debugPrint("🔴 [ERROR DSP AUTOMIX]: $e");
     } finally {
-      await _dropPhase();
+      final double? matched = await _dropPhase();
       // B arrancó en el punto medio. La vuelta a su BPM la hace TempoDrift.
-      _drift.begin(_extractBpm(state.currentTrackPath), incomingRate);
+      _drift.begin(
+        _extractBpm(state.currentTrackPath),
+        matched ?? incomingRate,
+      );
       final String? blocked = _drift.takeBlockedReport();
       if (blocked != null) djTrace('MIDPOINT FUERA $blocked');
 

@@ -699,12 +699,14 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     _mix.end();
   }
 
-  Future<void> _dropPhase() async {
+  /// 3.1.30: devuelve la base con la que quedo la entrante (o null).
+  Future<double?> _dropPhase() async {
     final PhaseLockSession? phase = _phaseLock;
     _phaseLock = null;
-    if (phase == null) return;
+    if (phase == null) return null;
     await phase.finish();
     phase.logLater(_djTrace);
+    return phase.matchedRate;
   }
 
   bool _deckPlaying(Player Function() read) {
@@ -3390,9 +3392,9 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (e) {
       debugPrint("🔴 [ERROR DSP]: $e");
     } finally {
-      await _dropPhase();
+      final double? matched = await _dropPhase();
       // B arrancó en el punto medio. Los pasos de vuelta los aplica TempoDrift.
-      _drift.begin(_incomingNatBpm, incomingRate);
+      _drift.begin(_incomingNatBpm, matched ?? incomingRate);
       final String? blocked = _drift.takeBlockedReport();
       if (blocked != null) _djTrace('MIDPOINT FUERA $blocked');
 

@@ -160,11 +160,45 @@ PhaseCorrection phaseCorrectionPlan({
   );
 }
 
+/// 3.1.30: desvio maximo de la base frente al rate de la rampa. Mas alla, la
+/// rejilla no es de fiar y se vuelve a [rampRate].
+const double tempoMatchMaxDeviation = 0.04;
+
+/// Rate de la entrante que iguala el tempo que se oye en la saliente
+/// (`outBpm * outRateVivo`) con la rejilla real de la entrante. Una rejilla
+/// al doble o a la mitad se lleva a la misma octava. Entradas no validas o un
+/// resultado a mas de 4 % de [rampRate]: devuelve [rampRate].
+double tempoMatchRate(
+  double outBpm,
+  double outRateVivo,
+  double inBpm,
+  double rampRate,
+) {
+  bool ok(double v) => v.isFinite && v > 0;
+  if (!ok(outBpm) || !ok(outRateVivo) || !ok(inBpm) || !ok(rampRate)) {
+    return rampRate;
+  }
+  final double raw = outBpm * outRateVivo / inBpm;
+  double best = raw;
+  for (final double c in <double>[raw * 2, raw / 2]) {
+    if ((c - rampRate).abs() < (best - rampRate).abs()) best = c;
+  }
+  if ((best - rampRate).abs() / rampRate > tempoMatchMaxDeviation) {
+    return rampRate;
+  }
+  return best;
+}
+
 String phaseTraceLine({
   required double? initialMs,
   required double? finalMs,
   required double latencyMs,
   required int steps,
+  double? outBpm,
+  double? inBpm,
+  double? outRate,
+  double? inRate,
+  double? base,
 }) {
   String ms(double? v) {
     if (v == null || v.isNaN) return 'na';
@@ -173,8 +207,21 @@ String phaseTraceLine({
   }
 
   final String latency = latencyMs.toStringAsFixed(1);
-  return 'PHASE inicial=${ms(initialMs)} final=${ms(finalMs)} '
-      'latencia=${latency == '-0.0' ? '0.0' : latency} pasos=$steps';
+  final StringBuffer out = StringBuffer(
+    'PHASE inicial=${ms(initialMs)} final=${ms(finalMs)} '
+    'latencia=${latency == '-0.0' ? '0.0' : latency} pasos=$steps',
+  );
+  void add(String key, double? v, int digits) {
+    if (v == null || v.isNaN || v.isInfinite) return;
+    out.write(' $key=${v.toStringAsFixed(digits)}');
+  }
+
+  add('outBpm', outBpm, 2);
+  add('inBpm', inBpm, 2);
+  add('outRate', outRate, 4);
+  add('inRate', inRate, 4);
+  add('base', base, 4);
+  return out.toString();
 }
 
 /// Promedio móvil de la latencia de arranque. Sin tope: un intento que no
@@ -404,6 +451,12 @@ class PhaseLockSession {
   double? finalMs;
   int steps = 0;
 
+  /// 3.1.30: ultima base limpia (tempo igualado, sin el nudge de fase). El
+  /// lazo la deja asentada al cerrar y el provider la pasa a TempoDrift.
+  late double matchedRate = rampRate;
+  double? lastOutRate;
+  double? lastInRate;
+
   final DeckClock _outClock = DeckClock();
   final DeckClock _inClock = DeckClock();
   MixRunClock? _clock;
@@ -447,6 +500,11 @@ class PhaseLockSession {
     finalMs: finalMs,
     latencyMs: latencyMs,
     steps: steps,
+    outBpm: outBpm,
+    inBpm: inBpm,
+    outRate: lastOutRate,
+    inRate: lastInRate,
+    base: matchedRate,
   );
 
   Future<void> _loop() async {
@@ -460,7 +518,7 @@ class PhaseLockSession {
       if (hold.epoch == _epoch) await _sample(apply: false);
     } finally {
       try {
-        await incoming.setRate(rampRate);
+        await incoming.setRate(matchedRate);
       } catch (_) {}
     }
   }
@@ -485,9 +543,15 @@ class PhaseLockSession {
     );
     initialMs ??= offset;
     finalMs = offset;
+    // 3.1.30: la base se recalcula en cada muestra con el rate vivo de la
+    // saliente; el +-1 % de fase va encima de ella, no del rate del nombre.
+    final double base = tempoMatchRate(outBpm, outRate, inBpm, rampRate);
+    matchedRate = base;
+    lastOutRate = outRate;
+    lastInRate = inRate;
     final PhaseCorrection plan = phaseCorrectionPlan(
       offsetMs: offset,
-      rampRate: rampRate,
+      rampRate: base,
     );
     if (!plan.settled) steps++;
     if (!apply || hold.paused) return;
