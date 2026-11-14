@@ -16,6 +16,7 @@ import '../core/vocal_bounds.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/mix_pause.dart';
+import '../core/audio/playback_owner.dart';
 import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
 import '../core/dj_trace.dart';
@@ -218,6 +219,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
     _attachListeners(_playerA);
     _initPersistence();
+    attachPlaybackExclusion();
 
     globalAudioHandler.onPlayPause = () => togglePlayPause();
     globalAudioHandler.onNext = () => _osStep(1);
@@ -298,6 +300,50 @@ class AutomixNotifier extends Notifier<AutomixState> {
   }
 
   Future<void> persistSession() => _saveSnapshot();
+
+  /// 3.1.28: un solo motor suena a la vez (Automix o Live DJ). Si el otro
+  /// motor toma la reproduccion, este pausa ambos decks (tambien a mitad de
+  /// un cruce) y retiene la mezcla para reanudarla con su propio Play.
+  void attachPlaybackExclusion() {
+    final PlaybackOwner owner = ref.read(playbackOwnerProvider);
+    owner.register(PlaybackEngine.automix, yieldPlayback);
+    ref.onDispose(
+      () => owner.unregister(PlaybackEngine.automix, yieldPlayback),
+    );
+  }
+
+  Future<void> _claimPlayback() async {
+    try {
+      await ref.read(playbackOwnerProvider).claim(PlaybackEngine.automix);
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<void> claimPlaybackForTest() => _claimPlayback();
+
+  @visibleForTesting
+  int yieldedToOtherEngine = 0;
+
+  /// El otro motor reclamo: pausa como una interrupcion, pero sin la marca
+  /// de sistema (al terminar una llamada este motor no revive).
+  Future<bool> yieldPlayback() async {
+    final bool mixRunning = _mix.armed && !_mix.paused;
+    if (!state.isPlaying && !mixRunning) return false;
+    _pausedByInterruption = false;
+    _cancelOutroProbe();
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    yieldedToOtherEngine++;
+    _saveSnapshot();
+    return true;
+  }
 
   bool _pausedByInterruption = false;
 
@@ -1241,6 +1287,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     List<String> newPlaylist,
     int startIndex,
   ) async {
+    await _claimPlayback();
     // Las pistas _K de Karaoke nunca suenan en Automix (solo TV).
     // Dos grafías de la misma ruta cuentan como una.
     if (startIndex >= 0 && startIndex < newPlaylist.length) {
@@ -1395,6 +1442,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     if (index < 0 || index >= state.playlist.length) return;
     if (_isCrossfading && _deckHot) return;
     if (state.currentIndex == index && state.isPlaying && _deckHot) return;
+    await _claimPlayback();
 
     if (!_deckHot) {
       final String coldTrack = state.playlist[index];
@@ -2104,6 +2152,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
 
   Future<void> togglePlayPause() async {
     if (_mix.armed) {
+      if (_mix.paused) await _claimPlayback();
       await _toggleMixHold();
       return;
     }
@@ -2116,6 +2165,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
     final bool deckEmpty = _activeAutomix.state.duration.inMilliseconds <= 0;
     if (deckEmpty) {
       if (!File(path).existsSync()) return;
+      await _claimPlayback();
       try {
         final int resumeMs = _sessionPositionMs > 0
             ? _sessionPositionMs
@@ -2142,6 +2192,7 @@ class AutomixNotifier extends Notifier<AutomixState> {
         state.position.inMilliseconds < state.customCueInMs) {
       await _activeAutomix.seek(Duration(milliseconds: state.customCueInMs));
     }
+    await _claimPlayback();
     _mix.resumeAll();
     await _activeAutomix.play();
     unawaited(_planVariableMixWindow());

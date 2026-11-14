@@ -27,6 +27,7 @@ import '../core/session_restore.dart';
 import '../core/session_store.dart';
 import '../core/audio/af_caps.dart';
 import '../core/audio/mix_pause.dart';
+import '../core/audio/playback_owner.dart';
 import '../core/audio/phase_lock.dart';
 import '../core/audio/tempo_drift.dart';
 import '../core/dj_trace.dart';
@@ -244,6 +245,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     _attachListeners(_playerA);
     _initPersistence();
+    attachPlaybackExclusion();
 
     // TIPO DE MEZCLA persistente: cada cambio de fórmula baja a disco.
     ref.listen<MixFormula>(mixFormulaProvider, (previous, next) {
@@ -606,6 +608,49 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   }
 
   Future<void> persistSession() => _saveSnapshot();
+
+  /// 3.1.28: un solo motor suena a la vez (Automix o Live DJ). Si el otro
+  /// motor toma la reproduccion, este pausa ambos decks (tambien a mitad de
+  /// un cruce) y retiene la mezcla para reanudarla con su propio Play.
+  void attachPlaybackExclusion() {
+    final PlaybackOwner owner = ref.read(playbackOwnerProvider);
+    owner.register(PlaybackEngine.liveDj, yieldPlayback);
+    ref.onDispose(
+      () => owner.unregister(PlaybackEngine.liveDj, yieldPlayback),
+    );
+  }
+
+  Future<void> _claimPlayback() async {
+    try {
+      await ref.read(playbackOwnerProvider).claim(PlaybackEngine.liveDj);
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<void> claimPlaybackForTest() => _claimPlayback();
+
+  @visibleForTesting
+  int yieldedToOtherEngine = 0;
+
+  /// El otro motor reclamo: pausa como una interrupcion, pero sin la marca
+  /// de sistema (al terminar una llamada este motor no revive).
+  Future<bool> yieldPlayback() async {
+    final bool mixRunning = _mix.armed && !_mix.paused;
+    if (!state.isPlaying && !mixRunning) return false;
+    _pausedByInterruption = false;
+    if (_mix.armed) _captureDecks();
+    final String? line = _mix.pauseAll();
+    if (line != null) _djTrace(line);
+    try {
+      await _playerA.pause();
+    } catch (_) {}
+    try {
+      await _playerB.pause();
+    } catch (_) {}
+    yieldedToOtherEngine++;
+    _saveSnapshot();
+    return true;
+  }
 
   bool _pausedByInterruption = false;
 
@@ -1699,6 +1744,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
   Future<void> togglePlayPause() async {
     if (_mix.armed) {
+      if (_mix.paused) await _claimPlayback();
       await _toggleMixHold();
       return;
     }
@@ -1727,6 +1773,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         return;
       }
       try {
+        await _claimPlayback();
         _drift.begin(_extractBpm(path), 1.0);
         try {
           await _activePlayer.setRate(1.0);
@@ -1744,6 +1791,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
     final bool playingNow = _deckPlaying(() => _activePlayer);
     if (playingNow) _mix.pauseAll();
+    if (!playingNow) await _claimPlayback();
     await _activePlayer.playOrPause();
     if (!playingNow) _mix.resumeAll();
     if (!state.isPlaying) _saveSnapshot();
@@ -1761,6 +1809,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       await _stopWhenNoNext();
       return;
     }
+    await _claimPlayback();
     await _triggerCrossfade(
       forceJit: true,
       isManualSkip: true,

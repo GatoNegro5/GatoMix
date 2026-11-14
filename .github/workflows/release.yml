@@ -84,6 +84,7 @@ jobs:
       - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          workspaces: rust
           shared-key: "gatomix-rust-${{ matrix.os }}"
 
       # 🛠️ INYECCIÓN 2: Descarga Binaria Precompilada (0 minutos de delay)
@@ -91,7 +92,7 @@ jobs:
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install Flutter Rust Bridge Codegen Fast
-        run: cargo binstall flutter_rust_bridge_codegen@2.12.0 --no-confirm
+        run: cargo binstall flutter_rust_bridge_codegen@2.12.0 cargo-expand --no-confirm
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -101,6 +102,13 @@ jobs:
 
       - name: Install Dependencies
         run: flutter pub get
+
+      # 3.1.28: ort-sys 2.0.0-rc.10 copia onnxruntime a target/debug/examples
+      # y deps sin crearlas (build.rs:126); con target vacio Windows fallaba.
+      - name: Prepare Rust target dirs (Windows Only)
+        if: matrix.target == 'windows'
+        shell: bash
+        run: mkdir -p rust/target/debug/examples rust/target/debug/deps
 
       # 🛠️ INYECCIÓN 3: Generar Memoria FFI (Evita el Linker Error en iOS/Mac/Android)
       - name: Generate FFI Bindings
@@ -255,13 +263,14 @@ jobs:
       - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          workspaces: rust
           shared-key: gatomix-rust-ios-ipa
 
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install Flutter Rust Bridge Codegen Fast
-        run: cargo binstall flutter_rust_bridge_codegen@2.12.0 --no-confirm
+        run: cargo binstall flutter_rust_bridge_codegen@2.12.0 cargo-expand --no-confirm
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
