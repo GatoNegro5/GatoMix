@@ -89,8 +89,7 @@ bool lanPassiveSweepAllowed({
   required bool visible,
   required bool mobile,
   required bool serverUp,
-}) =>
-    mounted && sweeping && visible && (!mobile || serverUp);
+}) => mounted && sweeping && visible && (!mobile || serverUp);
 
 int lanUploadHttpStatus({
   required bool mobile,
@@ -128,23 +127,14 @@ double lanTransferProgress({
   return 1;
 }
 
-List<String> orderRemoteFolders(List<String> folders, {required bool mobile}) {
-  final List<String> sorted = <String>[...folders]..sort(
-    (String a, String b) => a.toLowerCase().compareTo(b.toLowerCase()),
-  );
-  if (!mobile) return sorted;
-  final List<String> rest = sorted
-      .where((String f) => f != lanMusicRootToken && f.isNotEmpty)
-      .toList();
-  return <String>[lanMusicRootToken, ...rest];
-}
+/// 3.1.36: igual en las 4 plataformas ([mobile] ya no cambia nada): la
+/// carpeta referencia de musica primero, sin carpetas auxiliares.
+List<String> orderRemoteFolders(List<String> folders, {required bool mobile}) =>
+    lanDestFolders(folders, lanMusicRootToken);
 
-String? defaultRemoteSelection(List<String> folders, {required bool mobile}) {
-  if (mobile) return lanMusicRootToken;
-  if (folders.isEmpty) return null;
-  final List<String> sorted = orderRemoteFolders(folders, mobile: false);
-  return sorted.first;
-}
+/// 3.1.36: siempre la carpeta referencia de musica del receptor.
+String? defaultRemoteSelection(List<String> folders, {required bool mobile}) =>
+    lanMusicRootToken;
 
 String lanRemoteLabel(String path) {
   if (path == lanMusicRootToken) return lanMusicRootLabel;
@@ -152,9 +142,8 @@ String lanRemoteLabel(String path) {
 }
 
 List<String> withMusicRootFirst(List<String> visible, {required bool mobile}) {
-  if (!mobile) return visible;
   final List<String> rest = visible
-      .where((String p) => p != lanMusicRootToken)
+      .where((String p) => p != lanMusicRootToken && !lanIsHiddenDest(p))
       .toList();
   return <String>[lanMusicRootToken, ...rest];
 }
@@ -543,7 +532,8 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       final entities = dir.listSync(recursive: false, followLinks: false);
       for (var e in entities) {
         if (e is File) {
-          if (lanSyncable(e.path) && (_sendKaraoke || !lanIsKaraokeMp3(e.path))) {
+          if (lanSyncable(e.path) &&
+              (_sendKaraoke || !lanIsKaraokeMp3(e.path))) {
             result.add(e);
           }
         } else if (e is Directory) {
@@ -582,19 +572,16 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         type: InternetAddressType.IPv4,
       );
       // 3.1.05: escritorio y movil eligen la IP igual (prefiere Wi-Fi).
-      final String? ip = pickLanIpv4(
-        <({String name, List<String> addresses})>[
-          for (final NetworkInterface interface in interfaces)
-            (
-              name: interface.name,
-              addresses: <String>[
-                for (final InternetAddress address in interface.addresses)
-                  address.address,
-              ],
-            ),
-        ],
-        preferWlan: true,
-      );
+      final String? ip = pickLanIpv4(<({String name, List<String> addresses})>[
+        for (final NetworkInterface interface in interfaces)
+          (
+            name: interface.name,
+            addresses: <String>[
+              for (final InternetAddress address in interface.addresses)
+                address.address,
+            ],
+          ),
+      ], preferWlan: true);
       if (ip != null) _localIp = ip;
 
       _server = await HttpServer.bind(InternetAddress.anyIPv4, _restPort);
@@ -703,6 +690,12 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       }
 
       if (request.method == 'GET' && path == '/api/download') {
+        if (lanUnsafeRel(query['file'] ?? '')) {
+          request.response
+            ..statusCode = 400
+            ..close();
+          return;
+        }
         final targetPath = _resolvePath(query['file'] ?? '');
         final file = File(targetPath);
         if (file.existsSync()) {
@@ -739,8 +732,25 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         }
         var writeFailed = false;
         Object? writeError;
-        final targetDir = _resolvePath(query['dir'] ?? 'ROOT');
         final relFolder = query['rel'] ?? '';
+        // 3.1.36: sin `..`; en Windows/Mac nunca se escribe en Musica/ReGenial.
+        final String wantRel =
+            '${lanStripRoot(query['dir'] ?? 'ROOT')}/$relFolder';
+        if (lanUnsafeRel(query['dir'] ?? 'ROOT') || lanUnsafeRel(relFolder)) {
+          request.response
+            ..statusCode = 400
+            ..write('ruta invalida')
+            ..close();
+          return;
+        }
+        if (!lanMobile && lanUnderReGenial(wantRel)) {
+          request.response
+            ..statusCode = 403
+            ..write('ReGenial es de solo lectura')
+            ..close();
+          return;
+        }
+        final targetDir = _resolvePath(query['dir'] ?? 'ROOT');
 
         String finalDirPath = targetDir;
         if (relFolder.isNotEmpty) {
@@ -860,7 +870,24 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       }
 
       if (request.method == 'DELETE' && path == '/api/delete') {
-        final targetPath = _resolvePath(query['target'] ?? '');
+        final String target = query['target'] ?? '';
+        // 3.1.36: sin `..` ni raiz; en Windows/Mac nunca dentro de ReGenial.
+        final bool mobileRx = Platform.isAndroid || Platform.isIOS;
+        if (lanUnsafeRel(target) || lanStripRoot(target).isEmpty) {
+          request.response
+            ..statusCode = 400
+            ..write('ruta invalida')
+            ..close();
+          return;
+        }
+        if (!mobileRx && lanUnderReGenial(target)) {
+          request.response
+            ..statusCode = 403
+            ..write('ReGenial es de solo lectura')
+            ..close();
+          return;
+        }
+        final targetPath = _resolvePath(target);
         final type = query['type'];
 
         if (type == 'file') {
@@ -880,12 +907,27 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       }
 
       if (request.method == 'DELETE' && path == '/api/wipe') {
-        final baseMusicPath = _getBaseMusicPath();
-        final rootDir = Directory(baseMusicPath);
-
-        if (rootDir.existsSync()) {
-          rootDir.deleteSync(recursive: true);
-          rootDir.createSync(recursive: true);
+        // 3.1.36: WIPE nunca en Windows/Mac. En el celular borra solo
+        // Musica/<carpeta clonada>; DjPlaylists, Descargas, LAB y
+        // .gatomix.json quedan siempre. Sin `folder` valido no borra nada.
+        if (!(Platform.isAndroid || Platform.isIOS)) {
+          request.response
+            ..statusCode = 403
+            ..write('WIPE solo en celular')
+            ..close();
+          return;
+        }
+        final String? wipeRel = lanWipeTarget(query['folder']);
+        if (wipeRel == null) {
+          request.response
+            ..statusCode = 400
+            ..write('carpeta a reemplazar invalida')
+            ..close();
+          return;
+        }
+        final Directory wipeDir = Directory(_resolvePath(wipeRel));
+        if (wipeDir.existsSync()) {
+          wipeDir.deleteSync(recursive: true);
         }
 
         request.response
@@ -1206,14 +1248,14 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
   Future<void> _passiveSweepLoop(String subnet) async {
     while (_passiveOk) {
       _radarSpin(true);
-        // 3.1.05: primero el ultimo equipo que respondio (400 ms).
-        final String? lastPeer = _lanLastPeerIp;
-        if (lastPeer != null && lastPeer != _localIp) {
-          await _probeDeviceHttp(
-            lastPeer,
-            timeout: const Duration(milliseconds: 400),
-          );
-        }
+      // 3.1.05: primero el ultimo equipo que respondio (400 ms).
+      final String? lastPeer = _lanLastPeerIp;
+      if (lastPeer != null && lastPeer != _localIp) {
+        await _probeDeviceHttp(
+          lastPeer,
+          timeout: const Duration(milliseconds: 400),
+        );
+      }
       for (int i = 1; i <= 254; i += 50) {
         if (!_passiveOk) break; // 3.1.21: salir de la pestana corta el barrido
         List<Future<void>> batch = [];
@@ -1523,8 +1565,16 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
     });
 
     try {
+      // 3.1.36: solo la carpeta que se clona, en su ruta espejo.
+      final String sel = _selectedLocalPath ?? '';
+      final String wipeFolder =
+          lanRelUnder(_getBaseMusicPath(), sel) ?? lanBaseName(sel);
       final response = await http
-          .delete(Uri.parse('http://$_selectedDeviceIp:$_restPort/api/wipe'))
+          .delete(
+            Uri.parse(
+              'http://$_selectedDeviceIp:$_restPort/api/wipe?folder=${Uri.encodeComponent(wipeFolder)}',
+            ),
+          )
           .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
@@ -1612,9 +1662,6 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
       setState(() => _totalFiles = files.length);
 
       final localBaseDirPath = Directory(_selectedLocalPath!).path;
-      final rootFolderName = localBaseDirPath
-          .split(Platform.pathSeparator)
-          .last;
 
       final http.Client lanClient = http.Client(); // 3.1.05: Keep-Alive
       final Stopwatch lanWatch = Stopwatch()..start();
@@ -1626,18 +1673,12 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
 
         String relativeFolder = '';
         if (isDirectoryClone) {
-          String relPath = file.path.replaceFirst(localBaseDirPath, '');
-          if (relPath.startsWith(Platform.pathSeparator)) {
-            relPath = relPath.substring(1);
-          }
-          int lastSeparator = relPath.lastIndexOf(Platform.pathSeparator);
-          if (lastSeparator != -1) {
-            relativeFolder = relPath.substring(0, lastSeparator);
-          }
-
-          relativeFolder = relativeFolder.isEmpty
-              ? rootFolderName
-              : '$rootFolderName${Platform.pathSeparator}$relativeFolder';
+          // 3.1.36: estructura espejo desde la raiz de Musica local.
+          relativeFolder = lanMirrorFolder(
+            musicBase: _getBaseMusicPath(),
+            selectedPath: localBaseDirPath,
+            filePath: file.path,
+          );
         }
 
         setState(() {
@@ -1651,7 +1692,11 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
         if (lanRemoteHas(_currentRemoteFiles, fileName)) {
           if (!_overwriteExisting &&
               !isLrc &&
-              lanAlreadyThere(_currentRemoteFiles, fileName, file.lengthSync())) {
+              lanAlreadyThere(
+                _currentRemoteFiles,
+                fileName,
+                file.lengthSync(),
+              )) {
             setState(() {
               _currentLog = "⏩ SALTADO (Ya existe): $fileName";
               if (_lanMobile) {
@@ -1691,7 +1736,9 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
               request.files.add(
                 await http.MultipartFile.fromPath('file', file.path),
               );
-              final http.StreamedResponse response = await lanClient.send(request);
+              final http.StreamedResponse response = await lanClient.send(
+                request,
+              );
               final int status = response.statusCode;
               await response.stream.drain<void>();
               return status;
@@ -1935,7 +1982,10 @@ class _LanSyncWorkspaceState extends ConsumerState<LanSyncWorkspace>
             )
           : 1.0;
       _isTransferring = false;
-      _lanFinalRed = lanFinalIsRed(mobile: _lanMobile, failed: _failedTransfers);
+      _lanFinalRed = lanFinalIsRed(
+        mobile: _lanMobile,
+        failed: _failedTransfers,
+      );
       _currentLog = lanFinalLog(
         mobile: _lanMobile,
         copied: _successfulTransfers,

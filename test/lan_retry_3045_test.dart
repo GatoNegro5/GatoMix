@@ -1,22 +1,100 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gatomix/core/lan_sync_plan.dart';
 import 'package:gatomix/ui/workspaces/lan_sync_workspace.dart';
 
 void main() {
-  test('móvil: raíz Música primero; escritorio sigue alfabético', () {
-    final List<String> folders = <String>['Rock', 'Descargas'];
-    final List<String> mobile = orderRemoteFolders(folders, mobile: true);
-    expect(mobile.first, lanMusicRootToken);
-    expect(lanRemoteLabel(mobile.first), 'Música (raíz)');
+  test(
+    '3.1.36 DESTINO: raiz de Musica primero en las 4 plataformas, sin auxiliares',
+    () {
+      final List<String> folders = <String>[
+        'Rock',
+        'Descargas',
+        'DjPlaylists',
+        'DjPlaylists/2026',
+        'djstudio_LAB',
+        'GatoMix_LAB',
+        'GatoMix_LAB/x',
+        'ReGenial',
+        'ReGenial/Salsa',
+      ];
+      for (final bool m in <bool>[true, false]) {
+        final List<String> d = orderRemoteFolders(folders, mobile: m);
+        expect(d, <String>[
+          lanMusicRootToken,
+          'ReGenial',
+          'ReGenial/Salsa',
+          'Rock',
+        ]);
+        expect(defaultRemoteSelection(folders, mobile: m), lanMusicRootToken);
+        expect(
+          defaultRemoteSelection(<String>[], mobile: m),
+          lanMusicRootToken,
+        );
+        expect(
+          withMusicRootFirst(<String>['Descargas', 'Rock'], mobile: m),
+          <String>[lanMusicRootToken, 'Rock'],
+        );
+      }
+      expect(lanRemoteLabel(lanMusicRootToken), 'Música (raíz)');
+    },
+  );
+
+  test('3.1.36 espejo desde la raiz de Musica (Windows y movil)', () {
     expect(
-      defaultRemoteSelection(folders, mobile: true),
-      lanMusicRootToken,
+      lanMirrorFolder(
+        musicBase: r'C:\Users\ASUS\Music',
+        selectedPath: r'C:\Users\ASUS\Music\ReGenial\Salsa',
+        filePath: r'C:\Users\ASUS\Music\ReGenial\Salsa\a.mp3',
+      ),
+      'ReGenial/Salsa',
     );
-    final List<String> desktop = orderRemoteFolders(folders, mobile: false);
-    expect(desktop.first, 'Descargas');
-    expect(defaultRemoteSelection(folders, mobile: false), 'Descargas');
-    expect(defaultRemoteSelection(<String>[], mobile: false), isNull);
+    expect(
+      lanMirrorFolder(
+        musicBase: r'C:\Users\ASUS\Music',
+        selectedPath: r'C:\Users\ASUS\Music\ReGenial',
+        filePath: r'C:\Users\ASUS\Music\ReGenial\Merengue\b.mp3',
+      ),
+      'ReGenial/Merengue',
+    );
+    expect(
+      lanMirrorFolder(
+        musicBase: '/storage/emulated/0/Music',
+        selectedPath: '/storage/emulated/0/Music/ReGenial',
+        filePath: '/storage/emulated/0/Music/ReGenial/c.mp3',
+      ),
+      'ReGenial',
+    );
+    expect(
+      lanMirrorFolder(
+        musicBase: r'C:\Users\ASUS\Music',
+        selectedPath: r'D:\Mixes',
+        filePath: r'D:\Mixes\Live\d.mp3',
+      ),
+      'Mixes/Live',
+    );
+  });
+
+  test('3.1.36 blindaje: .., ReGenial y WIPE solo de la carpeta clonada', () {
+    expect(lanUnsafeRel('ROOT/../Windows'), isTrue);
+    expect(lanUnsafeRel(r'ReGenial\..\..\x'), isTrue);
+    expect(lanUnsafeRel('/etc'), isTrue);
+    expect(lanUnsafeRel(r'C:\x'), isTrue);
+    expect(lanUnsafeRel('ROOT/ReGenial/Salsa'), isFalse);
+    expect(lanUnderReGenial('ROOT/regenial/Salsa/a.mp3'), isTrue);
+    expect(lanUnderReGenial('/ReGenial/Salsa'), isTrue);
+    expect(lanUnderReGenial('ROOT/Rock'), isFalse);
+    expect(lanWipeTarget('ReGenial'), 'ReGenial');
+    expect(lanWipeTarget('ROOT/ReGenial/Salsa'), 'ReGenial/Salsa');
+    expect(lanWipeTarget(null), isNull);
+    expect(lanWipeTarget(''), isNull);
+    expect(lanWipeTarget('ROOT'), isNull);
+    expect(lanWipeTarget('DjPlaylists'), isNull);
+    expect(lanWipeTarget('Descargas/x'), isNull);
+    expect(lanWipeTarget('GatoMix_LAB'), isNull);
+    expect(lanWipeTarget('../x'), isNull);
+    expect(lanWipeTarget('.gatomix.json'), isNull);
   });
 
   test('contadores separados y códigos 403/500 solo en móvil', () {
