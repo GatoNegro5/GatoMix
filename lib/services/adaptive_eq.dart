@@ -42,7 +42,11 @@ List<LevelGlideStep> levelGlidePlan(
     out.add(LevelGlideStep(0, lin(-deltaDb), true));
     for (int i = 1; i <= steps; i++) {
       out.add(
-        LevelGlideStep(dt * i, i == steps ? 1.0 : lin(-deltaDb * (1 - i / steps)), false),
+        LevelGlideStep(
+          dt * i,
+          i == steps ? 1.0 : lin(-deltaDb * (1 - i / steps)),
+          false,
+        ),
       );
     }
   }
@@ -56,18 +60,30 @@ class AdaptiveProfile {
 
   /// Ganancia de sonoridad (dB) para igualar el volumen entre canciones.
   final double levelDb;
-  const AdaptiveProfile(this.gains, this.levelDb);
 
-  Map<String, dynamic> toJson() => {'g': gains, 'l': levelDb};
+  /// 3.1.34: aire medido (dB, 16-19 kHz frente a 11-16 kHz). null = perfil
+  /// legado v2 (antes de 3.1.33): se usa al instante y se remide en cola.
+  final double? airDb;
+  const AdaptiveProfile(this.gains, this.levelDb, {this.airDb});
+
+  bool get isV3 => airDb != null;
+
+  Map<String, dynamic> toJson() => {
+    'g': gains,
+    'l': levelDb,
+    if (airDb != null) 'a': airDb,
+  };
 
   static AdaptiveProfile? fromJson(dynamic j) {
     if (j is! Map) return null;
     final g = j['g'];
     final l = j['l'];
     if (g is! List || g.length != 10 || l is! num) return null;
+    final a = j['a'];
     return AdaptiveProfile(
       g.map((e) => (e as num).toDouble()).toList(),
       l.toDouble(),
+      airDb: a is num ? a.toDouble() : null,
     );
   }
 }
@@ -381,16 +397,50 @@ class AdaptiveEq {
   /// Perfil de la canción desde caché o midiéndola (en cola, de a una).
   static Future<AdaptiveProfile?> profile(String path) {
     final k = _key(path);
-    if (_mem.containsKey(k)) return Future.value(_mem[k]);
+    if (_mem.containsKey(k)) {
+      final m = _mem[k];
+      if (m != null && !m.isV3) _upgrade(path, k, m);
+      return Future.value(m);
+    }
     _loadDisk();
     final c = AdaptiveProfile.fromJson(_disk![k]);
     if (c != null) {
       _mem[k] = c;
+      if (!c.isV3) _upgrade(path, k, c);
       return Future.value(c);
     }
-    return _pending[k] ??= _enqueue(() => _measure(path, k))
-        .whenComplete(() => _pending.remove(k));
+    return _pending[k] ??= _enqueue(
+      () => _measure(path, k),
+    ).whenComplete(() => _pending.remove(k));
   }
+
+  /// 3.1.34: migracion suave v2 -> v3. El perfil legado ya se entrego (sin
+  /// demora ni pista cruda); aqui se remide una vez por sesion en la misma
+  /// cola serie y `_measure` lo guarda con 'a' en `_adaptive_audio.json`.
+  /// Si la medida falla, queda el legado.
+  static final Map<String, Future<void>> _upgrades = {};
+
+  @visibleForTesting
+  static Future<AdaptiveProfile?> Function(String path, String k)? debugMeasure;
+
+  static void _upgrade(String path, String k, AdaptiveProfile legacy) {
+    if (!enabled || _upgrades.containsKey(k)) return;
+    _upgrades[k] = _enqueue(() => (debugMeasure ?? _measure)(path, k)).then((
+      p,
+    ) {
+      _mem[k] = (p != null && p.isV3) ? p : legacy;
+    });
+  }
+
+  /// Solo pruebas: espera la remedida v3 de [path] (si se encolo).
+  @visibleForTesting
+  static Future<void> debugUpgradeDone(String path) =>
+      _upgrades[_key(path)] ?? Future.value();
+
+  /// Solo pruebas: true si [path] tiene remedida v3 encolada o hecha.
+  @visibleForTesting
+  static bool debugUpgradeQueued(String path) =>
+      _upgrades.containsKey(_key(path));
 
   /// 3.1.33 (Huecos A/B): mide y guarda el perfil de [path] en segundo plano
   /// (misma cola, `_mem`/`_pending` y `_adaptive_audio.json`), sin deck.
@@ -412,7 +462,8 @@ class AdaptiveEq {
 
   /// Solo pruebas: deja [p] en la cache de memoria de [path].
   @visibleForTesting
-  static void debugSeed(String path, AdaptiveProfile? p) => _mem[_key(path)] = p;
+  static void debugSeed(String path, AdaptiveProfile? p) =>
+      _mem[_key(path)] = p;
 
   static Future<AdaptiveProfile?> _enqueue(
     Future<AdaptiveProfile?> Function() job,
@@ -492,6 +543,7 @@ class AdaptiveEq {
               peakDb: 20 * log(peak) / ln10,
               lufsDone: lufsDone,
             ),
+            airDb: p.airDb,
           );
         }
       }
@@ -606,7 +658,9 @@ class AdaptiveEq {
       final a = v.abs();
       if (a > peak) peak = a;
     }
-    if (peak < 1e-4) return AdaptiveProfile(List<double>.filled(10, 0), 0);
+    if (peak < 1e-4) {
+      return AdaptiveProfile(List<double>.filled(10, 0), 0, airDb: -99.0);
+    }
 
     // ---- Sonoridad: K-weighting (coef. BS.1770 a 48 kHz, aprox. a 44.1)
     // y bloques de 400 ms con compuerta absoluta y relativa.
@@ -644,7 +698,9 @@ class AdaptiveEq {
       blocks.add(e / blk);
     }
     final abs = blocks.where((e) => e > 1.2e-7).toList(); // ~ -70 LUFS
-    if (abs.isEmpty) return AdaptiveProfile(List<double>.filled(10, 0), 0);
+    if (abs.isEmpty) {
+      return AdaptiveProfile(List<double>.filled(10, 0), 0, airDb: -99.0);
+    }
     final m1 = abs.reduce((a, c) => a + c) / abs.length;
     final rel = abs.where((e) => e > m1 * 0.1).toList(); // -10 LU
     final m2 =
@@ -680,7 +736,9 @@ class AdaptiveEq {
       }
       frames++;
     }
-    if (frames == 0) return AdaptiveProfile(List<double>.filled(10, 0), level);
+    if (frames == 0) {
+      return AdaptiveProfile(List<double>.filled(10, 0), level, airDb: -99.0);
+    }
     final binHz = _sr / fft;
     final lv = List<double>.filled(10, -120);
     for (int bI = 0; bI < 10; bI++) {
@@ -712,7 +770,11 @@ class AdaptiveEq {
     }
     final double airDb = 10 * log((airHi + 1e-12) / (airLo + 1e-12)) / ln10;
     final out = bandCorrection(lv, airDb: airDb);
-    return AdaptiveProfile(out, (level * 100).round() / 100);
+    return AdaptiveProfile(
+      out,
+      (level * 100).round() / 100,
+      airDb: airDb.isFinite ? (airDb * 100).round() / 100 : -99.0,
+    );
   }
 
   static void _fft(Float64List re, Float64List im) {

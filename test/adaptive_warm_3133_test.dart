@@ -72,28 +72,101 @@ void main() {
       expect(air[9], lessThanOrEqualTo(1.5));
       expect(air[9], greaterThanOrEqualTo(old[9]));
     }
-    expect(AdaptiveEq.bandCorrection(const [1, 2, 3]), List<double>.filled(10, 0));
+    expect(
+      AdaptiveEq.bandCorrection(const [1, 2, 3]),
+      List<double>.filled(10, 0),
+    );
   });
 
-  test('debugSeed: awaitProfile y prefetch resuelven < 50 ms sin decodificar',
-      () async {
-    final dir = await Directory.systemTemp.createTemp('gmx3133_');
-    final f = File('${dir.path}${Platform.pathSeparator}seed.mp3');
-    await f.writeAsBytes(List<int>.filled(64, 0));
-    try {
-      final p = AdaptiveProfile(List<double>.filled(10, 0.5), -2.5);
-      AdaptiveEq.debugSeed(f.path, p);
-      final sw = Stopwatch()..start();
-      await AdaptiveEq.awaitProfile(f.path);
-      await AdaptiveEq.prefetch(f.path);
-      final got = await AdaptiveEq.profile(f.path);
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThan(50));
-      expect(got?.levelDb, -2.5);
-    } finally {
-      await dir.delete(recursive: true);
-    }
+  test(
+    'debugSeed: awaitProfile y prefetch resuelven < 50 ms sin decodificar',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('gmx3133_');
+      final f = File('${dir.path}${Platform.pathSeparator}seed.mp3');
+      await f.writeAsBytes(List<int>.filled(64, 0));
+      try {
+        final p = AdaptiveProfile(
+          List<double>.filled(10, 0.5),
+          -2.5,
+          airDb: -8.0,
+        );
+        AdaptiveEq.debugSeed(f.path, p);
+        final sw = Stopwatch()..start();
+        await AdaptiveEq.awaitProfile(f.path);
+        await AdaptiveEq.prefetch(f.path);
+        final got = await AdaptiveEq.profile(f.path);
+        sw.stop();
+        expect(sw.elapsedMilliseconds, lessThan(50));
+        expect(got?.levelDb, -2.5);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    },
+  );
+
+  test('3.1.34 JSON: sin a es legado v2, con a es v3', () {
+    final v2 = AdaptiveProfile.fromJson({
+      'g': List<double>.filled(10, 0.2),
+      'l': -3.0,
+    });
+    expect(v2?.isV3, isFalse);
+    expect(v2?.toJson().containsKey('a'), isFalse);
+    final v3 = AdaptiveProfile.fromJson({
+      'g': List<double>.filled(10, 0.2),
+      'l': -3.0,
+      'a': -7.5,
+    });
+    expect(v3?.isV3, isTrue);
+    expect(v3?.airDb, -7.5);
+    expect(v3?.toJson()['a'], -7.5);
+    expect(AdaptiveProfile.fromJson(v3!.toJson())?.airDb, -7.5);
   });
+
+  test(
+    '3.1.34 legado v2: al instante, encola v3 y conserva si falla',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('gmx3134_');
+      final ok = File('${dir.path}${Platform.pathSeparator}v2ok.mp3');
+      final bad = File('${dir.path}${Platform.pathSeparator}v2bad.mp3');
+      await ok.writeAsBytes(List<int>.filled(64, 0));
+      await bad.writeAsBytes(List<int>.filled(65, 0));
+      final legacy = AdaptiveProfile(List<double>.filled(10, 0.5), -4.0);
+      try {
+        AdaptiveEq.debugMeasure = (path, k) async {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          if (path == bad.path) return null;
+          return AdaptiveProfile(
+            List<double>.filled(10, 0.5),
+            -4.1,
+            airDb: -6.0,
+          );
+        };
+        AdaptiveEq.debugSeed(ok.path, legacy);
+        AdaptiveEq.debugSeed(bad.path, legacy);
+        final sw = Stopwatch()..start();
+        await AdaptiveEq.awaitProfile(ok.path);
+        final first = await AdaptiveEq.profile(ok.path);
+        sw.stop();
+        expect(sw.elapsedMilliseconds, lessThan(50));
+        expect(first?.levelDb, -4.0);
+        expect(first?.isV3, isFalse);
+        expect(AdaptiveEq.debugUpgradeQueued(ok.path), isTrue);
+        await AdaptiveEq.prefetch(bad.path);
+        expect(AdaptiveEq.debugUpgradeQueued(bad.path), isTrue);
+        await AdaptiveEq.debugUpgradeDone(ok.path);
+        await AdaptiveEq.debugUpgradeDone(bad.path);
+        final up = await AdaptiveEq.profile(ok.path);
+        expect(up?.isV3, isTrue);
+        expect(up?.levelDb, -4.1);
+        final kept = await AdaptiveEq.profile(bad.path);
+        expect(kept?.isV3, isFalse);
+        expect(kept?.levelDb, -4.0);
+      } finally {
+        AdaptiveEq.debugMeasure = null;
+        await dir.delete(recursive: true);
+      }
+    },
+  );
 
   test('levelGlidePlan intacto', () {
     double lin(double db) => pow(10.0, db / 20.0).toDouble();
