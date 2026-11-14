@@ -227,6 +227,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
   Future<void> _phraseJobs = Future<void>.value();
   final Set<String> _phrasePending = <String>{};
   int _publishedFadeMs = 0;
+  // 3.1.31: entrada real con la que arranco cada pista (ventana 60-80 %).
+  final Map<String, int> _activeCueByPath = <String, int>{};
 
   late final PlatformMixStrategy _liveStrategy;
 
@@ -416,7 +418,24 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     } catch (_) {}
   }
 
+  /// 3.1.31: la entrada de la formula pasa por [activeCueInMs]: nunca antes
+  /// de max(lead, 10 %, 8 s) ni despues del 20 %, cuantizada a frase/compas/golpe.
   Future<int> _calculateSmartCueIn(String path, Player player) async {
+    final int raw = await _formulaCueIn(path, player);
+    final int durMs = _exactDurCache[path] ?? 0;
+    final PhraseTrack? grid = PhraseGridMemory.peek(path);
+    final double gridBpm = grid?.bpm ?? 0;
+    return activeCueInMs(
+      durationMs: durMs,
+      leadMs: TrackTags.peek(path)?.leadMs ?? 0,
+      bpm: gridBpm >= 60 ? gridBpm : _extractBpm(path),
+      gridMs: grid?.beatMs ?? 0,
+      preferMs: raw,
+      bypass: durMs > 0 && _isMixTrack(durMs),
+    );
+  }
+
+  Future<int> _formulaCueIn(String path, Player player) async {
     // La duración la mide Rust. El deck no decide el cue.
     final int durMs = _exactDurCache[path] ?? 0;
     if (durMs <= 0) {
@@ -480,6 +499,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       key =
           '$key|${PhraseGridMemory.stamp(path)}|${PhraseGridMemory.stamp(peer)}|$peer';
     }
+    key = '$key|${_activeCueByPath[path] ?? -1}';
     if (key == _mixOutCacheKey) return _mixOutCacheVal;
     final int v = _calculateRadioMixOutRaw(durationMs, path);
     _mixOutCacheKey = key;
@@ -487,7 +507,53 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     return v;
   }
 
+  /// 3.1.31: la salida de la formula queda como candidata dentro de la
+  /// ventana activa (tramo mixOut - cueIn entre 60 % y 80 % de la duracion
+  /// efectiva, con el fundido completo antes del final). Mix largo: igual.
   int _calculateRadioMixOutRaw(int durationMs, String? path) {
+    final int cand = _formulaMixOutRaw(durationMs, path);
+    if (durationMs <= 0 || _isMixTrack(durationMs)) return cand;
+    final int tailMs = TrackTags.peek(path)?.tailMs ?? 0;
+    final int effDurMs = (tailMs > 0 && tailMs < durationMs ~/ 3)
+        ? durationMs - tailMs
+        : durationMs;
+    final PhraseTrack? grid = PhraseGridMemory.peek(path);
+    final double gridBpm = grid?.bpm ?? 0;
+    final double bpm = gridBpm >= 60 ? gridBpm : _extractBpm(path);
+    final int g0 = grid?.beatMs ?? 0;
+    final int leadMs = TrackTags.peek(path)?.leadMs ?? 0;
+    final int cue = _activeCueByPath[path] ??
+        activeCueInMs(
+          durationMs: effDurMs,
+          leadMs: leadMs,
+          bpm: bpm,
+          gridMs: g0,
+        );
+    final MixPersonality look = mixPersonality(
+      ref.read(mixFormulaProvider),
+      bpm,
+      vocal: false,
+    );
+    final ActiveWindow w = activeWindow(
+      durationMs: effDurMs,
+      cueInMs: cue,
+      fadeMs: look.fadeMs,
+      candidateMs: cand,
+      bpm: bpm,
+      gridMs: g0,
+      cueMinMs: activeCueMinMs(durationMs: effDurMs, leadMs: leadMs),
+    );
+    final String tramo = effDurMs > 0
+        ? ((w.mixOutMs - w.cueInMs) * 100 / effDurMs).toStringAsFixed(1)
+        : '0';
+    _djTrace(
+      'VENTANA ${look.label} cue=${w.cueInMs} out=${w.mixOutMs} '
+      'cand=$cand fade=${w.fadeMs} tramo=$tramo%',
+    );
+    return w.mixOutMs;
+  }
+
+  int _formulaMixOutRaw(int durationMs, String? path) {
     if (_isMixTrack(durationMs)) {
       // Un Mix ya no se escucha hasta el final: la mezcla sale 30 s antes del
       // fin (sin el silencio final medido por el masterizado).
@@ -2967,6 +3033,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     trackDur = await _trueDuration(nextTrack, trackDur);
 
     final int cueInMs = await _calculateSmartCueIn(nextTrack, incomingPlayer);
+    if (_activeCueByPath.length > 64) _activeCueByPath.clear();
+    _activeCueByPath[nextTrack] = cueInMs;
     final int triggerMs = _calculateRadioMixOut(
       trackDur.inMilliseconds,
       nextTrack,
@@ -3149,26 +3217,29 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     final String? fadingPath = state.currentTrackPath;
     final int fadingMixOut = state.customMixOutMs;
     final int fadingDurMs = state.duration.inMilliseconds;
-    int? phraseFadeOverride;
-    if (!isManualSkip &&
-        nextMode != LiveDjMixMode.longBypass &&
-        ref.read(mixFormulaProvider) == MixFormula.phraseGrid) {
-      phraseFadeOverride = phraseGridFadeMs(
-        bpm: phraseSoundingBpm(
-          incomingBpm: incomingBpm,
-          incomingRate: incomingRate,
-        ),
-        instrumental: phraseCrossIsInstrumental(
+    bool crossVocal = true;
+    if (!isManualSkip && nextMode != LiveDjMixMode.longBypass) {
+      final MixFormula crossFormula = ref.read(mixFormulaProvider);
+      if (crossFormula == MixFormula.phraseGrid) {
+        crossVocal = !phraseCrossIsInstrumental(
           outgoing: PhraseGridMemory.peek(fadingPath),
           incoming: PhraseGridMemory.peek(nextTrack),
           outMs: fadingMixOut,
           inMs: cueInMs,
-        ),
-        durationMs: trackDur.inMilliseconds,
-      );
+        );
+      } else if (crossFormula == MixFormula.dnaEnergy) {
+        crossVocal = dnaPlan == null || dnaPlan.kind != DnaKind.longBlend;
+      }
     }
-    _publishedFadeMs = phraseFadeOverride ??
-        (dnaPlan != null && !dnaPlan.legacy ? dnaPlan.fadeMs : 0);
+    // 3.1.31: duracion, swap y curva propios de cada tipo de mezcla.
+    final MixPersonality crossLook = mixPersonality(
+      ref.read(mixFormulaProvider),
+      phraseSoundingBpm(incomingBpm: incomingBpm, incomingRate: incomingRate),
+      vocal: crossVocal,
+    );
+    _publishedFadeMs = isManualSkip || nextMode == LiveDjMixMode.longBypass
+        ? 0
+        : crossLook.fadeMs;
 
     final List<File> backfillBefore = state.queue;
     state = state.copyWith(
@@ -3197,9 +3268,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       manualMixDurationMs: isManualSkip
           ? _planManualMixDurationMs(nextTrack, trackDur.inMilliseconds)
           : null,
-      phraseFadeOverride: phraseFadeOverride,
+      personality: crossLook,
       dnaKind: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.kind,
-      dnaFadeMs: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.fadeMs,
       dnaBassSwap: dnaPlan == null || dnaPlan.legacy ? null : dnaPlan.bassSwap,
       dnaEchoDelayMs: dnaPlan?.echoDelayMs ?? 0,
       dnaEchoFeedback: dnaPlan?.echoFeedback ?? 0,
@@ -3260,9 +3330,8 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
     double incomingRate = 1.0,
     bool isManualSkip = false,
     int? manualMixDurationMs,
-    int? phraseFadeOverride,
+    MixPersonality? personality,
     DnaKind? dnaKind,
-    int? dnaFadeMs,
     bool? dnaBassSwap,
     int dnaEchoDelayMs = 0,
     double dnaEchoFeedback = 0,
@@ -3309,26 +3378,22 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
 
       await AdaptiveEq.setDeckVolume(incomingPlayer, 0.0);
 
-      final bool phraseNow =
-          ref.read(mixFormulaProvider) == MixFormula.phraseGrid;
-      final bool stealthNow =
-          ref.read(mixFormulaProvider) == MixFormula.stealthGap;
+      final double soundBpm = phraseSoundingBpm(
+        incomingBpm: _incomingNatBpm,
+        incomingRate: incomingRate,
+      );
+      final MixPersonality? look =
+          isManualSkip || mixProfile == LiveDjMixMode.longBypass
+          ? null
+          : (personality ??
+                mixPersonality(
+                  ref.read(mixFormulaProvider),
+                  soundBpm,
+                  vocal: true,
+                ));
       final fadeOutDurationMs = isManualSkip
           ? (manualMixDurationMs ?? 12000)
-          : (mixProfile == LiveDjMixMode.longBypass
-                ? 4000
-                : (dnaFadeMs ??
-                      (phraseNow && phraseFadeOverride != null
-                          ? phraseFadeOverride
-                          : (phraseNow || stealthNow
-                                ? phraseFadeMs(
-                                    incomingBpm: _extractBpm(
-                                      state.currentTrackPath,
-                                    ),
-                                    incomingDurationMs:
-                                        state.duration.inMilliseconds,
-                                  )
-                                : 18000))));
+          : (look?.fadeMs ?? 4000);
       final FittedFade fitted = fitMixFade(
         exactDurationMs: outgoingDurationMs,
         mixOutMs: outgoingMixOutMs,
@@ -3336,6 +3401,18 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
       );
       if (fitted.shortened) _djTrace(fitted.note);
       final int fadeMs = fitted.fadeMs;
+      // 3.1.31: un unico swap de graves/EQ por mezcla, en el punto del tipo
+      // (Corta golpe 5, Clasica 50 %, Larga 62,5 %), cuantizado al golpe/compas.
+      final double swapAt = look == null || fadeMs <= 0
+          ? 0.5
+          : (look.swapMs(fadeMs: fadeMs, bpm: soundBpm) / fadeMs)
+                .clamp(0.0, 1.0)
+                .toDouble();
+      final double seamEdge = look?.edge ?? 0;
+      _djTrace(
+        'SEAM ${look?.label ?? 'manual'} fade=${fadeMs}ms '
+        'swap=${(swapAt * 100).toStringAsFixed(1)}%',
+      );
       final int mixEpoch = _mix.epoch;
       final MixRunClock fadeClock = _mix.beginFade(fadeMs);
 
@@ -3349,11 +3426,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           1.0,
         );
 
-        // 🎛️ SUPER MEZCLA DAWN (Alta Energía / Cero Huecos Acústicos)
-        final smoothRateIn = dawnCrossfadeGain(progress);
-        final smoothRateOut = dawnCrossfadeGain(1.0 - progress);
+        // 3.1.31: costura de seda (seamGain) con ley cubica de mpv (seamVolume).
+        final double smoothRateIn = seamGain(progress, edge: seamEdge);
+        final double smoothRateOut = seamGain(1.0 - progress, edge: seamEdge);
 
-        if (useBassSwap && !bassSwapped && progress >= 0.5) {
+        if (useBassSwap && !bassSwapped && progress >= swapAt) {
           bassSwapped = true;
           platformOut?.setProperty(
             'af',
@@ -3367,7 +3444,7 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
           );
           AdaptiveEq.holdAf(incomingPlayer, null); // 3.1.21: swap hecho
           platformIn?.setProperty('af', inBase());
-        } else if (dnaOutMid != null && !bassSwapped && progress >= 0.5) {
+        } else if (dnaOutMid != null && !bassSwapped && progress >= swapAt) {
           bassSwapped = true;
           platformOut?.setProperty(
             'af',
@@ -3380,11 +3457,11 @@ class LiveDjNotifier extends Notifier<LiveDjState> {
         // 3.1.20: respeta la rampa de AdaptiveEq en curso.
         await AdaptiveEq.setDeckVolume(
           incomingPlayer,
-          (smoothRateIn * 100.0).clamp(0.0, 100.0),
+          seamVolume(smoothRateIn),
         );
         await AdaptiveEq.setDeckVolume(
           fadingPlayer,
-          (smoothRateOut * 100.0).clamp(0.0, 100.0),
+          seamVolume(smoothRateOut),
         );
 
         await _mix.slice(32, fadeClock);
