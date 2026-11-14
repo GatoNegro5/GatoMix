@@ -15,7 +15,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
       - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
@@ -76,8 +78,9 @@ jobs:
 
       # 🛠️ INYECCIÓN 1: Instalar Rust y los Targets Nativos por OS
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: ${{ matrix.rust_targets }}
 
       # 🛠️ INYECCIÓN 1.5: Caché Global de Rust (Evita recompilar crates nativos en cada push)
@@ -102,13 +105,6 @@ jobs:
 
       - name: Install Dependencies
         run: flutter pub get
-
-      # 3.1.28: ort-sys 2.0.0-rc.10 copia onnxruntime a target/debug/examples
-      # y deps sin crearlas (build.rs:126); con target vacio Windows fallaba.
-      - name: Prepare Rust target dirs (Windows Only)
-        if: matrix.target == 'windows'
-        shell: bash
-        run: mkdir -p rust/target/debug/examples rust/target/debug/deps
 
       # 🛠️ INYECCIÓN 3: Generar Memoria FFI (Evita el Linker Error en iOS/Mac/Android)
       - name: Generate FFI Bindings
@@ -256,8 +252,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: aarch64-apple-ios
 
       - name: Cache Rust Dependencies
