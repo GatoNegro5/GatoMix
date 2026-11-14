@@ -489,6 +489,7 @@ class _YoutubeSearchAndDownloadWorkspaceState
           inputPath: tempRawPath,
           outputPath: tempMp3Path,
           bitrateKbps: 320,
+          master: false,
         );
       } catch (e) {
         throw Exception("Fallo en el codificador MP3: $e");

@@ -4346,6 +4346,7 @@ trait RenderSink {
 
 /// K-weighting con la misma acumulacion que `pcm_lufs` (ventanas de 10 ms,
 /// mismo orden de suma); `lufs_of` al final. Sin LAME.
+#[flutter_rust_bridge::frb(ignore)]
 struct KAcc {
     s1l: Biquad,
     s2l: Biquad,
@@ -4396,6 +4397,7 @@ impl RenderSink for KAcc {
 }
 
 /// Lotes de 8192 hacia LAME, igual que `push_pair` de `encode_span`.
+#[flutter_rust_bridge::frb(ignore)]
 struct Mp3Batch {
     sink: Mp3Sink,
     batch: Vec<f32>,

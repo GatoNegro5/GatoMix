@@ -101,6 +101,7 @@ class _TrackRepairDialogState extends State<TrackRepairDialog> {
             inputPath: rawPath,
             outputPath: outPath,
             bitrateKbps: 320,
+            master: false,
           );
         } catch (_) {
           exitCode = 1;
